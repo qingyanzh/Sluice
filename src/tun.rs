@@ -107,8 +107,9 @@ pub async fn serve(dev: tun::AsyncDevice, mtu: u16, handle: Arc<RouterHandle>, f
             IpStackStream::Udp(udp) => {
                 let (router, fake) = (handle.current(), fake.clone());
                 tokio::spawn(async move {
+                    let (src, dst) = (udp.local_addr(), udp.peer_addr());
                     if let Err(e) = handle_udp(udp, router, fake).await {
-                        debug!("UDP: {e:#}");
+                        debug!("TUN UDP {src} -> {dst}: {e:#}");
                     }
                 });
             }

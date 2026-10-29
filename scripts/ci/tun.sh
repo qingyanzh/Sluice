@@ -83,8 +83,9 @@ run_case() {
 }
 
 # The test server runs on this machine, so its own outgoing traffic must bypass the TUN,
-# as a real remote server's would; otherwise it loops back into Sluice.
-ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U --outbound-bind-interface "$iface" > ci-logs/tun-ssserver.log 2>&1 &
+# as a real remote server's would; otherwise it loops back into Sluice. It also needs its
+# own DNS: the system resolver now answers with Sluice's fake IPs.
+ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U --outbound-bind-interface "$iface" --dns 8.8.8.8 > ci-logs/tun-ssserver.log 2>&1 &
 ss_pid=$!
 sleep 1
 sed 's/^loglevel = .*/loglevel = debug/' examples/tun-test.conf > "$work/tun-direct.conf"

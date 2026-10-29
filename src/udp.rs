@@ -61,11 +61,11 @@ pub async fn read_socks_addr<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result
     parse_socks_addr(&buf).map(|(t, _)| t).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad address"))
 }
 
-/// DIRECT: a connected socket on the egress interface.
+/// DIRECT: an unconnected socket on the egress interface. Replies are accepted from any
+/// source (full-cone), since anycast services such as NTP may answer from another address.
 pub async fn direct(target: &Target) -> Result<UdpPipe> {
     let addr = *resolve(&target.host_str(), target.port).await?.first().ok_or_else(|| anyhow!("{target}: no address"))?;
     let sock = udp_socket(&addr)?;
-    sock.connect(addr).await?;
     let (app, mut side) = pipe_pair();
     let label = target.to_string();
     tokio::spawn(async move {
@@ -75,13 +75,14 @@ pub async fn direct(target: &Target) -> Result<UdpPipe> {
             tokio::select! {
                 p = side.rx.recv() => match p {
                     Some(p) => {
-                        if let Err(e) = sock.send(&p).await { debug!("UDP direct {label} via {addr}: send: {e}"); }
+                        if let Err(e) = sock.send_to(&p, addr).await { debug!("UDP direct {label} via {addr}: send: {e}"); }
                         sent += 1;
                     }
                     None => break,
                 },
-                r = sock.recv(&mut buf) => match r {
-                    Ok(n) => {
+                r = sock.recv_from(&mut buf) => match r {
+                    Ok((n, from)) => {
+                        if received == 0 { debug!("UDP direct {label}: first reply from {from}"); }
                         received += 1;
                         if side.tx.send(buf[..n].to_vec()).await.is_err() { break }
                     }
