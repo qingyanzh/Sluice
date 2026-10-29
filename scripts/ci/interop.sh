@@ -14,6 +14,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$work/key.pem" -out "$work/ce
     -subj "/CN=test.local" -addext "subjectAltName=DNS:test.local" 2>/dev/null
 tls="\"security\":\"tls\",\"tlsSettings\":{\"certificates\":[{\"certificateFile\":\"$work/cert.pem\",\"keyFile\":\"$work/key.pem\"}]}"
 ws='"network":"ws","wsSettings":{"path":"/ray"}'
+grpc='"network":"grpc","grpcSettings":{"serviceName":"gun"}'
 cat > "$work/xray.json" <<EOF
 {"log":{"loglevel":"warning"},
 "inbounds":[
@@ -21,7 +22,9 @@ cat > "$work/xray.json" <<EOF
  {"listen":"127.0.0.1","port":19002,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"}},
  {"listen":"127.0.0.1","port":19003,"protocol":"trojan","settings":{"clients":[{"password":"tj"}]},"streamSettings":{$tls}},
  {"listen":"127.0.0.1","port":19004,"protocol":"vmess","settings":{"clients":[{"id":"$uuid"}]},"streamSettings":{$ws,$tls}},
- {"listen":"127.0.0.1","port":19005,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$ws}}],
+ {"listen":"127.0.0.1","port":19005,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$ws}},
+ {"listen":"127.0.0.1","port":19006,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$grpc,$tls}},
+ {"listen":"127.0.0.1","port":19007,"protocol":"vmess","settings":{"clients":[{"id":"$uuid"}]},"streamSettings":{$grpc}}],
 "outbounds":[{"protocol":"freedom"}]}
 EOF
 cat > "$work/hy.yaml" <<EOF
@@ -59,9 +62,11 @@ Trojan-TLS = trojan, 127.0.0.1, 19003, password=tj, sni=test.local, skip-cert-ve
 VMess-WS-TLS = vmess, 127.0.0.1, 19004, username=$uuid, tls=true, sni=test.local, skip-cert-verify=true, ws=true, ws-path=/ray
 VLESS-WS = vless, 127.0.0.1, 19005, uuid=$uuid, ws=true, ws-path=/ray
 Hysteria2 = hysteria2, 127.0.0.1, 19443, password=hy, sni=test.local, skip-cert-verify=true
+VLESS-gRPC-TLS = vless, 127.0.0.1, 19006, uuid=$uuid, tls=true, sni=test.local, skip-cert-verify=true, grpc=true, grpc-service-name=gun
+VMess-gRPC = vmess, 127.0.0.1, 19007, username=$uuid, grpc=true, grpc-service-name=gun
 Hy2-Obfs = hysteria2, 127.0.0.1, 19444, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret
 [Proxy Group]
-P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, Hysteria2, Hy2-Obfs
+P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, Hysteria2, Hy2-Obfs
 [Rule]
 FINAL,P
 EOF
@@ -77,7 +82,7 @@ for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:16170/v1/policies &
 
 fails=0
 printf '%-14s %-6s %-12s %s\n' NODE HTTPS DOWNLOAD UDP
-for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS Hysteria2 Hy2-Obfs; do
+for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC Hysteria2 Hy2-Obfs; do
     curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
     https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
     size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \

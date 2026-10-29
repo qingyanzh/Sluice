@@ -14,6 +14,7 @@ if [ "$1" = "after" ]; then
     check "Sluice has exited" "! pgrep -x sluice >/dev/null"
     check "TUN address removed" "! ifconfig | grep -q 'inet 198.18.0.1 '"
     check "scoped default route added by Sluice removed" "! netstat -rn -f inet | awk '\$1==\"default\" && \$3 ~ /I/' | grep -q ."
+    check "IPv6 split routes removed" "! netstat -rn -f inet6 | grep -E '^(::/1|8000::/1) ' | grep -q utun"
     check "split default routes removed" "! netstat -rn -f inet | grep -E '^(0/1|128.0/1) ' | grep -q utun"
     check "system DNS no longer 198.18.0.2" "! scutil --dns | grep -q 'nameserver\[[0-9]*\] : 198.18.0.2'"
     check "DNS backup file cleaned up" "[ ! -e /var/tmp/sluice-dns-backup ]"
@@ -31,6 +32,13 @@ check "system DNS points at 198.18.0.2" "scutil --dns | grep -q 'nameserver\[[0-
 ip=$(dig +short +time=3 +tries=1 example.com A | head -1)
 check "fake-IP answer for example.com" "[[ '$ip' == 198.18.* ]]" "got '$ip'"
 aaaa=$(dig +short +time=3 +tries=1 example.com AAAA | head -1)
+if route -n get -inet6 default > /dev/null 2>&1; then
+    check "IPv6 routes ::/1 and 8000::/1 via $utun" "[ \$(netstat -rn -f inet6 | grep -E '^(::/1|8000::/1) ' | grep -c '$utun') = 2 ]"
+    code6=$(curl -6 -s -m 10 -o /dev/null -w '%{http_code}' https://ipv6.google.com/)
+    check "HTTPS over IPv6 through the TUN" "[ '$code6' != 000 ]" "HTTP $code6"
+else
+    echo "SKIP  IPv6 checks (no IPv6 default route here)"
+fi
 check "AAAA answered empty (IPv4 only)" "[ -z '$aaaa' ]" "got '$aaaa'"
 mx=$(dig +short +time=3 +tries=1 gmail.com MX | head -1)
 check "other record types forwarded upstream (MX)" "[ -n '$mx' ]"

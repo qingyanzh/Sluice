@@ -130,6 +130,28 @@ pub struct SystemGuard {
     dns_backup: Vec<(String, Vec<String>)>,
     /// Interface we added an interface-scoped default route for, to remove on exit.
     scoped_default: Option<String>,
+    /// IPv6 counterparts, set when the machine has IPv6 and we capture it too.
+    routes6: Vec<String>,
+    scoped_default6: Option<String>,
+}
+
+/// Address given to the TUN for IPv6 (unique local, never routed off the machine).
+pub const TUN_ADDR6: &str = "fdfe:dcba:9876::1";
+
+fn default_gateway6() -> Option<String> {
+    let out = sh("route", &["-n", "get", "-inet6", "default"]).ok()?;
+    out.lines().find_map(|l| l.trim().strip_prefix("gateway:").map(|s| s.trim().to_string()))
+}
+
+/// Same as `ensure_scoped_default`, for IPv6.
+fn ensure_scoped_default6(iface: &str, gw: &str) -> Result<bool> {
+    let table = sh("netstat", &["-rn", "-f", "inet6"])?;
+    if has_scoped_default(&table, iface) {
+        return Ok(false);
+    }
+    sh("route", &["-n", "add", "-inet6", "-ifscope", iface, "-net", "default", gw])?;
+    info!("added IPv6 default route scoped to {iface}");
+    Ok(true)
 }
 
 fn default_gateway() -> Option<String> {
@@ -165,8 +187,14 @@ fn ensure_scoped_default(iface: &str) -> Result<bool> {
 
 impl SystemGuard {
     pub fn apply(tun: &str, fake_cidr: &str, dns_ip: &str, egress: &str) -> Result<Self> {
-        let mut guard =
-            SystemGuard { routes: Vec::new(), tun: tun.to_string(), dns_backup: Vec::new(), scoped_default: None };
+        let mut guard = SystemGuard {
+            routes: Vec::new(),
+            tun: tun.to_string(),
+            dns_backup: Vec::new(),
+            scoped_default: None,
+            routes6: Vec::new(),
+            scoped_default6: None,
+        };
         if ensure_scoped_default(egress)? {
             guard.scoped_default = Some(egress.to_string());
         }
@@ -174,6 +202,21 @@ impl SystemGuard {
         for net in ["0.0.0.0/1", "128.0.0.0/1", fake_cidr] {
             sh("route", &["-n", "add", "-net", net, "-interface", tun])?;
             guard.routes.push(net.to_string());
+        }
+        // IPv6 only if the machine has it; otherwise there's nothing to leak.
+        match default_gateway6() {
+            Some(gw6) => {
+                sh("ifconfig", &[tun, "inet6", TUN_ADDR6, "prefixlen", "64"])?;
+                if ensure_scoped_default6(egress, &gw6)? {
+                    guard.scoped_default6 = Some(egress.to_string());
+                }
+                for net in ["::/1", "8000::/1"] {
+                    sh("route", &["-n", "add", "-inet6", "-net", net, "-interface", tun])?;
+                    guard.routes6.push(net.to_string());
+                }
+                info!("IPv6 captured too (default via {gw6})");
+            }
+            None => info!("no IPv6 default route; capturing IPv4 only"),
         }
         let services = network_services()?;
         guard.dns_backup = services.iter().map(|s| (s.clone(), get_dns(s))).collect();
@@ -194,6 +237,12 @@ impl Drop for SystemGuard {
         }
         if let Some(iface) = &self.scoped_default {
             let _ = sh("route", &["-n", "delete", "-ifscope", iface, "-net", "default"]);
+        }
+        for net in &self.routes6 {
+            let _ = sh("route", &["-n", "delete", "-inet6", "-net", net, "-interface", &self.tun]);
+        }
+        if let Some(iface) = &self.scoped_default6 {
+            let _ = sh("route", &["-n", "delete", "-inet6", "-ifscope", iface, "-net", "default"]);
         }
         restore_dns(&self.dns_backup);
         info!("system routes and DNS restored");

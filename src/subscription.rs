@@ -12,7 +12,7 @@ use log::{info, warn};
 use crate::api::percent_decode;
 use crate::config::{parse_proxy, Config, ProxyDef};
 use crate::ruleset::fetch;
-use crate::transport::WsOpts;
+use crate::transport::{Layer, WsOpts};
 
 fn b64(s: &str) -> Option<Vec<u8>> {
     use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -67,13 +67,16 @@ fn truthy(v: Option<&String>) -> bool {
 }
 
 /// `type=ws` plus `path`/`host` query parameters, shared by vless:// and trojan://.
-fn ws_from_query(q: &HashMap<String, String>) -> Result<Option<WsOpts>> {
+fn layer_from_query(q: &HashMap<String, String>) -> Result<Option<Layer>> {
     match q.get("type").map(String::as_str) {
         None | Some("tcp") => Ok(None),
-        Some("ws") => Ok(Some(WsOpts {
+        Some("ws") => Ok(Some(Layer::Ws(WsOpts {
             path: q.get("path").cloned().unwrap_or_else(|| "/".into()),
             host: q.get("host").cloned().filter(|h| !h.is_empty()),
             headers: Vec::new(),
+        }))),
+        Some("grpc") => Ok(Some(Layer::Grpc {
+            service: q.get("serviceName").or(q.get("servicename")).cloned().unwrap_or_default(),
         })),
         Some(other) => bail!("transport {other:?} not supported yet"),
     }
@@ -105,9 +108,10 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
     if field("aid").is_some_and(|a| a != "0") {
         bail!("legacy vmess (alterId > 0) not supported");
     }
-    let ws = match field("net").as_deref() {
+    let layer = match field("net").as_deref() {
         None | Some("tcp") => None,
-        Some("ws") => Some(WsOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), headers: Vec::new() }),
+        Some("ws") => Some(Layer::Ws(WsOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), headers: Vec::new() })),
+        Some("grpc") => Some(Layer::Grpc { service: field("path").unwrap_or_default() }),
         Some(other) => bail!("transport {other:?} not supported yet"),
     };
     let server = field("add").ok_or_else(|| anyhow!("vmess link without address"))?;
@@ -120,7 +124,7 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
         // Not in the v2rayN format proper, but common in generated links.
         skip_cert_verify: field("allowInsecure").is_some_and(|v| v == "1" || v == "true")
             || field("verify_cert").is_some_and(|v| v == "false"),
-        ws,
+        layer,
         server,
     };
     Ok((field("ps"), def))
@@ -139,7 +143,7 @@ fn parse_vless(body: &str) -> Result<(Option<String>, ProxyDef)> {
         tls: q.get("security").is_some_and(|s| s == "tls"),
         sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
         skip_cert_verify: truthy(q.get("allowinsecure")),
-        ws: ws_from_query(q)?,
+        layer: layer_from_query(q)?,
         server: l.host,
         port: l.port,
     };
@@ -153,7 +157,7 @@ fn parse_trojan(body: &str) -> Result<(Option<String>, ProxyDef)> {
         password: l.user.ok_or_else(|| anyhow!("trojan link without password"))?,
         sni: q.get("sni").or(q.get("peer")).cloned().filter(|s| !s.is_empty()),
         skip_cert_verify: truthy(q.get("allowinsecure")),
-        ws: ws_from_query(q)?,
+        layer: layer_from_query(q)?,
         server: l.host,
         port: l.port,
     };
@@ -325,12 +329,12 @@ mod tests {
         assert_eq!(skipped, ["REALITY not supported yet"]);
         assert!(matches!(&nodes[1].1, ProxyDef::Shadowsocks { password, port: 443, .. } if password == "p@ss"));
         match &nodes[2].1 {
-            ProxyDef::Vmess { tls: true, ws: Some(ws), sni: Some(sni), .. } => {
+            ProxyDef::Vmess { tls: true, layer: Some(Layer::Ws(ws)), sni: Some(sni), .. } => {
                 assert_eq!((ws.path.as_str(), ws.host.as_deref(), sni.as_str()), ("/ray", Some("cdn.example"), "cdn.example"))
             }
             other => panic!("{other:?}"),
         }
-        assert!(matches!(&nodes[3].1, ProxyDef::Vless { tls: true, ws: Some(w), .. } if w.path == "/ws"));
+        assert!(matches!(&nodes[3].1, ProxyDef::Vless { tls: true, layer: Some(Layer::Ws(w)), .. } if w.path == "/ws"));
         assert!(matches!(&nodes[4].1, ProxyDef::Trojan { skip_cert_verify: true, .. }));
         assert!(matches!(&nodes[5].1, ProxyDef::Hysteria2 { port: 8443, skip_cert_verify: true, .. }));
     }

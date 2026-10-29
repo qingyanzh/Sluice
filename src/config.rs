@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::rule::Rule;
-use crate::transport::WsOpts;
+use crate::transport::{Layer, WsOpts};
 
 #[derive(Debug, Default)]
 pub struct General {
@@ -22,7 +22,7 @@ pub struct General {
 #[derive(Debug, Clone)]
 pub enum ProxyDef {
     Shadowsocks { server: String, port: u16, method: String, password: String },
-    Trojan { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, ws: Option<WsOpts> },
+    Trojan { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, layer: Option<Layer> },
     Vless {
         server: String,
         port: u16,
@@ -30,7 +30,7 @@ pub enum ProxyDef {
         tls: bool,
         sni: Option<String>,
         skip_cert_verify: bool,
-        ws: Option<WsOpts>,
+        layer: Option<Layer>,
     },
     /// `obfs`: Salamander obfuscation password.
     Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, obfs: Option<String> },
@@ -42,7 +42,7 @@ pub enum ProxyDef {
         tls: bool,
         sni: Option<String>,
         skip_cert_verify: bool,
-        ws: Option<WsOpts>,
+        layer: Option<Layer>,
     },
 }
 
@@ -58,8 +58,12 @@ impl ProxyDef {
                 parts.push("skip-cert-verify=true".into());
             }
         };
-        let ws_bits = |parts: &mut Vec<String>, ws: &Option<WsOpts>| {
-            if let Some(w) = ws {
+        let layer_bits = |parts: &mut Vec<String>, layer: &Option<Layer>| {
+            if let Some(Layer::Grpc { service }) = layer {
+                parts.push("grpc=true".into());
+                parts.push(format!("grpc-service-name={service}"));
+            }
+            if let Some(Layer::Ws(w)) = layer {
                 parts.push("ws=true".into());
                 parts.push(format!("ws-path={}", w.path));
                 let mut headers: Vec<String> = w.host.iter().map(|h| format!("Host:{h}")).collect();
@@ -75,18 +79,18 @@ impl ProxyDef {
                 parts.push(format!("encrypt-method={method}"));
                 parts.push(format!("password={password}"));
             }
-            ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, ws } => {
+            ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, layer } => {
                 parts.extend(["trojan".into(), server.clone(), port.to_string(), format!("password={password}")]);
                 tls_bits(&mut parts, sni, *skip_cert_verify);
-                ws_bits(&mut parts, ws);
+                layer_bits(&mut parts, layer);
             }
-            ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, ws } => {
+            ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer } => {
                 parts.extend(["vless".into(), server.clone(), port.to_string(), format!("uuid={uuid}")]);
                 if *tls {
                     parts.push("tls=true".into());
                 }
                 tls_bits(&mut parts, sni, *skip_cert_verify);
-                ws_bits(&mut parts, ws);
+                layer_bits(&mut parts, layer);
             }
             ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
                 parts.extend(["hysteria2".into(), server.clone(), port.to_string(), format!("password={password}")]);
@@ -96,14 +100,14 @@ impl ProxyDef {
                     parts.push(format!("obfs-password={o}"));
                 }
             }
-            ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, ws } => {
+            ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
                 parts.extend(["vmess".into(), server.clone(), port.to_string(), format!("username={uuid}")]);
                 parts.push(format!("encrypt-method={method}"));
                 if *tls {
                     parts.push("tls=true".into());
                 }
                 tls_bits(&mut parts, sni, *skip_cert_verify);
-                ws_bits(&mut parts, ws);
+                layer_bits(&mut parts, layer);
             }
         }
         format!("{name} = {}", parts.join(", "))
@@ -177,7 +181,12 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
         params.insert(k.to_ascii_lowercase(), unquote(v).to_string());
     }
     let mut take = |k: &str| params.remove(k);
-    let ws = matches!(take("ws").as_deref(), Some("true" | "1")).then(|| WsOpts::from_params(take("ws-path"), take("ws-headers")));
+    let layer = if matches!(take("grpc").as_deref(), Some("true" | "1")) {
+        Some(Layer::Grpc { service: take("grpc-service-name").ok_or_else(|| anyhow!("grpc=true needs grpc-service-name"))? })
+    } else {
+        matches!(take("ws").as_deref(), Some("true" | "1"))
+            .then(|| Layer::Ws(WsOpts::from_params(take("ws-path"), take("ws-headers"))))
+    };
     let def = match parts[0].to_ascii_lowercase().as_str() {
         "ss" => ProxyDef::Shadowsocks {
             server,
@@ -191,7 +200,7 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             password: take("password").ok_or_else(|| anyhow!("trojan needs password"))?,
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
-            ws: ws.clone(),
+            layer: layer.clone(),
         },
         "vless" => ProxyDef::Vless {
             server,
@@ -200,7 +209,7 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             tls: matches!(take("tls").as_deref(), Some("true" | "1")),
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
-            ws: ws.clone(),
+            layer: layer.clone(),
         },
         "vmess" => ProxyDef::Vmess {
             server,
@@ -210,7 +219,7 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             tls: matches!(take("tls").as_deref(), Some("true" | "1")),
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
-            ws: ws.clone(),
+            layer: layer.clone(),
         },
         "hysteria2" | "hy2" => ProxyDef::Hysteria2 {
             server,
@@ -326,9 +335,9 @@ mod tests {
         let cfg = Config::parse(include_str!("../examples/sluice.conf")).unwrap();
         assert_eq!(cfg.general.http_listen.as_deref(), Some("127.0.0.1:6152"));
         assert_eq!(cfg.proxies.len(), 6);
-        assert!(matches!(&cfg.proxies[2].1, ProxyDef::Vmess { tls: true, ws: None, .. }));
+        assert!(matches!(&cfg.proxies[2].1, ProxyDef::Vmess { tls: true, layer: None, .. }));
         match &cfg.proxies[4].1 {
-            ProxyDef::Vmess { ws: Some(ws), .. } => {
+            ProxyDef::Vmess { layer: Some(Layer::Ws(ws)), .. } => {
                 assert_eq!((ws.path.as_str(), ws.host.as_deref()), ("/ray", Some("cdn.example.com")))
             }
             other => panic!("expected VMess over WebSocket, got {other:?}"),

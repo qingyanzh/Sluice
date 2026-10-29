@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_rustls::TlsConnector;
 
-use crate::trojan::tls_client;
+use crate::trojan::tls_client_alpn;
 use crate::util::{connect_tcp, BoxStream};
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -44,12 +44,20 @@ impl WsOpts {
     }
 }
 
+/// What runs on top of TCP/TLS before the proxy protocol.
+#[derive(Debug, Clone)]
+pub enum Layer {
+    Ws(WsOpts),
+    /// Xray/V2Ray "gun": the stream rides one gRPC call `/<service>/Tun` over HTTP/2.
+    Grpc { service: String },
+}
+
 pub struct Transport {
     server: String,
     port: u16,
     tls: Option<(TlsConnector, ServerName<'static>)>,
-    ws: Option<WsOpts>,
-    /// Name for the WebSocket `Host` header when none is configured.
+    layer: Option<Layer>,
+    /// Name for the WebSocket `Host` header / gRPC authority when none is configured.
     default_host: String,
 }
 
@@ -60,11 +68,13 @@ impl Transport {
         tls: bool,
         sni: Option<String>,
         skip_cert_verify: bool,
-        ws: Option<WsOpts>,
+        layer: Option<Layer>,
     ) -> Result<Self> {
         let default_host = sni.clone().unwrap_or_else(|| server.clone());
-        let tls = if tls { Some(tls_client(&server, sni, skip_cert_verify)?) } else { None };
-        Ok(Transport { server, port, tls, ws, default_host })
+        // gRPC needs HTTP/2, which TLS servers only speak when the client offers ALPN h2.
+        let alpn: &[&[u8]] = if matches!(layer, Some(Layer::Grpc { .. })) { &[b"h2"] } else { &[] };
+        let tls = if tls { Some(tls_client_alpn(&server, sni, skip_cert_verify, alpn)?) } else { None };
+        Ok(Transport { server, port, tls, layer, default_host })
     }
 
     pub async fn connect(&self) -> Result<BoxStream> {
@@ -73,11 +83,135 @@ impl Transport {
             Some((connector, sni)) => Box::new(connector.connect(sni.clone(), tcp).await?),
             None => Box::new(tcp),
         };
-        match &self.ws {
-            Some(ws) => websocket(stream, ws, ws.host.as_deref().unwrap_or(&self.default_host)).await,
+        match &self.layer {
+            Some(Layer::Ws(ws)) => websocket(stream, ws, ws.host.as_deref().unwrap_or(&self.default_host)).await,
+            Some(Layer::Grpc { service }) => grpc(stream, service, &self.default_host, self.tls.is_some()).await,
             None => Ok(stream),
         }
     }
+}
+
+/// gRPC message carrying `data` the way gun does: a protobuf `bytes data = 1` field,
+/// behind the 5-byte gRPC length prefix.
+pub fn gun_frame(data: &[u8]) -> Vec<u8> {
+    let mut proto = vec![0x0A];
+    let mut n = data.len();
+    while n >= 0x80 {
+        proto.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    proto.push(n as u8);
+    proto.extend_from_slice(data);
+    let mut out = Vec::with_capacity(5 + proto.len());
+    out.push(0);
+    out.extend_from_slice(&(proto.len() as u32).to_be_bytes());
+    out.extend(proto);
+    out
+}
+
+/// Pulls complete gun messages out of `buf`, returning their payloads.
+pub fn take_gun_messages(buf: &mut Vec<u8>) -> std::io::Result<Vec<Vec<u8>>> {
+    let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("grpc: {m}"));
+    let mut out = Vec::new();
+    loop {
+        if buf.len() < 5 {
+            return Ok(out);
+        }
+        let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+        if buf.len() < 5 + len {
+            return Ok(out);
+        }
+        let msg: Vec<u8> = buf.drain(..5 + len).skip(5).collect();
+        if msg.is_empty() {
+            continue;
+        }
+        if msg[0] != 0x0A {
+            return Err(bad("unexpected protobuf field"));
+        }
+        let (mut size, mut shift, mut i) = (0usize, 0, 1);
+        loop {
+            let b = *msg.get(i).ok_or_else(|| bad("truncated length"))?;
+            size |= ((b & 0x7f) as usize) << shift;
+            i += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        out.push(msg.get(i..i + size).ok_or_else(|| bad("truncated message"))?.to_vec());
+    }
+}
+
+/// Opens the gun call and bridges it to a plain byte stream.
+async fn grpc(stream: BoxStream, service: &str, authority: &str, tls: bool) -> Result<BoxStream> {
+    let (client, conn) = h2::client::handshake(stream).await?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            debug!("grpc connection closed: {e}");
+        }
+    });
+    let scheme = if tls { "https" } else { "http" };
+    let req = http::Request::builder()
+        .method("POST")
+        .uri(format!("{scheme}://{authority}/{}/Tun", service.trim_matches('/')))
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("user-agent", "grpc-go/1.62.1")
+        .body(())?;
+    let (response, mut send) = client.ready().await?.send_request(req, false)?;
+
+    let (app, inner) = tokio::io::duplex(64 * 1024);
+    let (mut ird, mut iwr) = tokio::io::split(inner);
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; MAX_FRAME];
+        loop {
+            let n = match ird.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut frame = bytes::Bytes::from(gun_frame(&buf[..n]));
+            // Respect HTTP/2 flow control instead of buffering without bound.
+            while !frame.is_empty() {
+                send.reserve_capacity(frame.len());
+                match std::future::poll_fn(|cx| send.poll_capacity(cx)).await {
+                    Some(Ok(cap)) if cap > 0 => {
+                        let chunk = frame.split_to(cap.min(frame.len()));
+                        if send.send_data(chunk, false).is_err() {
+                            return;
+                        }
+                    }
+                    Some(Ok(_)) => continue,
+                    _ => return,
+                }
+            }
+        }
+        let _ = send.send_data(bytes::Bytes::new(), true);
+    });
+    tokio::spawn(async move {
+        let result: Result<()> = async {
+            let resp = response.await?;
+            if resp.status() != 200 {
+                bail!("grpc call refused: HTTP {} (check grpc-service-name)", resp.status());
+            }
+            let mut body = resp.into_body();
+            let mut pending = Vec::new();
+            while let Some(chunk) = body.data().await {
+                let chunk = chunk?;
+                let _ = body.flow_control().release_capacity(chunk.len());
+                pending.extend_from_slice(&chunk);
+                for msg in take_gun_messages(&mut pending)? {
+                    iwr.write_all(&msg).await?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            debug!("grpc stream ended: {e:#}");
+        }
+        let _ = iwr.shutdown().await;
+    });
+    Ok(Box::new(app))
 }
 
 fn accept_key(key: &str) -> String {
@@ -244,6 +378,20 @@ mod tests {
             let wire = encode_frame(2, &payload);
             let (op, got) = read_frame(&mut &wire[..]).await.unwrap();
             assert_eq!((op, got), (2, payload));
+        }
+    }
+
+    #[test]
+    fn gun_frames_roundtrip() {
+        for len in [0usize, 1, 127, 128, 300, 70_000] {
+            let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let mut wire = [gun_frame(&data), gun_frame(b"next")].concat();
+            let partial = wire.split_off(wire.len() - 3);
+            let msgs = take_gun_messages(&mut wire).unwrap();
+            assert_eq!(msgs, vec![data.clone()]);
+            wire.extend(partial);
+            assert_eq!(take_gun_messages(&mut wire).unwrap(), vec![b"next".to_vec()]);
+            assert!(wire.is_empty());
         }
     }
 

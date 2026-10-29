@@ -84,17 +84,17 @@ impl Router {
                 ProxyDef::Shadowsocks { server, port, method, password } => {
                     Outbound::Shadowsocks(SsServer::new(server, port, &method, &password)?)
                 }
-                ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, ws } => {
-                    Outbound::Trojan(TrojanServer::new(Transport::new(server, port, true, sni, skip_cert_verify, ws)?, &password))
+                ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, layer } => {
+                    Outbound::Trojan(TrojanServer::new(Transport::new(server, port, true, sni, skip_cert_verify, layer)?, &password))
                 }
-                ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, ws } => {
-                    Outbound::Vless(VlessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, ws)?, &uuid)?)
+                ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer } => {
+                    Outbound::Vless(VlessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, layer)?, &uuid)?)
                 }
                 ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
                     Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs)?)
                 }
-                ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, ws } => {
-                    Outbound::Vmess(VmessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, ws)?, &uuid, &method)?)
+                ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
+                    Outbound::Vmess(VmessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, layer)?, &uuid, &method)?)
                 }
             };
             if outbounds.insert(name.clone(), ob).is_some() {

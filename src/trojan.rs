@@ -75,14 +75,25 @@ pub fn quic_tls_config(skip_cert_verify: bool, alpn: &[u8]) -> Result<ClientConf
 
 /// TLS client setup shared by Trojan and VLESS: connector plus the SNI to send.
 pub fn tls_client(server: &str, sni: Option<String>, skip_cert_verify: bool) -> Result<(TlsConnector, ServerName<'static>)> {
+    tls_client_alpn(server, sni, skip_cert_verify, &[])
+}
+
+/// Like [`tls_client`], offering the given ALPN protocols (e.g. `h2` for gRPC).
+pub fn tls_client_alpn(
+    server: &str,
+    sni: Option<String>,
+    skip_cert_verify: bool,
+    alpn: &[&[u8]],
+) -> Result<(TlsConnector, ServerName<'static>)> {
     let provider = Arc::new(ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
-    let config = if skip_cert_verify {
+    let mut config = if skip_cert_verify {
         builder.dangerous().with_custom_certificate_verifier(Arc::new(NoVerify(provider))).with_no_client_auth()
     } else {
         let roots = RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
         builder.with_root_certificates(roots).with_no_client_auth()
     };
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     let sni_name = sni.unwrap_or_else(|| server.to_string());
     let sni = ServerName::try_from(sni_name.clone()).map_err(|_| anyhow!("invalid sni {sni_name:?}"))?;
     Ok((TlsConnector::from(Arc::new(config)), sni))

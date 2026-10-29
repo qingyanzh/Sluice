@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_yaml::Value;
 
 use crate::config::ProxyDef;
-use crate::transport::WsOpts;
+use crate::transport::{Layer, WsOpts};
 
 /// Whether `text` looks like a Clash config (a top-level `proxies:` key).
 pub fn looks_like(text: &str) -> bool {
@@ -28,16 +28,20 @@ fn need(v: &Value, key: &str) -> Result<String> {
     s(v, key).ok_or_else(|| anyhow!("missing {key}"))
 }
 
-/// `network: ws` with `ws-opts: {path, headers: {Host}}`; other transports aren't supported yet.
-fn transport(v: &Value) -> Result<Option<WsOpts>> {
+/// `network: ws` (`ws-opts: {path, headers: {Host}}`) or `network: grpc`
+/// (`grpc-opts: {grpc-service-name}`).
+fn transport(v: &Value) -> Result<Option<Layer>> {
     match s(v, "network").as_deref() {
         None | Some("tcp") => Ok(None),
         Some("ws") => {
             let opts = v.get("ws-opts");
             let path = opts.and_then(|o| s(o, "path")).unwrap_or_else(|| "/".into());
             let host = opts.and_then(|o| o.get("headers")).and_then(|h| s(h, "Host").or_else(|| s(h, "host")));
-            Ok(Some(WsOpts { path, host, headers: Vec::new() }))
+            Ok(Some(Layer::Ws(WsOpts { path, host, headers: Vec::new() })))
         }
+        Some("grpc") => Ok(Some(Layer::Grpc {
+            service: v.get("grpc-opts").and_then(|o| s(o, "grpc-service-name")).unwrap_or_default(),
+        })),
         Some(other) => bail!("transport {other:?} not supported yet"),
     }
 }
@@ -67,7 +71,7 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
                 tls: flag(v, "tls"),
                 sni,
                 skip_cert_verify: skip,
-                ws: transport(v)?,
+                layer: transport(v)?,
             }
         }
         "vless" => {
@@ -77,9 +81,9 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
             if s(v, "flow").is_some() {
                 bail!("VLESS flow (XTLS) not supported yet");
             }
-            ProxyDef::Vless { server, port, uuid: need(v, "uuid")?, tls: flag(v, "tls"), sni, skip_cert_verify: skip, ws: transport(v)? }
+            ProxyDef::Vless { server, port, uuid: need(v, "uuid")?, tls: flag(v, "tls"), sni, skip_cert_verify: skip, layer: transport(v)? }
         }
-        "trojan" => ProxyDef::Trojan { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, ws: transport(v)? },
+        "trojan" => ProxyDef::Trojan { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, layer: transport(v)? },
         "hysteria2" => {
             let obfs = match s(v, "obfs").as_deref() {
                 None | Some("none") => None,
@@ -150,7 +154,7 @@ proxy-groups:
         assert_eq!(skipped, ["REALITY not supported yet", "ss plugins not supported"]);
         assert!(matches!(&nodes[0].1, ProxyDef::Shadowsocks { password, .. } if password == "p@ss"));
         match &nodes[1].1 {
-            ProxyDef::Vmess { tls: true, ws: Some(ws), sni: Some(sni), .. } => {
+            ProxyDef::Vmess { tls: true, layer: Some(Layer::Ws(ws)), sni: Some(sni), .. } => {
                 assert_eq!((ws.path.as_str(), ws.host.as_deref(), sni.as_str()), ("/ray", Some("cdn.example.com"), "cdn.example.com"));
             }
             other => panic!("{other:?}"),
