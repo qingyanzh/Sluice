@@ -36,6 +36,15 @@ pub fn interface_with_address(ip: &str) -> Option<String> {
     None
 }
 
+/// Names of other VPN / network-extension services macOS reports as connected.
+pub fn connected_vpns() -> Vec<String> {
+    let out = sh("scutil", &["--nc", "list"]).unwrap_or_default();
+    out.lines()
+        .filter(|l| l.contains("(Connected)"))
+        .map(|l| l.split('"').nth(1).unwrap_or(l.trim()).to_string())
+        .collect()
+}
+
 pub fn default_interface() -> Result<String> {
     let out = sh("route", &["-n", "get", "default"])?;
     out.lines()

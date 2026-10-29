@@ -35,7 +35,16 @@ usage:
   sluice check <config.conf>                 validate the config
   sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses";
 
-fn start_tun(
+/// Resolves a name through the egress path (bound interface + upstream DNS).
+async fn egress_self_test(upstream: &[SocketAddr]) -> Result<()> {
+    let ips = tokio::time::timeout(std::time::Duration::from_secs(5), dns::resolve_a("apple.com", upstream))
+        .await
+        .map_err(|_| anyhow!("timed out"))??;
+    util::connect_tcp(&ips[0].to_string(), 443).await?;
+    Ok(())
+}
+
+async fn start_tun(
     g: &config::General,
     handle: Arc<reload::RouterHandle>,
     tasks: &mut tokio::task::JoinSet<Result<()>>,
@@ -66,12 +75,20 @@ fn start_tun(
         upstream = vec!["223.5.5.5:53".parse()?, "8.8.8.8:53".parse()?];
     }
 
+    let vpns = sysnet::connected_vpns();
+    if !vpns.is_empty() {
+        log::warn!("other VPN services are connected: {vpns:?}; they may block Sluice's outgoing traffic");
+    }
     let iface = sysnet::default_interface()?;
     let if_index = sysnet::if_index(&iface).ok_or_else(|| anyhow!("no index for interface {iface}"))?;
     log::info!("egress via {iface}, upstream DNS {upstream:?}");
     util::set_egress(util::Egress { if_index: Some(if_index), dns: upstream.clone() });
+    match egress_self_test(&upstream).await {
+        Ok(()) => log::info!("egress self-test via {iface} before routes: ok"),
+        Err(e) => log::warn!("egress self-test via {iface} before routes FAILED: {e:#}"),
+    }
 
-    let fake = Arc::new(dns::FakeDns::new(net, prefix, upstream));
+    let fake = Arc::new(dns::FakeDns::new(net, prefix, upstream.clone()));
     let (tun_ip, dns_ip) = (fake.addr(1), fake.addr(2));
     if let Some(other) = sysnet::interface_with_address(&tun_ip.to_string()) {
         bail!(
@@ -83,6 +100,13 @@ fn start_tun(
     let (dev, name) = tun::create(tun_ip, dns_ip, mtu)?;
     log::info!("enhanced mode on {name} ({tun_ip}), fake IPs from {range}");
     let guard = sysnet::SystemGuard::apply(&name, range, &dns_ip.to_string())?;
+    match egress_self_test(&upstream).await {
+        Ok(()) => log::info!("egress self-test via {iface} after routes: ok"),
+        Err(e) => log::warn!(
+            "egress self-test via {iface} after routes FAILED: {e:#}; traffic bound to {iface} is being blocked \
+             (another VPN or network extension enforcing its tunnel?)"
+        ),
+    }
     tasks.spawn(tun::serve(dev, mtu, handle, fake));
     Ok(guard)
 }
@@ -137,7 +161,7 @@ async fn run() -> Result<()> {
             }
             // Held until shutdown; dropping it restores routes and DNS.
             let _system = if g.enhanced_mode {
-                Some(start_tun(&g, handle.clone(), &mut tasks)?)
+                Some(start_tun(&g, handle.clone(), &mut tasks).await?)
             } else {
                 None
             };
