@@ -1,6 +1,6 @@
 # Sluice
 
-Rule-based network proxy (milestones M1–M2: command-line core and TUN mode).
+Rule-based network proxy (command-line core and macOS TUN mode).
 
 ## Usage
 
@@ -63,6 +63,13 @@ server (`198.18.0.2`), so domain rules still work for apps that ignore proxy set
 Sluice's own connections are bound to the physical interface (`IP_BOUND_IF`) and use the
 real upstream DNS, so they never loop back into the TUN. Routes and DNS are restored on exit.
 After a crash, the next start restores DNS from `/var/tmp/sluice-dns-backup`.
+
+If the physical interface is the primary one, Sluice adds a default route scoped to it while
+running, because macOS keeps none in that case and the bound sockets would otherwise hit the TUN routes.
+
+To check a running setup, use `scripts/tun-check.sh`, then `scripts/tun-check.sh after` once Sluice
+has stopped. `scripts/tun-diag.sh` shows how the kernel routes bound sockets. Verified on macOS:
+TCP, UDP, fake-IP DNS, rules, and cleanup.
 
 Limits: IPv4 only.
 
