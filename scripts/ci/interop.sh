@@ -33,6 +33,19 @@ auth:
   type: password
   password: hy
 EOF
+cat > "$work/hy-obfs.yaml" <<EOF
+listen: 127.0.0.1:19444
+tls:
+  cert: $work/cert.pem
+  key: $work/key.pem
+auth:
+  type: password
+  password: hy
+obfs:
+  type: salamander
+  salamander:
+    password: obfs-secret
+EOF
 cat > "$work/sluice.conf" <<EOF
 [General]
 socks5-listen = 127.0.0.1:16153
@@ -46,8 +59,9 @@ Trojan-TLS = trojan, 127.0.0.1, 19003, password=tj, sni=test.local, skip-cert-ve
 VMess-WS-TLS = vmess, 127.0.0.1, 19004, username=$uuid, tls=true, sni=test.local, skip-cert-verify=true, ws=true, ws-path=/ray
 VLESS-WS = vless, 127.0.0.1, 19005, uuid=$uuid, ws=true, ws-path=/ray
 Hysteria2 = hysteria2, 127.0.0.1, 19443, password=hy, sni=test.local, skip-cert-verify=true
+Hy2-Obfs = hysteria2, 127.0.0.1, 19444, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret
 [Proxy Group]
-P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, Hysteria2
+P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, Hysteria2, Hy2-Obfs
 [Rule]
 FINAL,P
 EOF
@@ -56,13 +70,14 @@ ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U > "$work/ss1.log" 2>&1 &
 ssserver -s 127.0.0.1:18389 -m chacha20-ietf-poly1305 -k ss -U > "$work/ss2.log" 2>&1 &
 xray run -c "$work/xray.json" > "$work/xray.log" 2>&1 &
 hysteria server -c "$work/hy.yaml" > "$work/hy.log" 2>&1 &
+hysteria server -c "$work/hy-obfs.yaml" > "$work/hy-obfs.log" 2>&1 &
 sleep 2
 ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
 for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:16170/v1/policies && break; sleep 0.5; done
 
 fails=0
 printf '%-14s %-6s %-12s %s\n' NODE HTTPS DOWNLOAD UDP
-for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS Hysteria2; do
+for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS Hysteria2 Hy2-Obfs; do
     curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
     https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
     size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \

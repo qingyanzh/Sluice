@@ -18,6 +18,36 @@ WATCHDOG=${WATCHDOG:-150}
 out=ci-logs/tun-output.txt
 exec 3>&1 > "$out" 2>&1
 
+# Snapshot the network so a broken cleanup can be diagnosed and repaired.
+gw=$(route -n get default | awk '/gateway:/{print $2}')
+iface=$(route -n get default | awk '/interface:/{print $2}')
+netstat -rn -f inet > "$work/routes-before.txt"
+networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' > "$work/services.txt"
+while IFS= read -r svc; do
+    printf '%s\t%s\n' "$svc" "$(networksetup -getdnsservers "$svc" | tr '\n' ' ')"
+done < "$work/services.txt" > "$work/dns-before.txt"
+echo "network before: default via $gw on $iface"; cat "$work/dns-before.txt"
+
+online() { curl -s -m 10 -o /dev/null https://github.com; }
+
+# If the runner lost the internet after Sluice stopped, show what changed and put it back.
+repair_if_offline() {
+    online && { echo "-- runner online"; return; }
+    echo "!! runner OFFLINE after Sluice stopped; diff of routes (before -> now):"
+    netstat -rn -f inet > "$work/routes-after.txt"
+    diff "$work/routes-before.txt" "$work/routes-after.txt" | head -40
+    echo "!! DNS now:"; scutil --dns | grep nameserver | sort -u
+    for net in 0/1 128.0/1 198.18/15; do sudo route -n delete -net "$net" 2>/dev/null; done
+    sudo route -n delete -ifscope "$iface" -net default 2>/dev/null
+    route -n get default > /dev/null 2>&1 || sudo route -n add default "$gw"
+    while IFS=$'\t' read -r svc dns; do
+        if [[ "$dns" == *"aren't any"* || -z "$dns" ]]; then sudo networksetup -setdnsservers "$svc" Empty
+        else sudo networksetup -setdnsservers "$svc" $dns; fi
+    done < "$work/dns-before.txt"
+    online && echo "!! repaired: runner online again" || echo "!! still offline after repair"
+    fails=$((fails + 1))
+}
+
 cat > "$work/tun-proxy.conf" <<'EOF'
 [General]
 loglevel = info
@@ -44,6 +74,7 @@ run_case() {
     kill "$watchdog" 2>/dev/null
     echo "-- after"
     scripts/tun-check.sh after || fails=$((fails + 1))
+    repair_if_offline
     echo "-- sluice log"
     grep -vE "^\[.*INFO \] [0-9a-z.:\[\]-]+ -> " "ci-logs/tun-$name.log" | tail -20
     echo "   ($(grep -c ' -> ' "ci-logs/tun-$name.log") connections logged; $(grep -c 'via SS' "ci-logs/tun-$name.log") via SS)"

@@ -81,13 +81,15 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
         }
         "trojan" => ProxyDef::Trojan { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, ws: transport(v)? },
         "hysteria2" => {
-            if s(v, "obfs").is_some() {
-                bail!("hysteria2 obfs not supported yet");
-            }
+            let obfs = match s(v, "obfs").as_deref() {
+                None | Some("none") => None,
+                Some("salamander") => Some(need(v, "obfs-password")?),
+                Some(other) => bail!("hysteria2 obfs {other:?} not supported"),
+            };
             if s(v, "ports").is_some() {
                 bail!("hysteria2 port hopping not supported yet");
             }
-            ProxyDef::Hysteria2 { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip }
+            ProxyDef::Hysteria2 { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, obfs }
         }
         other => bail!("{other} not supported"),
     };

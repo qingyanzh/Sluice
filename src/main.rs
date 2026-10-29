@@ -8,6 +8,7 @@ mod reload;
 mod router;
 mod rule;
 mod ruleset;
+mod salamander;
 mod ss;
 mod stats;
 mod subscription;

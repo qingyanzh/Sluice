@@ -167,12 +167,20 @@ pub struct Hy2Server {
     port: u16,
     password: String,
     sni: String,
+    obfs: Option<String>,
     client_config: quinn::ClientConfig,
     live: Mutex<Option<Live>>,
 }
 
 impl Hy2Server {
-    pub fn new(server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool) -> Result<Self> {
+    pub fn new(
+        server: String,
+        port: u16,
+        password: String,
+        sni: Option<String>,
+        skip_cert_verify: bool,
+        obfs: Option<String>,
+    ) -> Result<Self> {
         let tls = quic_tls_config(skip_cert_verify, b"h3")?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
         let mut transport = quinn::TransportConfig::default();
@@ -180,14 +188,26 @@ impl Hy2Server {
         transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
         client_config.transport_config(Arc::new(transport));
         let sni = sni.unwrap_or_else(|| server.clone());
-        Ok(Hy2Server { server, port, password, sni, client_config, live: Mutex::new(None) })
+        Ok(Hy2Server { server, port, password, sni, obfs, client_config, live: Mutex::new(None) })
     }
 
     async fn dial(&self) -> Result<Live> {
         let addr = *resolve(&self.server, self.port).await?.first().ok_or_else(|| anyhow!("{}: no address", self.server))?;
         let socket = udp_socket_std(&addr)?;
-        let endpoint =
-            quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
+        let endpoint = match &self.obfs {
+            None => quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?,
+            Some(pw) => {
+                use quinn::Runtime;
+                let inner = quinn::TokioRuntime.wrap_udp_socket(socket)?;
+                let obfuscated = Arc::new(crate::salamander::Salamander::new(inner, pw));
+                quinn::Endpoint::new_with_abstract_socket(
+                    quinn::EndpointConfig::default(),
+                    None,
+                    obfuscated,
+                    Arc::new(quinn::TokioRuntime),
+                )?
+            }
+        };
         let conn = tokio::time::timeout(
             Duration::from_secs(10),
             endpoint.connect_with(self.client_config.clone(), addr, &self.sni)?,

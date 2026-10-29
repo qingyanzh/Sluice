@@ -163,9 +163,11 @@ fn parse_trojan(body: &str) -> Result<(Option<String>, ProxyDef)> {
 fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
     let l = split_link(body)?;
     let q = &l.query;
-    if q.get("obfs").is_some_and(|o| !o.is_empty() && o != "none") {
-        bail!("hysteria2 obfs not supported yet");
-    }
+    let obfs = match q.get("obfs").map(String::as_str) {
+        None | Some("") | Some("none") => None,
+        Some("salamander") => Some(q.get("obfs-password").cloned().ok_or_else(|| anyhow!("salamander without obfs-password"))?),
+        Some(other) => bail!("hysteria2 obfs {other:?} not supported"),
+    };
     if l.rest.contains(',') {
         bail!("hysteria2 port hopping not supported yet");
     }
@@ -173,6 +175,7 @@ fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
         password: l.user.ok_or_else(|| anyhow!("hysteria2 link without password"))?,
         sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
         skip_cert_verify: truthy(q.get("insecure")),
+        obfs,
         server: l.host,
         port: l.port,
     };

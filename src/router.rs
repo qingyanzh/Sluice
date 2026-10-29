@@ -90,8 +90,8 @@ impl Router {
                 ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, ws } => {
                     Outbound::Vless(VlessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, ws)?, &uuid)?)
                 }
-                ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify } => {
-                    Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify)?)
+                ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
+                    Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs)?)
                 }
                 ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, ws } => {
                     Outbound::Vmess(VmessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, ws)?, &uuid, &method)?)

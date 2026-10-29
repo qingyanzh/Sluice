@@ -32,7 +32,8 @@ pub enum ProxyDef {
         skip_cert_verify: bool,
         ws: Option<WsOpts>,
     },
-    Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool },
+    /// `obfs`: Salamander obfuscation password.
+    Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, obfs: Option<String> },
     Vmess {
         server: String,
         port: u16,
@@ -87,9 +88,13 @@ impl ProxyDef {
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 ws_bits(&mut parts, ws);
             }
-            ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify } => {
+            ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
                 parts.extend(["hysteria2".into(), server.clone(), port.to_string(), format!("password={password}")]);
                 tls_bits(&mut parts, sni, *skip_cert_verify);
+                if let Some(o) = obfs {
+                    parts.push("obfs=salamander".into());
+                    parts.push(format!("obfs-password={o}"));
+                }
             }
             ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, ws } => {
                 parts.extend(["vmess".into(), server.clone(), port.to_string(), format!("username={uuid}")]);
@@ -213,6 +218,11 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             password: take("password").ok_or_else(|| anyhow!("hysteria2 needs password"))?,
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
+            obfs: match take("obfs").as_deref() {
+                None | Some("none") => None,
+                Some("salamander") => Some(take("obfs-password").ok_or_else(|| anyhow!("obfs=salamander needs obfs-password"))?),
+                Some(other) => bail!("unsupported hysteria2 obfs {other:?} (supported: salamander)"),
+            },
         },
         other => bail!("unsupported proxy type {other:?} (supported: ss, trojan, vless, vmess, hysteria2)"),
     };
