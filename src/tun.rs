@@ -19,9 +19,11 @@ use crate::util::{Host, Target};
 pub fn create(address: Ipv4Addr, peer: Ipv4Addr, mtu: u16) -> Result<(tun::AsyncDevice, String)> {
     let mut c = tun::Configuration::default();
     c.address(address).destination(peer).netmask((255, 255, 255, 255)).mtu(mtu).up();
+    // utun frames every packet with a 4-byte address-family header; with this on, the
+    // tun crate strips it on read and adds it on write, so ipstack sees bare IP packets.
     #[cfg(target_os = "macos")]
     c.platform_config(|p| {
-        p.packet_information(false);
+        p.packet_information(true);
     });
     let dev = tun::create_as_async(&c).map_err(|e| anyhow!("create TUN device: {e} (needs root: run with sudo)"))?;
     let name = dev.tun_name()?;

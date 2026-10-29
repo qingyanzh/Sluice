@@ -37,7 +37,8 @@ check "other record types forwarded upstream (MX)" "[ -n '$mx' ]"
 code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com/)
 check "HTTPS by domain through the TUN" "[ '$code' = 200 ]" "HTTP $code"
 code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' https://example.org/)
-check "REJECT rule blocks example.org" "[ '$code' = 000 ]" "HTTP $code"
+org_ip=$(dig +short +time=3 +tries=1 example.org A | head -1)
+check "REJECT rule blocks example.org (resolved to fake IP $org_ip)" "[[ '$org_ip' == 198.18.* ]] && [ '$code' = 000 ]" "HTTP $code"
 code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' https://1.1.1.1/)
 check "HTTPS by IP address through the TUN" "[ '$code' = 301 ] || [ '$code' = 200 ]" "HTTP $code"
 size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' 'https://speed.cloudflare.com/__down?bytes=10000000')
