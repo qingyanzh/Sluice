@@ -56,6 +56,8 @@ pub struct Transport {
     server: String,
     port: u16,
     tls: Option<(TlsConnector, ServerName<'static>)>,
+    /// Replaces `tls` when set.
+    reality: Option<crate::reality::RealityOpts>,
     layer: Option<Layer>,
     /// Name for the WebSocket `Host` header / gRPC authority when none is configured.
     default_host: String,
@@ -70,18 +72,32 @@ impl Transport {
         skip_cert_verify: bool,
         layer: Option<Layer>,
     ) -> Result<Self> {
+        Self::with_reality(server, port, tls, sni, skip_cert_verify, layer, None)
+    }
+
+    pub fn with_reality(
+        server: String,
+        port: u16,
+        tls: bool,
+        sni: Option<String>,
+        skip_cert_verify: bool,
+        layer: Option<Layer>,
+        reality: Option<crate::reality::RealityOpts>,
+    ) -> Result<Self> {
         let default_host = sni.clone().unwrap_or_else(|| server.clone());
+        let tls = tls && reality.is_none();
         // gRPC needs HTTP/2, which TLS servers only speak when the client offers ALPN h2.
         let alpn: &[&[u8]] = if matches!(layer, Some(Layer::Grpc { .. })) { &[b"h2"] } else { &[] };
         let tls = if tls { Some(tls_client_alpn(&server, sni, skip_cert_verify, alpn)?) } else { None };
-        Ok(Transport { server, port, tls, layer, default_host })
+        Ok(Transport { server, port, tls, reality, layer, default_host })
     }
 
     pub async fn connect(&self) -> Result<BoxStream> {
         let tcp = connect_tcp(&self.server, self.port).await?;
-        let stream: BoxStream = match &self.tls {
-            Some((connector, sni)) => Box::new(connector.connect(sni.clone(), tcp).await?),
-            None => Box::new(tcp),
+        let stream: BoxStream = match (&self.reality, &self.tls) {
+            (Some(r), _) => crate::reality::connect(Box::new(tcp), r).await?,
+            (None, Some((connector, sni))) => Box::new(connector.connect(sni.clone(), tcp).await?),
+            (None, None) => Box::new(tcp),
         };
         match &self.layer {
             Some(Layer::Ws(ws)) => websocket(stream, ws, ws.host.as_deref().unwrap_or(&self.default_host)).await,

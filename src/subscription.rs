@@ -133,12 +133,24 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
 fn parse_vless(body: &str) -> Result<(Option<String>, ProxyDef)> {
     let l = split_link(body)?;
     let q = &l.query;
-    match q.get("security").map(String::as_str) {
-        Some("reality") => bail!("REALITY not supported yet"),
-        _ if q.get("flow").is_some_and(|f| !f.is_empty()) => bail!("VLESS flow (XTLS) not supported yet"),
-        _ => {}
+    if q.get("flow").is_some_and(|f| !f.is_empty()) {
+        bail!("VLESS flow (XTLS-Vision) not supported yet");
     }
+    let reality = match q.get("security").map(String::as_str) {
+        Some("reality") => {
+            let def = crate::config::RealityDef {
+                public_key: q.get("pbk").cloned().ok_or_else(|| anyhow!("REALITY link without pbk"))?,
+                short_id: q.get("sid").cloned().unwrap_or_default(),
+            };
+            // Reject bad parameters here, so one bad node can't fail the whole config later.
+            let sni = q.get("sni").map(String::as_str).unwrap_or_default();
+            crate::reality::RealityOpts::parse(&def.public_key, &def.short_id, sni)?;
+            Some(def)
+        }
+        _ => None,
+    };
     let def = ProxyDef::Vless {
+        reality,
         uuid: l.user.ok_or_else(|| anyhow!("vless link without uuid"))?,
         tls: q.get("security").is_some_and(|s| s == "tls"),
         sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
@@ -326,7 +338,21 @@ mod tests {
         let (nodes, skipped) = parse(&STANDARD.encode(&text));
         let names: Vec<&str> = nodes.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["HK 1", "Legacy", "JP", "US", "TJ", "HY", "SG"]);
-        assert_eq!(skipped, ["REALITY not supported yet"]);
+        assert_eq!(skipped, ["bad REALITY public key"]);
+        let good = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@r.example:443?security=reality&pbk=3iNj5NZvYtWSt7Wf18PGYraEqvZ_tiA6Z3hD92XCOnE&sid=0123abcd&sni=www.microsoft.com#R";
+        let (reality_nodes, reality_skipped) = parse(good);
+        assert!(reality_skipped.is_empty(), "{reality_skipped:?}");
+        match &reality_nodes[0].1 {
+            ProxyDef::Vless { reality: Some(r), sni: Some(sni), tls: false, .. } => {
+                assert_eq!((r.short_id.as_str(), sni.as_str()), ("0123abcd", "www.microsoft.com"));
+                let line = reality_nodes[0].1.to_line("R");
+                let back = crate::config::parse_proxy(&line).unwrap().1;
+                assert_eq!(format!("{back:?}"), format!("{:?}", reality_nodes[0].1), "{line}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let (_, bad_skipped) = parse("vless://b831381d-6324-4d53-ad4f-8cda48b30811@r.example:443?security=reality&pbk=x&sni=a.com#Bad");
+        assert_eq!(bad_skipped, ["bad REALITY public key"]);
         assert!(matches!(&nodes[1].1, ProxyDef::Shadowsocks { password, port: 443, .. } if password == "p@ss"));
         match &nodes[2].1 {
             ProxyDef::Vmess { tls: true, layer: Some(Layer::Ws(ws)), sni: Some(sni), .. } => {

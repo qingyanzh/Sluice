@@ -75,13 +75,30 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
             }
         }
         "vless" => {
-            if v.get("reality-opts").is_some() {
-                bail!("REALITY not supported yet");
-            }
             if s(v, "flow").is_some() {
-                bail!("VLESS flow (XTLS) not supported yet");
+                bail!("VLESS flow (XTLS-Vision) not supported yet");
             }
-            ProxyDef::Vless { server, port, uuid: need(v, "uuid")?, tls: flag(v, "tls"), sni, skip_cert_verify: skip, layer: transport(v)? }
+            let reality = match v.get("reality-opts") {
+                Some(o) => {
+                    let def = crate::config::RealityDef {
+                        public_key: need(o, "public-key")?,
+                        short_id: s(o, "short-id").unwrap_or_default(),
+                    };
+                    crate::reality::RealityOpts::parse(&def.public_key, &def.short_id, sni.as_deref().unwrap_or_default())?;
+                    Some(def)
+                }
+                None => None,
+            };
+            ProxyDef::Vless {
+                server,
+                port,
+                uuid: need(v, "uuid")?,
+                tls: flag(v, "tls"),
+                sni,
+                skip_cert_verify: skip,
+                layer: transport(v)?,
+                reality,
+            }
         }
         "trojan" => ProxyDef::Trojan { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, layer: transport(v)? },
         "hysteria2" => {
@@ -151,7 +168,7 @@ proxy-groups:
         let (nodes, skipped) = parse(SAMPLE).unwrap();
         let names: Vec<&str> = nodes.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["HK 01", "JP WS", "US VLESS", "SG Trojan", "KR HY2"]);
-        assert_eq!(skipped, ["REALITY not supported yet", "ss plugins not supported"]);
+        assert_eq!(skipped, ["VLESS flow (XTLS-Vision) not supported yet", "ss plugins not supported"]);
         assert!(matches!(&nodes[0].1, ProxyDef::Shadowsocks { password, .. } if password == "p@ss"));
         match &nodes[1].1 {
             ProxyDef::Vmess { tls: true, layer: Some(Layer::Ws(ws)), sni: Some(sni), .. } => {

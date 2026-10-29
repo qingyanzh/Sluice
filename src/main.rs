@@ -5,6 +5,7 @@ mod dns;
 mod hysteria2;
 mod inbound;
 mod reload;
+mod reality;
 mod router;
 mod rule;
 mod ruleset;

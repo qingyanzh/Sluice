@@ -87,8 +87,19 @@ impl Router {
                 ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, layer } => {
                     Outbound::Trojan(TrojanServer::new(Transport::new(server, port, true, sni, skip_cert_verify, layer)?, &password))
                 }
-                ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer } => {
-                    Outbound::Vless(VlessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, layer)?, &uuid)?)
+                ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer, reality } => {
+                    let reality = match reality {
+                        Some(r) => Some(crate::reality::RealityOpts::parse(
+                            &r.public_key,
+                            &r.short_id,
+                            sni.as_deref().ok_or_else(|| anyhow!("REALITY node {name:?} needs sni"))?,
+                        )?),
+                        None => None,
+                    };
+                    Outbound::Vless(VlessServer::new(
+                        Transport::with_reality(server, port, tls, sni, skip_cert_verify, layer, reality)?,
+                        &uuid,
+                    )?)
                 }
                 ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
                     Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs)?)

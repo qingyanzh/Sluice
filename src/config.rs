@@ -31,6 +31,8 @@ pub enum ProxyDef {
         sni: Option<String>,
         skip_cert_verify: bool,
         layer: Option<Layer>,
+        /// REALITY instead of ordinary TLS; `sni` is the site it impersonates.
+        reality: Option<RealityDef>,
     },
     /// `obfs`: Salamander obfuscation password.
     Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, obfs: Option<String> },
@@ -84,13 +86,19 @@ impl ProxyDef {
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 layer_bits(&mut parts, layer);
             }
-            ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer } => {
+            ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer, reality } => {
                 parts.extend(["vless".into(), server.clone(), port.to_string(), format!("uuid={uuid}")]);
                 if *tls {
                     parts.push("tls=true".into());
                 }
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 layer_bits(&mut parts, layer);
+                if let Some(r) = reality {
+                    parts.push(format!("reality-public-key={}", r.public_key));
+                    if !r.short_id.is_empty() {
+                        parts.push(format!("reality-short-id={}", r.short_id));
+                    }
+                }
             }
             ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
                 parts.extend(["hysteria2".into(), server.clone(), port.to_string(), format!("password={password}")]);
@@ -112,6 +120,13 @@ impl ProxyDef {
         }
         format!("{name} = {}", parts.join(", "))
     }
+}
+
+/// REALITY parameters as written in configs and links (validated when the router is built).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RealityDef {
+    pub public_key: String,
+    pub short_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,6 +225,8 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
             layer: layer.clone(),
+            reality: take("reality-public-key")
+                .map(|public_key| RealityDef { public_key, short_id: take("reality-short-id").unwrap_or_default() }),
         },
         "vmess" => ProxyDef::Vmess {
             server,

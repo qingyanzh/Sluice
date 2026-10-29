@@ -56,13 +56,27 @@ check "HTTPS by IP address ($ip_target) through the TUN" "[ '$code' != 000 ]" "H
 size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' 'https://speed.cloudflare.com/__down?bytes=10000000')
 check "10 MB download through the TUN" "[ '$size' = 10000000 ]" "got $size bytes"
 
+# STUN binding request: UDP that cloud networks rarely block (unlike NTP on some).
+stun=$(python3 -I -c '
+import os, socket, struct
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5)
+tid = os.urandom(12)
+s.sendto(struct.pack("!HHI", 1, 0, 0x2112A442) + tid, ("stun.l.google.com", 19302))
+d, _ = s.recvfrom(1024); print("ok" if d[8:20] == tid else "")
+' 2>/dev/null)
+check "UDP (STUN to stun.l.google.com) through the TUN" "[ '$stun' = ok ]"
+
 ntp=$(python3 -I -c '
 import socket, struct
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5)
 s.sendto(b"\x1b" + 47 * b"\0", ("time.apple.com", 123))
 d, _ = s.recvfrom(1024); print(struct.unpack("!I", d[40:44])[0] - 2208988800)
 ' 2>/dev/null)
-check "UDP (NTP to time.apple.com) through the TUN" "[ -n '$ntp' ]"
+if [ "${SLUICE_CHECK_NTP:-1}" = 1 ]; then
+    check "UDP (NTP to time.apple.com) through the TUN" "[ -n '$ntp' ]"
+else
+    echo "SKIP  NTP (SLUICE_CHECK_NTP=0: this network blocks NTP even without Sluice)"
+fi
 
 route=$(curl -s -m 3 'http://127.0.0.1:6170/v1/route?target=example.org')
 check "API sees the REJECT rule" "echo '$route' | grep -q '\"outbound\":\"REJECT\"'" "$route"

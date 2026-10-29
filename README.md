@@ -16,7 +16,7 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
 ## M1 features
 
 - Inbound: HTTP proxy (CONNECT and plain HTTP), SOCKS5 (CONNECT and UDP ASSOCIATE, no auth)
-- Outbound: DIRECT, REJECT, Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305), Trojan, VLESS (TCP, optional TLS), VMess AEAD (alterId 0; auto / aes-128-gcm / chacha20-poly1305; optional TLS), Hysteria2 (one shared QUIC connection per server; optional Salamander obfuscation: `obfs=salamander, obfs-password=…`)
+- Outbound: DIRECT, REJECT, Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305), Trojan, VLESS (TCP, optional TLS or REALITY: `reality-public-key=…, reality-short-id=…, sni=<site it impersonates>`), VMess AEAD (alterId 0; auto / aes-128-gcm / chacha20-poly1305; optional TLS), Hysteria2 (one shared QUIC connection per server; optional Salamander obfuscation: `obfs=salamander, obfs-password=…`)
 - Transports for VMess / VLESS / Trojan: TCP, TLS, WebSocket (`ws=true, ws-path=/path, ws-headers=Host:cdn.example.com`), WebSocket over TLS, gRPC (`grpc=true, grpc-service-name=…`; Xray "gun")
 - UDP over every outbound:
   - DIRECT
@@ -27,7 +27,7 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - Hysteria2 (QUIC datagrams, with fragmentation)
 - Rules: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, IP-CIDR / IP-CIDR6 (`no-resolve`), GEOIP (needs `geoip-db`), FINAL
 - Rule sets: `RULE-SET,<url|file>,Policy` (Surge rule lists) and `DOMAIN-SET,<url|file>,Policy` (domain lists, `.example.com` = with subdomains; Clash `payload:` lists also accepted). Remote lists are cached in `~/Library/Caches/Sluice` and refreshed every `rule-set-update-interval` seconds (default 86400).
-- Subscriptions: `Group = select, policy-path=<url|file>, policy-regex-filter=<regex>, update-interval=86400` imports nodes from share links (`ss://`, `vmess://`, `vless://`, `trojan://`, `hysteria2://`, plain or base64), Surge proxy lines, or Clash / Mihomo YAML (`proxies:`). Links needing unsupported features (REALITY, XTLS flow, Hysteria2 port hopping) are skipped and reported. Groups sharing a URL share its nodes.
+- Subscriptions: `Group = select, policy-path=<url|file>, policy-regex-filter=<regex>, update-interval=86400` imports nodes from share links (`ss://`, `vmess://`, `vless://`, `trojan://`, `hysteria2://`, plain or base64), Surge proxy lines, or Clash / Mihomo YAML (`proxies:`). Links needing unsupported features (XTLS-Vision flow, Hysteria2 port hopping) are skipped and reported. Groups sharing a URL share its nodes.
 - Policy groups (nestable):
   - `select`: switchable at runtime
   - `url-test`: lowest latency, with `tolerance` to avoid flapping
@@ -97,4 +97,4 @@ TCP, UDP, fake-IP DNS, rules, and cleanup.
 
 If the Mac has an IPv6 default route, IPv6 is captured as well (`::/1` and `8000::/1`). Fake-IP DNS still answers AAAA queries empty, so domain names use IPv4, while apps that connect to IPv6 addresses directly go through Sluice instead of around it.
 
-Not yet: Hysteria2 port hopping, more protocols (TUIC, WireGuard), REALITY, MITM, scripts, GUI, Network Extension packaging.
+Not yet: XTLS-Vision, Hysteria2 port hopping, more protocols (TUIC, WireGuard), MITM, scripts, GUI, Network Extension packaging.

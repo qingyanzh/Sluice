@@ -30,6 +30,16 @@ echo "network before: default via $gw on $iface"; cat "$work/dns-before.txt"
 
 online() { curl -s -m 10 -o /dev/null https://github.com; }
 
+# Some cloud networks drop outbound NTP; check it without Sluice first.
+if python3 -I -c '
+import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5)
+s.sendto(b"\x1b" + 47 * b"\0", ("time.apple.com", 123)); s.recvfrom(1024)' 2>/dev/null; then
+    echo "NTP works without Sluice"
+else
+    echo "NTP is blocked on this network even without Sluice; skipping the NTP check"
+    export SLUICE_CHECK_NTP=0
+fi
+
 # If the runner lost the internet after Sluice stopped, show what changed and put it back.
 repair_if_offline() {
     online && { echo "-- runner online"; return; }
