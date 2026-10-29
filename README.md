@@ -17,6 +17,7 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
 
 - Inbound: HTTP proxy (CONNECT and plain HTTP), SOCKS5 (CONNECT and UDP ASSOCIATE, no auth)
 - Outbound: DIRECT, REJECT, Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305), Trojan, VLESS (TCP, optional TLS), VMess AEAD (alterId 0; auto / aes-128-gcm / chacha20-poly1305; optional TLS), Hysteria2 (TCP; one shared QUIC connection per server)
+- Transports for VMess / VLESS / Trojan: TCP, TLS, WebSocket (`ws=true, ws-path=/path, ws-headers=Host:cdn.example.com`), WebSocket over TLS
 - UDP over every outbound:
   - DIRECT
   - Shadowsocks (per-packet AEAD)
@@ -49,4 +50,4 @@ After a crash, the next start restores DNS from `/var/tmp/sluice-dns-backup`.
 
 Limits: IPv4 only.
 
-Not yet: IPv6 capture, Hysteria2 obfs / port hopping, more protocols (TUIC, WireGuard), WebSocket/gRPC/REALITY transports, MITM, scripts, GUI, Network Extension packaging.
+Not yet: IPv6 capture, Hysteria2 obfs / port hopping, more protocols (TUIC, WireGuard), gRPC/REALITY transports, MITM, scripts, GUI, Network Extension packaging.

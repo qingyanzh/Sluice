@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::config::{Config, GroupDef, GroupKind, ProxyDef};
 use crate::rule::{Matcher, Rule};
 use crate::ss::SsServer;
+use crate::transport::Transport;
 use crate::trojan::TrojanServer;
 use crate::hysteria2::Hy2Server;
 use crate::vless::VlessServer;
@@ -83,17 +84,17 @@ impl Router {
                 ProxyDef::Shadowsocks { server, port, method, password } => {
                     Outbound::Shadowsocks(SsServer::new(server, port, &method, &password)?)
                 }
-                ProxyDef::Trojan { server, port, password, sni, skip_cert_verify } => {
-                    Outbound::Trojan(TrojanServer::new(server, port, &password, sni, skip_cert_verify)?)
+                ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, ws } => {
+                    Outbound::Trojan(TrojanServer::new(Transport::new(server, port, true, sni, skip_cert_verify, ws)?, &password))
                 }
-                ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify } => {
-                    Outbound::Vless(VlessServer::new(server, port, &uuid, tls, sni, skip_cert_verify)?)
+                ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, ws } => {
+                    Outbound::Vless(VlessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, ws)?, &uuid)?)
                 }
                 ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify } => {
                     Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify)?)
                 }
-                ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify } => {
-                    Outbound::Vmess(VmessServer::new(server, port, &uuid, &method, tls, sni, skip_cert_verify)?)
+                ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, ws } => {
+                    Outbound::Vmess(VmessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, ws)?, &uuid, &method)?)
                 }
             };
             if outbounds.insert(name.clone(), ob).is_some() {

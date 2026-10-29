@@ -1,4 +1,4 @@
-//! VLESS client (protocol version 0) over TCP, optionally wrapped in TLS.
+//! VLESS client (protocol version 0) over any stream transport (TCP, TLS, WebSocket).
 //!
 //! Request:  ver(0) uuid(16) addons_len(0) cmd(1=tcp) port(2) atyp addr, then payload.
 //! Response: ver addons_len addons..., then payload.
@@ -9,13 +9,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::{bail, Result};
-use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio_rustls::TlsConnector;
 
-use crate::trojan::tls_client;
+use crate::transport::Transport;
 use crate::udp::{over_stream, Framing, UdpPipe};
-use crate::util::{connect_tcp, BoxStream, Host, Target};
+use crate::util::{BoxStream, Host, Target};
 
 pub fn parse_uuid(s: &str) -> Result<[u8; 16]> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
@@ -129,16 +127,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessStream<S> {
 }
 
 pub struct VlessServer {
-    server: String,
-    port: u16,
     uuid: [u8; 16],
-    tls: Option<(TlsConnector, ServerName<'static>)>,
+    transport: Transport,
 }
 
 impl VlessServer {
-    pub fn new(server: String, port: u16, uuid: &str, tls: bool, sni: Option<String>, skip_cert_verify: bool) -> Result<Self> {
-        let tls = if tls { Some(tls_client(&server, sni, skip_cert_verify)?) } else { None };
-        Ok(VlessServer { server, port, uuid: parse_uuid(uuid)?, tls })
+    pub fn new(transport: Transport, uuid: &str) -> Result<Self> {
+        Ok(VlessServer { uuid: parse_uuid(uuid)?, transport })
     }
 
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
@@ -151,12 +146,8 @@ impl VlessServer {
     }
 
     async fn connect_cmd(&self, target: &Target, cmd: u8) -> Result<BoxStream> {
-        let tcp = connect_tcp(&self.server, self.port).await?;
         let header = request_header(&self.uuid, cmd, target)?;
-        let mut stream: BoxStream = match &self.tls {
-            Some((connector, sni)) => Box::new(connector.connect(sni.clone(), tcp).await?),
-            None => Box::new(tcp),
-        };
+        let mut stream = self.transport.connect().await?;
         stream.write_all(&header).await?;
         stream.flush().await?;
         Ok(Box::new(VlessStream { inner: stream, head: Head::Version }))

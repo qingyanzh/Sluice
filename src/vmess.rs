@@ -1,5 +1,5 @@
 //! VMess client with AEAD headers (alterId 0), chunk stream + length masking,
-//! body security aes-128-gcm or chacha20-poly1305, over TCP with optional TLS.
+//! body security aes-128-gcm or chacha20-poly1305, over any stream transport (TCP, TLS, WebSocket).
 
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,16 +13,14 @@ use chacha20poly1305::ChaCha20Poly1305;
 use log::debug;
 use md5::{Digest, Md5};
 use rand::RngCore;
-use rustls::pki_types::ServerName;
 use sha2::Sha256;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake128;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio_rustls::TlsConnector;
 
-use crate::trojan::tls_client;
+use crate::transport::Transport;
 use crate::udp::{pipe_pair, UdpPipe};
-use crate::util::{connect_tcp, BoxStream, Host, Target};
+use crate::util::{BoxStream, Host, Target};
 use crate::vless::parse_uuid;
 
 const TAG: usize = 16;
@@ -337,41 +335,22 @@ where
 }
 
 pub struct VmessServer {
-    server: String,
-    port: u16,
     cmd_key: [u8; 16],
     sec: Security,
-    tls: Option<(TlsConnector, ServerName<'static>)>,
+    transport: Transport,
 }
 
 impl VmessServer {
-    pub fn new(
-        server: String,
-        port: u16,
-        uuid: &str,
-        method: &str,
-        tls: bool,
-        sni: Option<String>,
-        skip_cert_verify: bool,
-    ) -> Result<Self> {
+    pub fn new(transport: Transport, uuid: &str, method: &str) -> Result<Self> {
         let mut h = Md5::new();
         Digest::update(&mut h, parse_uuid(uuid)?);
         Digest::update(&mut h, b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
-        let tls = if tls { Some(tls_client(&server, sni, skip_cert_verify)?) } else { None };
-        Ok(VmessServer { server, port, cmd_key: h.finalize().into(), sec: Security::parse(method)?, tls })
-    }
-
-    async fn transport(&self) -> Result<BoxStream> {
-        let tcp = connect_tcp(&self.server, self.port).await?;
-        Ok(match &self.tls {
-            Some((connector, sni)) => Box::new(connector.connect(sni.clone(), tcp).await?),
-            None => Box::new(tcp),
-        })
+        Ok(VmessServer { cmd_key: h.finalize().into(), sec: Security::parse(method)?, transport })
     }
 
     /// UDP (cmd 2): each body chunk carries exactly one packet.
     pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
-        let stream = self.transport().await?;
+        let stream = self.transport.connect().await?;
         let sess = Session::new(self.sec);
         let head = seal_header(&self.cmd_key, &request_header(sess.sec, &sess.key, &sess.iv, sess.resp_v, 2, target)?);
         let (mut rd, mut wr) = tokio::io::split(stream);
@@ -417,7 +396,7 @@ impl VmessServer {
     }
 
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
-        let stream = self.transport().await?;
+        let stream = self.transport.connect().await?;
         let sess = Session::new(self.sec);
         let head = seal_header(&self.cmd_key, &request_header(sess.sec, &sess.key, &sess.iv, sess.resp_v, 1, target)?);
         let (rd, wr) = tokio::io::split(stream);

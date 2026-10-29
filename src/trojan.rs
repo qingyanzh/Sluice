@@ -12,7 +12,8 @@ use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsConnector;
 
 use crate::udp::{over_stream, Framing, UdpPipe};
-use crate::util::{connect_tcp, BoxStream, Target};
+use crate::transport::Transport;
+use crate::util::{BoxStream, Target};
 
 /// Accepts any certificate; only used with `skip-cert-verify=true`.
 #[derive(Debug)]
@@ -54,11 +55,8 @@ impl ServerCertVerifier for NoVerify {
 }
 
 pub struct TrojanServer {
-    server: String,
-    port: u16,
     hash: String,
-    sni: ServerName<'static>,
-    connector: TlsConnector,
+    transport: Transport,
 }
 
 /// TLS 1.3-only client config for QUIC-based protocols, with the given ALPN.
@@ -91,9 +89,9 @@ pub fn tls_client(server: &str, sni: Option<String>, skip_cert_verify: bool) -> 
 }
 
 impl TrojanServer {
-    pub fn new(server: String, port: u16, password: &str, sni: Option<String>, skip_cert_verify: bool) -> Result<Self> {
-        let (connector, sni) = tls_client(&server, sni, skip_cert_verify)?;
-        Ok(TrojanServer { server, port, hash: hex::encode(Sha224::digest(password.as_bytes())), sni, connector })
+    /// `transport` should have TLS enabled; Trojan has no encryption of its own.
+    pub fn new(transport: Transport, password: &str) -> Self {
+        TrojanServer { hash: hex::encode(Sha224::digest(password.as_bytes())), transport }
     }
 
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
@@ -106,16 +104,15 @@ impl TrojanServer {
     }
 
     async fn connect_cmd(&self, target: &Target, cmd: u8) -> Result<BoxStream> {
-        let tcp = connect_tcp(&self.server, self.port).await?;
-        let mut tls = self.connector.connect(self.sni.clone(), tcp).await?;
+        let mut stream = self.transport.connect().await?;
         let mut req = Vec::with_capacity(64);
         req.extend_from_slice(self.hash.as_bytes());
         req.extend_from_slice(b"\r\n");
         req.push(cmd);
         target.write_socks_addr(&mut req)?;
         req.extend_from_slice(b"\r\n");
-        tls.write_all(&req).await?;
-        tls.flush().await?;
-        Ok(Box::new(tls))
+        stream.write_all(&req).await?;
+        stream.flush().await?;
+        Ok(stream)
     }
 }

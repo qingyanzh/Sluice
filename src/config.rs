@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::rule::Rule;
+use crate::transport::WsOpts;
 
 #[derive(Debug, Default)]
 pub struct General {
@@ -20,8 +21,16 @@ pub struct General {
 #[derive(Debug, Clone)]
 pub enum ProxyDef {
     Shadowsocks { server: String, port: u16, method: String, password: String },
-    Trojan { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool },
-    Vless { server: String, port: u16, uuid: String, tls: bool, sni: Option<String>, skip_cert_verify: bool },
+    Trojan { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, ws: Option<WsOpts> },
+    Vless {
+        server: String,
+        port: u16,
+        uuid: String,
+        tls: bool,
+        sni: Option<String>,
+        skip_cert_verify: bool,
+        ws: Option<WsOpts>,
+    },
     Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool },
     Vmess {
         server: String,
@@ -31,6 +40,7 @@ pub enum ProxyDef {
         tls: bool,
         sni: Option<String>,
         skip_cert_verify: bool,
+        ws: Option<WsOpts>,
     },
 }
 
@@ -96,6 +106,7 @@ fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
         params.insert(k.to_ascii_lowercase(), unquote(v).to_string());
     }
     let mut take = |k: &str| params.remove(k);
+    let ws = matches!(take("ws").as_deref(), Some("true" | "1")).then(|| WsOpts::from_params(take("ws-path"), take("ws-headers")));
     let def = match parts[0].to_ascii_lowercase().as_str() {
         "ss" => ProxyDef::Shadowsocks {
             server,
@@ -109,6 +120,7 @@ fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             password: take("password").ok_or_else(|| anyhow!("trojan needs password"))?,
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
+            ws: ws.clone(),
         },
         "vless" => ProxyDef::Vless {
             server,
@@ -117,6 +129,7 @@ fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             tls: matches!(take("tls").as_deref(), Some("true" | "1")),
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
+            ws: ws.clone(),
         },
         "vmess" => ProxyDef::Vmess {
             server,
@@ -126,6 +139,7 @@ fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             tls: matches!(take("tls").as_deref(), Some("true" | "1")),
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
+            ws: ws.clone(),
         },
         "hysteria2" | "hy2" => ProxyDef::Hysteria2 {
             server,
@@ -225,9 +239,15 @@ mod tests {
     fn parse_sample() {
         let cfg = Config::parse(include_str!("../examples/sluice.conf")).unwrap();
         assert_eq!(cfg.general.http_listen.as_deref(), Some("127.0.0.1:6152"));
-        assert_eq!(cfg.proxies.len(), 5);
-        assert!(matches!(&cfg.proxies[2].1, ProxyDef::Vmess { tls: true, .. }));
-        assert!(matches!(&cfg.proxies[4].1, ProxyDef::Vless { tls: true, .. }));
+        assert_eq!(cfg.proxies.len(), 6);
+        assert!(matches!(&cfg.proxies[2].1, ProxyDef::Vmess { tls: true, ws: None, .. }));
+        match &cfg.proxies[4].1 {
+            ProxyDef::Vmess { ws: Some(ws), .. } => {
+                assert_eq!((ws.path.as_str(), ws.host.as_deref()), ("/ray", Some("cdn.example.com")))
+            }
+            other => panic!("expected VMess over WebSocket, got {other:?}"),
+        }
+        assert!(matches!(&cfg.proxies[5].1, ProxyDef::Vless { tls: true, .. }));
         assert!(matches!(&cfg.proxies[1].1, ProxyDef::Trojan { skip_cert_verify: false, .. }));
         assert_eq!(cfg.groups[0].options, vec!["Auto", "HK-SS", "JP-Trojan", "US-VLESS", "DIRECT"]);
         assert_eq!(cfg.groups[1].kind, GroupKind::UrlTest { tolerance_ms: 50 });
