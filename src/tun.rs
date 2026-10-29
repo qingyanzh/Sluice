@@ -74,6 +74,7 @@ async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<Fa
 
     let Some(target) = to_target(dst, &fake) else { return Ok(()) };
     let Some(mut pipe) = router.dispatch_udp(&target).await? else { return Ok(()) };
+    debug!("TUN UDP {} -> {target}: flow open", udp.local_addr());
     // ipstack ends the stream after its UDP idle timeout, which closes the pipe.
     loop {
         tokio::select! {

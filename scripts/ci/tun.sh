@@ -50,7 +50,7 @@ repair_if_offline() {
 
 cat > "$work/tun-proxy.conf" <<'EOF'
 [General]
-loglevel = info
+loglevel = debug
 enhanced-mode = true
 api-listen = 127.0.0.1:6170
 [Proxy]
@@ -76,14 +76,19 @@ run_case() {
     scripts/tun-check.sh after || fails=$((fails + 1))
     repair_if_offline
     echo "-- sluice log"
-    grep -vE "^\[.*INFO \] [0-9a-z.:\[\]-]+ -> " "ci-logs/tun-$name.log" | tail -20
+    grep -vE "^\[.*INFO \] [0-9a-z.:\[\]-]+ -> |DEBUG" "ci-logs/tun-$name.log" | tail -20
+    echo "-- UDP debug"
+    grep -E "DEBUG.*UDP" "ci-logs/tun-$name.log" | grep -vE "apple-dns|icloud" | tail -12
     echo "   ($(grep -c ' -> ' "ci-logs/tun-$name.log") connections logged; $(grep -c 'via SS' "ci-logs/tun-$name.log") via SS)"
 }
 
-ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U > ci-logs/tun-ssserver.log 2>&1 &
+# The test server runs on this machine, so its own outgoing traffic must bypass the TUN,
+# as a real remote server's would; otherwise it loops back into Sluice.
+ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U --outbound-bind-interface "$iface" > ci-logs/tun-ssserver.log 2>&1 &
 ss_pid=$!
 sleep 1
-run_case direct examples/tun-test.conf
+sed 's/^loglevel = .*/loglevel = debug/' examples/tun-test.conf > "$work/tun-direct.conf"
+run_case direct "$work/tun-direct.conf"
 run_case proxy "$work/tun-proxy.conf"
 kill $ss_pid 2>/dev/null
 

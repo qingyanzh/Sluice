@@ -100,13 +100,45 @@ fn set_dns(service: &str, servers: &[String]) -> Result<()> {
     sh("networksetup", &args).map(|_| ())
 }
 
+/// Restores DNS, retrying briefly; the backup file is kept unless every service was
+/// restored, so the next start can finish the job.
 fn restore_dns(backup: &[(String, Vec<String>)]) {
+    let mut all_ok = true;
     for (service, servers) in backup {
-        if let Err(e) = set_dns(service, servers) {
-            warn!("restore DNS for {service}: {e:#}");
+        let mut result = set_dns(service, servers);
+        for _ in 0..3 {
+            if result.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            result = set_dns(service, servers);
+        }
+        if let Err(e) = result {
+            all_ok = false;
+            warn!("restore DNS for {service}: {e:#}; backup kept in {DNS_BACKUP}");
         }
     }
-    let _ = std::fs::remove_file(DNS_BACKUP);
+    if all_ok {
+        let _ = std::fs::remove_file(DNS_BACKUP);
+    }
+}
+
+/// Raises the open-file limit toward the hard limit: busy machines (or a routing loop)
+/// can open thousands of sockets, and running out would also break cleanup.
+pub fn raise_fd_limit() {
+    unsafe {
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        let want = lim.rlim_max.min(65536);
+        if lim.rlim_cur < want {
+            lim.rlim_cur = want;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+                info!("open-file limit raised to {want}");
+            }
+        }
+    }
 }
 
 /// Puts DNS back if a previous run died without cleaning up.

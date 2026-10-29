@@ -87,7 +87,7 @@ for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS
     https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
     size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \
         'https://speed.cloudflare.com/__down?bytes=10000000')
-    udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8 2>&1 | tail -1)
+    udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
     ok=yes
     [ "$https" = 200 ] || ok=no
     [ "$size" = 10000000 ] || ok=no

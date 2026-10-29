@@ -1,13 +1,13 @@
 """SOCKS5 UDP ASSOCIATE client: sends DNS queries to <server>:53 through the proxy and counts valid replies.
 
-Usage: udp_dns_check.py <socks-port> <dns-server-ip>; exits non-zero unless every query is answered.
+Usage: udp_dns_check.py <socks-port> <dns-ip[,dns-ip...]>; exits non-zero unless every query is answered.
 """
 import random
 import socket
 import struct
 import sys
 
-proxy_port, server = int(sys.argv[1]), sys.argv[2]
+proxy_port, servers = int(sys.argv[1]), sys.argv[2].split(",")
 
 
 def query(name, qtype, edns=False):
@@ -31,12 +31,13 @@ relay = (socket.inet_ntoa(rep[4:8]), struct.unpack(">H", rep[8:10])[0])
 
 u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 u.settimeout(4)
-head = b"\0\0\0\x01" + socket.inet_aton(server) + struct.pack(">H", 53)
+def head_for(i):
+    return b"\0\0\0\x01" + socket.inet_aton(servers[i % len(servers)]) + struct.pack(">H", 53)
 
-def ask(name, qtype, edns):
+def ask(i, name, qtype, edns):
     """Sends one query and returns the reply size, or None if nothing came back in time."""
     qid, q = query(name, qtype, edns)
-    u.sendto(head + q, relay)
+    u.sendto(head_for(i) + q, relay)
     try:
         while True:
             data, _ = u.recvfrom(65535)
@@ -51,10 +52,12 @@ def ask(name, qtype, edns):
 # The query numbers that needed a retry are printed: a miss that is always #1 would point
 # at a bug (first packet of a flow dropped), scattered misses are ordinary loss.
 ok, sizes, retried = 0, [], []
-cases = [("example.com", 1, False)] * 20 + [("google.com", 16, True)] * 3
+# Large TXT answers vary by domain and resolver: public resolvers rate-limit repeated
+# large responses to one source address, which would look like proxy loss.
+cases = [("example.com", 1, False)] * 20 + [(d, 16, True) for d in ("google.com", "microsoft.com", "apple.com")]
 for i, case in enumerate(cases, 1):
     for attempt in range(3):
-        size = ask(*case)
+        size = ask(i + attempt, *case)
         if size is not None:
             ok += 1
             sizes.append(size)

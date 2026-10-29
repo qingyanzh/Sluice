@@ -152,6 +152,7 @@ async fn run() -> Result<()> {
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(format!("sluice={level}")))
                 .format_target(false)
                 .init();
+            sysnet::raise_fd_limit();
             let (cfg, router) = build(cfg, path, false).await?;
             let reloader = reload::Reloader::start(router, &cfg, path);
             reloader.spawn_triggers()?;

@@ -32,7 +32,8 @@ check "system DNS points at 198.18.0.2" "scutil --dns | grep -q 'nameserver\[[0-
 ip=$(dig +short +time=3 +tries=1 example.com A | head -1)
 check "fake-IP answer for example.com" "[[ '$ip' == 198.18.* ]]" "got '$ip'"
 aaaa=$(dig +short +time=3 +tries=1 example.com AAAA | head -1)
-if route -n get -inet6 default > /dev/null 2>&1; then
+# `route get` exits 0 even without a route; a real IPv6 default has a gateway line.
+if route -n get -inet6 default 2>/dev/null | grep -q "gateway:"; then
     check "IPv6 routes ::/1 and 8000::/1 via $utun" "[ \$(netstat -rn -f inet6 | grep -E '^(::/1|8000::/1) ' | grep -c '$utun') = 2 ]"
     code6=$(curl -6 -s -m 10 -o /dev/null -w '%{http_code}' https://ipv6.google.com/)
     check "HTTPS over IPv6 through the TUN" "[ '$code6' != 000 ]" "HTTP $code6"

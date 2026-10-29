@@ -67,20 +67,29 @@ pub async fn direct(target: &Target) -> Result<UdpPipe> {
     let sock = udp_socket(&addr)?;
     sock.connect(addr).await?;
     let (app, mut side) = pipe_pair();
+    let label = target.to_string();
     tokio::spawn(async move {
         let mut buf = vec![0u8; MAX_PACKET];
+        let (mut sent, mut received) = (0u32, 0u32);
         loop {
             tokio::select! {
                 p = side.rx.recv() => match p {
-                    Some(p) => { let _ = sock.send(&p).await; }
+                    Some(p) => {
+                        if let Err(e) = sock.send(&p).await { debug!("UDP direct {label} via {addr}: send: {e}"); }
+                        sent += 1;
+                    }
                     None => break,
                 },
                 r = sock.recv(&mut buf) => match r {
-                    Ok(n) => if side.tx.send(buf[..n].to_vec()).await.is_err() { break },
-                    Err(e) => { debug!("UDP direct: {e}"); break }
+                    Ok(n) => {
+                        received += 1;
+                        if side.tx.send(buf[..n].to_vec()).await.is_err() { break }
+                    }
+                    Err(e) => { debug!("UDP direct {label} via {addr}: recv: {e}"); break }
                 },
             }
         }
+        debug!("UDP direct {label} via {addr} closed: {sent} sent, {received} received");
     });
     Ok(app)
 }
