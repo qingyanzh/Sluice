@@ -39,6 +39,20 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - `POST /v1/policies/<group>?select=<option>`
   - `POST /v1/policies/<group>/test` (run a health check now)
   - `GET /v1/route?target=host:port`
+  - `POST /v1/reload`
+
+## Hot reload
+
+Sluice reloads the config, without dropping connections, in these cases:
+- the config file changes (checked every 2 s)
+- it receives `SIGHUP`
+- `POST /v1/reload` is called
+- a subscription's `update-interval` elapses
+
+New connections use the new config, and existing ones finish on the old one. A config with
+errors is rejected and the running one is kept. Manual choices in groups, and health-check
+results, carry over wherever the group and option still exist. Listen addresses and
+enhanced-mode settings only apply after a restart.
 
 ## Enhanced mode (M2, macOS)
 

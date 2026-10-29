@@ -3,6 +3,7 @@ mod config;
 mod dns;
 mod hysteria2;
 mod inbound;
+mod reload;
 mod router;
 mod rule;
 mod ruleset;
@@ -23,8 +24,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use config::Config;
-use router::Router;
+use reload::{build, read_config};
 use util::Target;
 
 const USAGE: &str = "\
@@ -35,46 +35,9 @@ usage:
   sluice check <config.conf>                 validate the config
   sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses";
 
-fn read_config(path: &str) -> Result<Config> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
-    Config::parse(&text)
-}
-
-fn config_dir(path: &str) -> &std::path::Path {
-    std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."))
-}
-
-/// Expands subscriptions, builds the router and fills rule sets. With `strict` off,
-/// unreachable subscriptions and rule sets only warn.
-async fn build(mut cfg: Config, path: &str, strict: bool) -> Result<(Config, Router)> {
-    subscription::expand(&mut cfg, config_dir(path), strict).await?;
-    let router = Router::new(&cfg)?;
-    load_rule_sets(&router, path, rule_set_interval(&cfg), strict).await?;
-    Ok((cfg, router))
-}
-
-fn rule_set_interval(cfg: &Config) -> std::time::Duration {
-    std::time::Duration::from_secs(cfg.general.rule_set_update_interval.unwrap_or(86400).max(60))
-}
-
-/// Fills every RULE-SET / DOMAIN-SET; relative file paths are relative to the config file.
-/// With `strict` off, a set that can't be loaded is left empty with a warning.
-async fn load_rule_sets(router: &Router, config_path: &str, max_age: std::time::Duration, strict: bool) -> Result<()> {
-    let base = config_dir(config_path);
-    for set in router.rule_sets() {
-        if let Err(e) = ruleset::load(&set, base, max_age).await {
-            if strict {
-                return Err(e);
-            }
-            log::warn!("{e:#}; continuing with it empty");
-        }
-    }
-    Ok(())
-}
-
 fn start_tun(
     g: &config::General,
-    router: Arc<Router>,
+    handle: Arc<reload::RouterHandle>,
     tasks: &mut tokio::task::JoinSet<Result<()>>,
 ) -> Result<sysnet::SystemGuard> {
     if !sysnet::is_root() {
@@ -114,7 +77,7 @@ fn start_tun(
     let (dev, name) = tun::create(tun_ip, dns_ip, mtu)?;
     log::info!("enhanced mode on {name} ({tun_ip}), fake IPs from {range}");
     let guard = sysnet::SystemGuard::apply(&name, range, &dns_ip.to_string())?;
-    tasks.spawn(tun::serve(dev, mtu, router, fake));
+    tasks.spawn(tun::serve(dev, mtu, handle, fake));
     Ok(guard)
 }
 
@@ -152,23 +115,23 @@ async fn run() -> Result<()> {
                 .format_target(false)
                 .init();
             let (cfg, router) = build(cfg, path, false).await?;
-            ruleset::spawn_refresh(router.rule_sets(), rule_set_interval(&cfg));
-            let router = Arc::new(router);
-            router.spawn_health_checks();
+            let reloader = reload::Reloader::start(router, &cfg, path);
+            reloader.spawn_triggers()?;
+            let handle = reloader.handle.clone();
             let g = cfg.general;
             let mut tasks = tokio::task::JoinSet::new();
             if let Some(addr) = g.http_listen.clone() {
-                tasks.spawn(inbound::serve("HTTP", addr, router.clone(), inbound::http_conn));
+                tasks.spawn(inbound::serve("HTTP", addr, handle.clone(), inbound::http_conn));
             }
             if let Some(addr) = g.socks5_listen.clone() {
-                tasks.spawn(inbound::serve("SOCKS5", addr, router.clone(), inbound::socks5_conn));
+                tasks.spawn(inbound::serve("SOCKS5", addr, handle.clone(), inbound::socks5_conn));
             }
             if let Some(addr) = g.api_listen.clone() {
-                tasks.spawn(api::serve(addr, router.clone()));
+                tasks.spawn(api::serve(addr, reloader.clone()));
             }
             // Held until shutdown; dropping it restores routes and DNS.
             let _system = if g.enhanced_mode {
-                Some(start_tun(&g, router.clone(), &mut tasks)?)
+                Some(start_tun(&g, handle.clone(), &mut tasks)?)
             } else {
                 None
             };

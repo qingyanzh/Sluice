@@ -12,12 +12,13 @@ use tokio::sync::mpsc;
 
 use crate::udp::{parse_socks_addr, UdpPipe, MAX_PACKET};
 
+use crate::reload::RouterHandle;
 use crate::router::Router;
 use crate::util::{BoxStream, Target};
 
 const MAX_HEAD: usize = 64 * 1024;
 
-pub async fn serve<F, Fut>(name: &'static str, addr: String, router: Arc<Router>, handler: F) -> Result<()>
+pub async fn serve<F, Fut>(name: &'static str, addr: String, handle: Arc<RouterHandle>, handler: F) -> Result<()>
 where
     F: Fn(TcpStream, Arc<Router>) -> Fut + Copy + Send + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
@@ -27,7 +28,7 @@ where
     loop {
         let (sock, peer) = listener.accept().await?;
         let _ = sock.set_nodelay(true);
-        let router = router.clone();
+        let router = handle.current();
         tokio::spawn(async move {
             if let Err(e) = handler(sock, router).await {
                 debug!("{name} {peer}: {e:#}");

@@ -4,6 +4,7 @@
 //!   POST /v1/policies/<group>?select=<opt>  switch a select group
 //!   POST /v1/policies/<group>/test          run an automatic group's health check now
 //!   GET  /v1/route?target=<host[:port]>     explain which rule and outbound a target hits
+//!   POST /v1/reload                         reload the config file (and subscriptions)
 
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use log::{debug, info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::router::Router;
+use crate::reload::Reloader;
 use crate::util::Target;
 
 fn json_str(s: &str) -> String {
@@ -54,7 +55,8 @@ fn query_param(query: &str, key: &str) -> Option<String> {
     })
 }
 
-async fn handle(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
+async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
+    let router = reloader.handle.current();
     let mut buf = vec![0u8; 8192];
     let n = sock.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
@@ -106,6 +108,10 @@ async fn handle(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
                 None => ("400 Bad Request", "{\"error\":\"missing ?select=\"}".to_string()),
             }
         }
+        ("POST", "/v1/reload") => match reloader.reload("API").await {
+            Ok(summary) => ("200 OK", format!("{{\"reloaded\":true,\"summary\":{}}}", json_str(&summary))),
+            Err(e) => ("400 Bad Request", format!("{{\"error\":{}}}", json_str(&format!("{e:#}")))),
+        },
         ("GET", "/v1/route") => match query_param(query, "target").map(|t| Target::parse_authority(&t, 443)) {
             Some(Ok(t)) => match router.decide(&t).await {
                 Ok(d) => (
@@ -132,14 +138,14 @@ async fn handle(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(addr: String, router: Arc<Router>) -> Result<()> {
+pub async fn serve(addr: String, reloader: Arc<Reloader>) -> Result<()> {
     let listener = TcpListener::bind(&addr).await.map_err(|e| anyhow::anyhow!("bind api on {addr}: {e}"))?;
     info!("control API listening on http://{addr}");
     loop {
         let (sock, _) = listener.accept().await?;
-        let router = router.clone();
+        let reloader = reloader.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(sock, router).await {
+            if let Err(e) = handle(sock, reloader).await {
                 debug!("api: {e:#}");
             }
         });

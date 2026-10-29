@@ -188,15 +188,20 @@ pub async fn load(set: &RuleSet, base: &Path, max_age: Duration) -> Result<usize
 }
 
 /// Re-downloads remote sets every `interval`.
+/// Stops once the sets are dropped (their router was replaced by a reload).
 pub fn spawn_refresh(sets: Vec<Arc<RuleSet>>, interval: Duration) {
-    let remote: Vec<_> = sets.into_iter().filter(|s| s.is_remote()).collect();
+    let remote: Vec<std::sync::Weak<RuleSet>> = sets.iter().filter(|s| s.is_remote()).map(Arc::downgrade).collect();
     if remote.is_empty() {
         return;
     }
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            for s in &remote {
+            let live: Vec<Arc<RuleSet>> = remote.iter().filter_map(std::sync::Weak::upgrade).collect();
+            if live.is_empty() {
+                return;
+            }
+            for s in &live {
                 // max_age zero forces a download; the cache is still the fallback.
                 if let Err(e) = load(s, Path::new("."), Duration::ZERO).await {
                     warn!("{e:#}");

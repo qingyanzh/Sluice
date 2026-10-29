@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tun::AbstractDevice;
 
 use crate::dns::FakeDns;
+use crate::reload::RouterHandle;
 use crate::router::Router;
 use crate::util::{Host, Target};
 
@@ -86,7 +87,7 @@ async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<Fa
     }
 }
 
-pub async fn serve(dev: tun::AsyncDevice, mtu: u16, router: Arc<Router>, fake: Arc<FakeDns>) -> Result<()> {
+pub async fn serve(dev: tun::AsyncDevice, mtu: u16, handle: Arc<RouterHandle>, fake: Arc<FakeDns>) -> Result<()> {
     let mut cfg = IpStackConfig::default();
     cfg.mtu(mtu).map_err(|e| anyhow!("ipstack mtu: {e:?}"))?;
     cfg.udp_timeout(Duration::from_secs(60));
@@ -94,10 +95,10 @@ pub async fn serve(dev: tun::AsyncDevice, mtu: u16, router: Arc<Router>, fake: A
     loop {
         match stack.accept().await.map_err(|e| anyhow!("TUN stack: {e:?}"))? {
             IpStackStream::Tcp(tcp) => {
-                tokio::spawn(handle_tcp(tcp, router.clone(), fake.clone()));
+                tokio::spawn(handle_tcp(tcp, handle.current(), fake.clone()));
             }
             IpStackStream::Udp(udp) => {
-                let (router, fake) = (router.clone(), fake.clone());
+                let (router, fake) = (handle.current(), fake.clone());
                 tokio::spawn(async move {
                     if let Err(e) = handle_udp(udp, router, fake).await {
                         debug!("UDP: {e:#}");

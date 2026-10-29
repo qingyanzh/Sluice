@@ -385,15 +385,46 @@ impl Router {
     }
 
     /// Runs health checks for every automatic group, forever, each on its own interval.
+    /// Stops on its own once this router is replaced by a reload and dropped.
     pub fn spawn_health_checks(self: &Arc<Self>) {
         for g in self.groups.iter().filter(|g| g.kind != GroupKind::Select) {
-            let (me, name, every) = (self.clone(), g.name.clone(), Duration::from_secs(g.interval_secs));
+            let (me, name, every) = (Arc::downgrade(self), g.name.clone(), Duration::from_secs(g.interval_secs));
             tokio::spawn(async move {
-                loop {
-                    me.check_group(&name).await;
+                while let Some(router) = me.upgrade() {
+                    router.check_group(&name).await;
+                    drop(router);
                     tokio::time::sleep(every).await;
                 }
             });
+        }
+    }
+
+    /// Carries group selections and health-check results over from the router being
+    /// replaced, wherever the same group and option still exist.
+    pub fn inherit_state(&self, old: &Router) {
+        let old_selected = old.selected.read().unwrap().clone();
+        let mut selected = self.selected.write().unwrap();
+        for g in self.groups.iter().filter(|g| g.kind != GroupKind::LoadBalance) {
+            if let Some(prev) = old_selected.get(&g.name).filter(|p| g.options.contains(p)) {
+                selected.insert(g.name.clone(), prev.clone());
+            }
+        }
+        drop(selected);
+        if self.groups.iter().any(|g| self.resolve(&g.name).is_err()) {
+            // A carried-over choice formed a loop with the new groups; fall back to defaults.
+            let mut selected = self.selected.write().unwrap();
+            for g in &self.groups {
+                selected.insert(g.name.clone(), g.options[0].clone());
+            }
+        }
+        let old_latency = old.latency.read().unwrap();
+        let mut latency = self.latency.write().unwrap();
+        for g in &self.groups {
+            for o in &g.options {
+                if let Some(l) = old_latency.get(o) {
+                    latency.insert(o.clone(), *l);
+                }
+            }
         }
     }
 }
@@ -444,6 +475,19 @@ FINAL,DIRECT
         assert_eq!(decide(&r, "google.com").await.1, "DIRECT");
         assert!(r.select("Proxy", "REJECT").is_err());
         assert!(r.select("Nope", "A").is_err());
+    }
+
+    #[test]
+    fn inherit_state_keeps_valid_choices() {
+        let old = router(CONF);
+        old.select("Proxy", "DIRECT").unwrap();
+        let new = router(CONF);
+        new.inherit_state(&old);
+        assert_eq!(new.groups().iter().find(|g| g.name == "Proxy").unwrap().selected, "DIRECT");
+        // An option that no longer exists is not carried over.
+        let gone = router(&CONF.replace("Proxy = select, A, DIRECT", "Proxy = select, A"));
+        gone.inherit_state(&old);
+        assert_eq!(gone.groups().iter().find(|g| g.name == "Proxy").unwrap().selected, "A");
     }
 
     #[test]
