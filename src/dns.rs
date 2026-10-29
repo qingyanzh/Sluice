@@ -177,7 +177,7 @@ fn parse_a_records(p: &[u8], id: u16) -> Option<Vec<IpAddr>> {
 async fn exchange(query: &[u8], upstream: &[SocketAddr]) -> Result<Vec<u8>> {
     for server in upstream {
         let attempt = async {
-            let sock = udp_socket(server.is_ipv6())?;
+            let sock = udp_socket(server)?;
             sock.send_to(query, server).await?;
             let mut buf = vec![0u8; 4096];
             let (n, _) = sock.recv_from(&mut buf).await?;

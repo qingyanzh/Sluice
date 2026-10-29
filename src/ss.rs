@@ -213,7 +213,7 @@ impl SsServer {
 
     pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
         let addr = *resolve(&self.server, self.port).await?.first().ok_or_else(|| anyhow!("{}: no address", self.server))?;
-        let sock = udp_socket(addr.is_ipv6())?;
+        let sock = udp_socket(&addr)?;
         sock.connect(addr).await?;
         let mut header = Vec::new();
         target.write_socks_addr(&mut header)?;

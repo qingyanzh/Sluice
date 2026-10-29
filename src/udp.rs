@@ -64,7 +64,7 @@ pub async fn read_socks_addr<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result
 /// DIRECT: a connected socket on the egress interface.
 pub async fn direct(target: &Target) -> Result<UdpPipe> {
     let addr = *resolve(&target.host_str(), target.port).await?.first().ok_or_else(|| anyhow!("{target}: no address"))?;
-    let sock = udp_socket(addr.is_ipv6())?;
+    let sock = udp_socket(&addr)?;
     sock.connect(addr).await?;
     let (app, mut side) = pipe_pair();
     tokio::spawn(async move {

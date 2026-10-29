@@ -41,7 +41,7 @@ code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' https://example.org/)
 org_ip=$(dig +short +time=3 +tries=1 example.org A | head -1)
 check "REJECT rule blocks example.org (resolved to fake IP $org_ip)" "[[ '$org_ip' == 198.18.* ]] && [ '$code' = 000 ]" "HTTP $code"
 # Any HTTP status proves the TCP+TLS path works; override the IP if it's blocked on your network.
-ip_target=${SLUICE_CHECK_IP:-223.5.5.5}
+ip_target=${SLUICE_CHECK_IP:-1.1.1.1}
 code=$(curl -s -m 10 -k -o /dev/null -w '%{http_code}' "https://$ip_target/")
 check "HTTPS by IP address ($ip_target) through the TUN" "[ '$code' != 000 ]" "HTTP $code"
 size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' 'https://speed.cloudflare.com/__down?bytes=10000000')

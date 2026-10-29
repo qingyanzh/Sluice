@@ -185,7 +185,7 @@ impl Hy2Server {
 
     async fn dial(&self) -> Result<Live> {
         let addr = *resolve(&self.server, self.port).await?.first().ok_or_else(|| anyhow!("{}: no address", self.server))?;
-        let socket = udp_socket_std(addr.is_ipv6())?;
+        let socket = udp_socket_std(&addr)?;
         let endpoint =
             quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
         let conn = tokio::time::timeout(

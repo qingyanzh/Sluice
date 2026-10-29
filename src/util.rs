@@ -115,9 +115,14 @@ pub fn set_egress(e: Egress) {
     let _ = EGRESS.set(e);
 }
 
-fn bind_egress(sock: SockRef<'_>, v6: bool) -> std::io::Result<()> {
+/// Pins a socket to the physical interface. Loopback is left alone: it isn't reachable
+/// through that interface, and the TUN routes never capture it anyway.
+fn bind_egress(sock: SockRef<'_>, dest: &SocketAddr) -> std::io::Result<()> {
+    if dest.ip().is_loopback() {
+        return Ok(());
+    }
     match EGRESS.get().and_then(|e| e.if_index) {
-        Some(idx) if v6 => sock.bind_device_by_index_v6(Some(idx)),
+        Some(idx) if dest.is_ipv6() => sock.bind_device_by_index_v6(Some(idx)),
         Some(idx) => sock.bind_device_by_index_v4(Some(idx)),
         None => Ok(()),
     }
@@ -141,7 +146,7 @@ pub async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
     let mut last = anyhow!("{host}: no addresses");
     for addr in addrs {
         let sock = if addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
-        bind_egress(SockRef::from(&sock), addr.is_ipv6())?;
+        bind_egress(SockRef::from(&sock), &addr)?;
         match tokio::time::timeout(CONNECT_TIMEOUT, sock.connect(addr)).await {
             Ok(Ok(s)) => {
                 s.set_nodelay(true)?;
@@ -154,16 +159,16 @@ pub async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
     Err(last.context(format!("connect to {host}:{port}")))
 }
 
-/// A non-blocking std UDP socket bound to the egress interface (for QUIC endpoints).
-pub fn udp_socket_std(v6: bool) -> std::io::Result<std::net::UdpSocket> {
-    let s = std::net::UdpSocket::bind(if v6 { "[::]:0" } else { "0.0.0.0:0" })?;
-    bind_egress(SockRef::from(&s), v6)?;
+/// A non-blocking std UDP socket for talking to `dest`, on the egress interface (for QUIC endpoints).
+pub fn udp_socket_std(dest: &SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let s = std::net::UdpSocket::bind(if dest.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" })?;
+    bind_egress(SockRef::from(&s), dest)?;
     s.set_nonblocking(true)?;
     Ok(s)
 }
 
-pub fn udp_socket(v6: bool) -> std::io::Result<UdpSocket> {
-    UdpSocket::from_std(udp_socket_std(v6)?)
+pub fn udp_socket(dest: &SocketAddr) -> std::io::Result<UdpSocket> {
+    UdpSocket::from_std(udp_socket_std(dest)?)
 }
 
 #[cfg(test)]

@@ -1,0 +1,59 @@
+# Runs on GitHub's macOS runners: fresh VMs with no proxy, i.e. Sluice's target environment.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sluice
+          path: target/release/sluice
+
+  interop:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sluice
+          path: target/release
+      - run: chmod +x target/release/sluice
+      - run: brew install shadowsocks-rust xray hysteria
+      - run: bash scripts/ci/interop.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs
+          path: ci-logs
+
+  tun:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sluice
+          path: target/release
+      - run: chmod +x target/release/sluice
+      - run: brew install shadowsocks-rust
+      - name: Network before
+        run: netstat -rn -f inet | head -15; scutil --nc list || true
+      - run: bash scripts/ci/tun.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tun-logs
+          path: ci-logs
