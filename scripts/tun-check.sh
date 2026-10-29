@@ -13,6 +13,7 @@ check() { if eval "$2"; then pass "$1"; else fail "$1${3:+ ($3)}"; fi; }
 if [ "$1" = "after" ]; then
     check "Sluice has exited" "! pgrep -x sluice >/dev/null"
     check "TUN address removed" "! ifconfig | grep -q 'inet 198.18.0.1 '"
+    check "scoped default route added by Sluice removed" "! netstat -rn -f inet | awk '\$1==\"default\" && \$3 ~ /I/' | grep -q ."
     check "split default routes removed" "! netstat -rn -f inet | grep -E '^(0/1|128.0/1) ' | grep -q utun"
     check "system DNS no longer 198.18.0.2" "! scutil --dns | grep -q 'nameserver\[[0-9]*\] : 198.18.0.2'"
     check "DNS backup file cleaned up" "[ ! -e /var/tmp/sluice-dns-backup ]"

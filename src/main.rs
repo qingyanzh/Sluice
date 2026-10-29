@@ -99,7 +99,7 @@ async fn start_tun(
     let mtu = g.tun_mtu.unwrap_or(1500);
     let (dev, name) = tun::create(tun_ip, dns_ip, mtu)?;
     log::info!("enhanced mode on {name} ({tun_ip}), fake IPs from {range}");
-    let guard = sysnet::SystemGuard::apply(&name, range, &dns_ip.to_string())?;
+    let guard = sysnet::SystemGuard::apply(&name, range, &dns_ip.to_string(), &iface)?;
     match egress_self_test(&upstream).await {
         Ok(()) => log::info!("egress self-test via {iface} after routes: ok"),
         Err(e) => log::warn!(

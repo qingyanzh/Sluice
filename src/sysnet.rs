@@ -128,11 +128,48 @@ pub struct SystemGuard {
     routes: Vec<String>,
     tun: String,
     dns_backup: Vec<(String, Vec<String>)>,
+    /// Interface we added an interface-scoped default route for, to remove on exit.
+    scoped_default: Option<String>,
+}
+
+fn default_gateway() -> Option<String> {
+    let out = sh("route", &["-n", "get", "default"]).ok()?;
+    out.lines().find_map(|l| l.trim().strip_prefix("gateway:").map(|s| s.trim().to_string()))
+}
+
+/// Whether `netstat -rn` output has a `default` row with the I (interface-scoped) flag on `iface`.
+fn has_scoped_default(table: &str, iface: &str) -> bool {
+    table.lines().any(|l| {
+        let cols: Vec<&str> = l.split_whitespace().collect();
+        cols.len() >= 4 && cols[0] == "default" && cols[2].contains('I') && cols[3] == iface
+    })
+}
+
+/// Sockets bound to `iface` (IP_BOUND_IF) need a default route scoped to it. macOS only
+/// keeps one for non-primary interfaces; for the primary one the scoped lookup falls back
+/// to the global table, where our /1 routes via the TUN win and the kernel refuses the
+/// mismatch with ENETUNREACH. Adds the scoped default if missing; returns whether it did.
+fn ensure_scoped_default(iface: &str) -> Result<bool> {
+    // `route get -ifscope` exits 0 even when nothing matches, so read the table instead.
+    let table = sh("netstat", &["-rn", "-f", "inet"])?;
+    if has_scoped_default(&table, iface) {
+        return Ok(false);
+    }
+    match default_gateway() {
+        Some(gw) => sh("route", &["-n", "add", "-ifscope", iface, "-net", "default", &gw])?,
+        None => sh("route", &["-n", "add", "-ifscope", iface, "-net", "default", "-interface", iface])?,
+    };
+    info!("added default route scoped to {iface} for Sluice's own connections");
+    Ok(true)
 }
 
 impl SystemGuard {
-    pub fn apply(tun: &str, fake_cidr: &str, dns_ip: &str) -> Result<Self> {
-        let mut guard = SystemGuard { routes: Vec::new(), tun: tun.to_string(), dns_backup: Vec::new() };
+    pub fn apply(tun: &str, fake_cidr: &str, dns_ip: &str, egress: &str) -> Result<Self> {
+        let mut guard =
+            SystemGuard { routes: Vec::new(), tun: tun.to_string(), dns_backup: Vec::new(), scoped_default: None };
+        if ensure_scoped_default(egress)? {
+            guard.scoped_default = Some(egress.to_string());
+        }
         // Two /1 routes beat the default route without replacing it.
         for net in ["0.0.0.0/1", "128.0.0.0/1", fake_cidr] {
             sh("route", &["-n", "add", "-net", net, "-interface", tun])?;
@@ -155,7 +192,24 @@ impl Drop for SystemGuard {
         for net in &self.routes {
             let _ = sh("route", &["-n", "delete", "-net", net, "-interface", &self.tun]);
         }
+        if let Some(iface) = &self.scoped_default {
+            let _ = sh("route", &["-n", "delete", "-ifscope", iface, "-net", "default"]);
+        }
         restore_dns(&self.dns_backup);
         info!("system routes and DNS restored");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_default_detection() {
+        let primary = "default            10.152.0.1         UGScg                 en0\n0/1                link#26            UScg                utun6\n";
+        let secondary = "default            link#26            UCSg                utun6\ndefault            10.152.0.1         UGScIg                en0\n";
+        assert!(!has_scoped_default(primary, "en0"));
+        assert!(has_scoped_default(secondary, "en0"));
+        assert!(!has_scoped_default(secondary, "en1"));
     }
 }
