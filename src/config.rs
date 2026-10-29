@@ -63,6 +63,11 @@ pub struct GroupDef {
     pub options: Vec<String>,
     pub url: String,
     pub interval_secs: u64,
+    /// Subscription URL or file whose nodes are appended to `options`.
+    pub policy_path: Option<String>,
+    /// Only subscription nodes whose name matches this regex are kept.
+    pub policy_filter: Option<String>,
+    pub update_interval_secs: u64,
 }
 
 pub const DEFAULT_TEST_URL: &str = "http://www.gstatic.com/generate_204";
@@ -93,7 +98,7 @@ fn listen_addr(v: &str) -> String {
     }
 }
 
-fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
+pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
     let (name, rest) = split_kv(line)?;
     let parts: Vec<&str> = rest.split(',').map(str::trim).collect();
     if parts.len() < 3 {
@@ -177,8 +182,12 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         "load-balance" => GroupKind::LoadBalance,
         other => bail!("unsupported group type {other:?} (supported: select, url-test, fallback, load-balance)"),
     };
-    if options.is_empty() {
+    let policy_path = params.get("policy-path").cloned();
+    if options.is_empty() && policy_path.is_none() {
         bail!("group {name:?} has no options");
+    }
+    if let Some(re) = params.get("policy-regex-filter") {
+        regex::Regex::new(re).map_err(|e| anyhow!("bad policy-regex-filter: {e}"))?;
     }
     Ok(GroupDef {
         name: name.to_string(),
@@ -186,6 +195,9 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         options,
         url: params.get("url").cloned().unwrap_or_else(|| DEFAULT_TEST_URL.to_string()),
         interval_secs: num("interval", 600)?.max(10),
+        policy_path,
+        policy_filter: params.get("policy-regex-filter").cloned(),
+        update_interval_secs: num("update-interval", 86400)?.max(60),
     })
 }
 

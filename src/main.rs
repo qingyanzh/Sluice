@@ -7,6 +7,7 @@ mod router;
 mod rule;
 mod ruleset;
 mod ss;
+mod subscription;
 mod sysnet;
 mod transport;
 mod trojan;
@@ -34,10 +35,21 @@ usage:
   sluice check <config.conf>                 validate the config
   sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses";
 
-fn load(path: &str) -> Result<(Config, Router)> {
+fn read_config(path: &str) -> Result<Config> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
-    let cfg = Config::parse(&text)?;
+    Config::parse(&text)
+}
+
+fn config_dir(path: &str) -> &std::path::Path {
+    std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."))
+}
+
+/// Expands subscriptions, builds the router and fills rule sets. With `strict` off,
+/// unreachable subscriptions and rule sets only warn.
+async fn build(mut cfg: Config, path: &str, strict: bool) -> Result<(Config, Router)> {
+    subscription::expand(&mut cfg, config_dir(path), strict).await?;
     let router = Router::new(&cfg)?;
+    load_rule_sets(&router, path, rule_set_interval(&cfg), strict).await?;
     Ok((cfg, router))
 }
 
@@ -48,7 +60,7 @@ fn rule_set_interval(cfg: &Config) -> std::time::Duration {
 /// Fills every RULE-SET / DOMAIN-SET; relative file paths are relative to the config file.
 /// With `strict` off, a set that can't be loaded is left empty with a warning.
 async fn load_rule_sets(router: &Router, config_path: &str, max_age: std::time::Duration, strict: bool) -> Result<()> {
-    let base = std::path::Path::new(config_path).parent().unwrap_or(std::path::Path::new("."));
+    let base = config_dir(config_path);
     for set in router.rule_sets() {
         if let Err(e) = ruleset::load(&set, base, max_age).await {
             if strict {
@@ -119,8 +131,7 @@ async fn run() -> Result<()> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["check", path] => {
-            let (cfg, router) = load(path)?;
-            load_rule_sets(&router, path, rule_set_interval(&cfg), true).await?;
+            let (cfg, _) = build(read_config(path)?, path, true).await?;
             println!(
                 "config OK: {} proxies, {} groups, {} rules",
                 cfg.proxies.len(),
@@ -129,19 +140,18 @@ async fn run() -> Result<()> {
             );
         }
         ["route", path, target] => {
-            let (cfg, router) = load(path)?;
-            load_rule_sets(&router, path, rule_set_interval(&cfg), true).await?;
+            let (_, router) = build(read_config(path)?, path, true).await?;
             let t = Target::parse_authority(target, 443)?;
             let d = router.decide(&t).await?;
             println!("{t}\n  rule:     {}\n  policy:   {}\n  outbound: {}", d.rule, d.policy, d.outbound);
         }
         ["run", path] => {
-            let (cfg, router) = load(path)?;
+            let cfg = read_config(path)?;
             let level = cfg.general.loglevel.as_deref().unwrap_or("info");
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(format!("sluice={level}")))
                 .format_target(false)
                 .init();
-            load_rule_sets(&router, path, rule_set_interval(&cfg), false).await?;
+            let (cfg, router) = build(cfg, path, false).await?;
             ruleset::spawn_refresh(router.rule_sets(), rule_set_interval(&cfg));
             let router = Arc::new(router);
             router.spawn_health_checks();

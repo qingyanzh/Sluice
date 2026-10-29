@@ -138,7 +138,7 @@ impl RuleSet {
 
 fn cache_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    home.join("Library/Caches/Sluice/rulesets")
+    home.join("Library/Caches/Sluice")
 }
 
 fn cache_path(source: &str) -> PathBuf {
@@ -150,36 +150,41 @@ fn age(path: &Path) -> Option<Duration> {
     SystemTime::now().duration_since(modified).ok()
 }
 
-/// Loads `set`: local files directly; remote ones from cache when fresh, else downloaded
-/// (falling back to a stale cache if the download fails).
-pub async fn load(set: &RuleSet, base: &Path, max_age: Duration) -> Result<usize> {
-    if !set.is_remote() {
-        let path = base.join(&set.source);
-        let text = std::fs::read_to_string(&path).with_context(|| format!("read rule set {}", path.display()))?;
-        return Ok(set.install(&text, "file"));
+/// Reads `source` (a path relative to `base`, or an http(s) URL). URLs come from the disk
+/// cache while younger than `max_age`, else from the network, falling back to a stale
+/// cache if the download fails. Returns the text and where it came from.
+pub async fn fetch(source: &str, base: &Path, max_age: Duration) -> Result<(String, &'static str)> {
+    if !(source.starts_with("http://") || source.starts_with("https://")) {
+        let path = base.join(source);
+        let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        return Ok((text, "file"));
     }
-    let cache = cache_path(&set.source);
+    let cache = cache_path(source);
     if age(&cache).is_some_and(|a| a < max_age) {
         if let Ok(text) = std::fs::read_to_string(&cache) {
-            return Ok(set.install(&text, "cache"));
+            return Ok((text, "cache"));
         }
     }
-    match http_get(&set.source).await {
+    match http_get(source).await {
         Ok(text) => {
-            let n = set.install(&text, "network");
             if let Err(e) = std::fs::create_dir_all(cache_dir()).and_then(|_| std::fs::write(&cache, &text)) {
-                warn!("rule set {}: cannot write cache: {e}", set.source);
+                warn!("{source}: cannot write cache: {e}");
             }
-            Ok(n)
+            Ok((text, "network"))
         }
         Err(e) => match std::fs::read_to_string(&cache) {
             Ok(text) => {
-                warn!("rule set {}: download failed ({e:#}); using stale cache", set.source);
-                Ok(set.install(&text, "stale cache"))
+                warn!("{source}: download failed ({e:#}); using stale cache");
+                Ok((text, "stale cache"))
             }
-            Err(_) => Err(e.context(format!("download rule set {}", set.source))),
+            Err(_) => Err(e.context(format!("download {source}"))),
         },
     }
+}
+
+pub async fn load(set: &RuleSet, base: &Path, max_age: Duration) -> Result<usize> {
+    let (text, from) = fetch(&set.source, base, max_age).await.with_context(|| format!("rule set {}", set.source))?;
+    Ok(set.install(&text, from))
 }
 
 /// Re-downloads remote sets every `interval`.
