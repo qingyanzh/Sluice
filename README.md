@@ -41,6 +41,29 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - `GET /v1/route?target=host:port`
   - `POST /v1/reload`
 
+## macOS app
+
+`scripts/build-app.sh` builds `dist/Sluice.app`, a SwiftUI app with the core embedded. It runs the
+core as a child process and controls it through the control API, so the config needs `api-listen`.
+
+- **Overview**: start, stop and restart Sluice, reload the config, turn the system proxy on or off
+  (asks for an administrator password), and see listen addresses.
+- **Policies**: switch `select` groups, see latency, and run health checks.
+- **Nodes**: add a node from a share link or proxy line, or add a subscription (URL plus an
+  optional name filter). New nodes and subscriptions join the group FINAL points at.
+- **Connections** and **Logs**: live, with filtering.
+- **Route Test**: show which rule and outbound a host would use.
+- **Config**: edit the file. Changes are validated with `sluice check` before saving, then applied
+  by hot reload.
+- **Menu bar**: status, start and stop, group selection, and the system proxy toggle.
+- **Enhanced mode**: if the config sets `enhanced-mode = true`, the app starts the core as root
+  after a standard administrator prompt and follows its log in `~/Library/Logs/Sluice`.
+
+The default config lives in `~/Library/Application Support/Sluice/sluice.conf`, and is created on
+first launch.
+
+`sluice convert <share-link>` prints a share link as a `[Proxy]` line.
+
 ## Hot reload
 
 Sluice reloads the config, without dropping connections, in these cases:

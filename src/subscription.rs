@@ -179,7 +179,7 @@ fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
     Ok((l.name, def))
 }
 
-fn parse_link(line: &str) -> Result<(Option<String>, ProxyDef)> {
+pub fn parse_link(line: &str) -> Result<(Option<String>, ProxyDef)> {
     let (scheme, body) = line.split_once("://").ok_or_else(|| anyhow!("not a link"))?;
     match scheme.to_ascii_lowercase().as_str() {
         "ss" => parse_ss(body),
@@ -284,6 +284,20 @@ fn summarize(skipped: &[String]) -> String {
 mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
+
+    #[test]
+    fn to_line_roundtrips() {
+        let text = format!(
+            "ss://{}@1.2.3.4:8388#A\nvmess://{}\ntrojan://pw@t.example:443?sni=t.example&type=ws&path=%2Fws&host=cdn.example#T\n",
+            STANDARD.encode("aes-256-gcm:pw"),
+            STANDARD.encode(r#"{"ps":"V","add":"v.example","port":443,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"net":"ws","path":"/r","tls":"tls"}"#)
+        );
+        for (name, def) in parse(&text).0 {
+            let line = def.to_line(&name);
+            let (back_name, back) = parse_proxy(&line).unwrap();
+            assert_eq!((back_name, format!("{back:?}")), (name, format!("{def:?}")), "{line}");
+        }
+    }
 
     #[test]
     fn links() {

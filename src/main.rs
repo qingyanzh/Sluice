@@ -33,7 +33,8 @@ Sluice — rule-based network proxy
 usage:
   sluice run   <config.conf>                 start the proxy
   sluice check <config.conf>                 validate the config
-  sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses";
+  sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses
+  sluice convert <share-link>                print a share link as a [Proxy] line";
 
 /// Resolves a name through the egress path (bound interface + upstream DNS).
 async fn egress_self_test(upstream: &[SocketAddr]) -> Result<()> {
@@ -137,6 +138,10 @@ async fn run() -> Result<()> {
             let t = Target::parse_authority(target, 443)?;
             let d = router.decide(&t).await?;
             println!("{t}\n  rule:     {}\n  policy:   {}\n  outbound: {}", d.rule, d.policy, d.outbound);
+        }
+        ["convert", link] => {
+            let (name, def) = subscription::parse_link(link)?;
+            println!("{}", def.to_line(name.as_deref().unwrap_or("Imported")));
         }
         ["run", path] => {
             let cfg = read_config(path)?;

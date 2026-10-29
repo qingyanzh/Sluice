@@ -1,3 +1,6 @@
 /target
 .DS_Store
 ci-logs/
+dist/
+apps/macos/.build/
+__pycache__/

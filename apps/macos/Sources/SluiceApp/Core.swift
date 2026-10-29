@@ -1,0 +1,515 @@
+import AppKit
+import Foundation
+
+struct LogLine: Identifiable {
+    let id: Int
+    let time: String
+    let level: String
+    let message: String
+}
+
+struct Connection: Identifiable {
+    let id: Int
+    let time: String
+    let proto: String
+    let target: String
+    let policy: String
+    let rule: String
+    let outbound: String
+}
+
+/// What the app reads from the config file itself (the core owns the rest).
+struct ConfigSummary {
+    var apiPort: Int?
+    var httpListen: String?
+    var socksListen: String?
+    var enhancedMode = false
+
+    init(text: String) {
+        var section = ""
+        for raw in text.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                section = String(line.dropFirst().dropLast())
+                continue
+            }
+            guard section == "General", let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            switch key {
+            case "api-listen": apiPort = Int(value.split(separator: ":").last ?? "")
+            case "http-listen": httpListen = value
+            case "socks5-listen": socksListen = value
+            case "enhanced-mode": enhancedMode = value == "true" || value == "1"
+            default: break
+            }
+        }
+    }
+}
+
+/// Runs the Sluice core as a child process and mirrors its state for the UI.
+@MainActor
+final class Core: ObservableObject {
+    enum State: Equatable {
+        case stopped, starting, running
+        case failed(String)
+
+        var label: String {
+            switch self {
+            case .stopped: "Stopped"
+            case .starting: "Starting…"
+            case .running: "Running"
+            case .failed: "Error"
+            }
+        }
+    }
+
+    @Published private(set) var state: State = .stopped
+    @Published private(set) var groups: [PolicyGroup] = []
+    @Published private(set) var logs: [LogLine] = []
+    @Published private(set) var connections: [Connection] = []
+    @Published private(set) var summary = ConfigSummary(text: "")
+    @Published var lastActionError: String?
+    @Published private(set) var systemProxyOn = false
+    @Published private(set) var privileged = false
+    @Published var configPath: String {
+        didSet { UserDefaults.standard.set(configPath, forKey: "configPath") }
+    }
+
+    private var process: Process?
+    /// Root core started through the admin prompt (enhanced mode); followed via its log file.
+    private var rootPID: Int32?
+    private var logOffset: UInt64 = 0
+    private var stopping = false
+    private var pollTask: Task<Void, Never>?
+    private var pending = ""
+    private var nextID = 0
+    private let maxLines = 2000
+
+    static let defaultConfigPath: String = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Sluice", isDirectory: true)
+        return dir.appendingPathComponent("sluice.conf").path
+    }()
+
+    static let starterConfig = """
+        # Sluice config created by the app. Edit it, then press Reload.
+        [General]
+        http-listen = 127.0.0.1:6152
+        socks5-listen = 127.0.0.1:6153
+        api-listen = 127.0.0.1:6170
+        loglevel = info
+
+        [Proxy]
+        # HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=change-me
+
+        [Proxy Group]
+        Proxy = select, DIRECT
+
+        [Rule]
+        DOMAIN-SUFFIX,local,DIRECT
+        FINAL,Proxy
+        """
+
+    init() {
+        configPath = UserDefaults.standard.string(forKey: "configPath") ?? Core.defaultConfigPath
+        ensureConfigExists()
+        refreshSummary()
+    }
+
+    var api: APIClient? { summary.apiPort.map(APIClient.init(port:)) }
+
+    /// The core binary: bundled in the app, or $SLUICE_CORE, or the repo's release build.
+    var coreBinary: URL? {
+        if let bundled = Bundle.main.url(forResource: "sluice", withExtension: nil) { return bundled }
+        if let env = ProcessInfo.processInfo.environment["SLUICE_CORE"] { return URL(fileURLWithPath: env) }
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("target/release/sluice")
+        return FileManager.default.isExecutableFile(atPath: repo.path) ? repo : nil
+    }
+
+    private func ensureConfigExists() {
+        guard configPath == Core.defaultConfigPath, !FileManager.default.fileExists(atPath: configPath) else { return }
+        let url = URL(fileURLWithPath: configPath)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Core.starterConfig.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    func refreshSummary() {
+        summary = ConfigSummary(text: (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? "")
+    }
+
+    // MARK: lifecycle
+
+    var isActive: Bool { process != nil || rootPID != nil }
+
+    static let logDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Sluice")
+
+    func start() {
+        guard !isActive else { return }
+        refreshSummary()
+        guard FileManager.default.fileExists(atPath: configPath) else {
+            state = .failed("Config file not found: \(configPath)")
+            return
+        }
+        guard summary.apiPort != nil else {
+            state = .failed("The app controls Sluice through its API. Add `api-listen = 127.0.0.1:6170` to [General].")
+            return
+        }
+        guard let binary = coreBinary else {
+            state = .failed("Sluice core binary not found. Build it with `cargo build --release`.")
+            return
+        }
+
+        if summary.enhancedMode {
+            startPrivileged(binary)
+            return
+        }
+        let p = Process()
+        p.executableURL = binary
+        p.arguments = ["run", configPath]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor in self?.ingest(text) }
+        }
+        p.terminationHandler = { [weak self] proc in
+            let code = proc.terminationStatus
+            Task { @MainActor in self?.exited(code: code) }
+        }
+        do {
+            try p.run()
+        } catch {
+            state = .failed("Couldn't launch the core: \(error.localizedDescription)")
+            return
+        }
+        process = p
+        stopping = false
+        state = .starting
+        appendLog(level: "APP", message: "started core \(binary.path) with \(configPath)")
+        pollTask = Task { await self.poll() }
+    }
+
+    /// Enhanced mode needs root: launch the core detached via the admin prompt and follow
+    /// its log file. Its PID is written next to the log so Stop can signal it.
+    private func startPrivileged(_ binary: URL) {
+        try? FileManager.default.createDirectory(at: Core.logDir, withIntermediateDirectories: true)
+        let log = Core.logDir.appendingPathComponent("core.log").path
+        let pidFile = Core.logDir.appendingPathComponent("core.pid").path
+        try? "".write(toFile: log, atomically: true, encoding: .utf8)
+        logOffset = 0
+        state = .starting
+        stopping = false
+        appendLog(level: "APP", message: "asking for administrator access to start enhanced mode")
+        Task {
+            do {
+                _ = try await Privileged.run(
+                    "\(shellQuote(binary.path)) run \(shellQuote(configPath)) > \(shellQuote(log)) 2>&1 < /dev/null & echo $! > \(shellQuote(pidFile))")
+                guard let pid = Int32((try? String(contentsOfFile: pidFile, encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") else {
+                    throw APIError(message: "the core didn't report a PID")
+                }
+                rootPID = pid
+                privileged = true
+                appendLog(level: "APP", message: "started core as root (pid \(pid)) with \(configPath)")
+                pollTask = Task { await self.poll() }
+            } catch {
+                state = .failed("Couldn't start enhanced mode: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Reads whatever the root core appended to its log since last time.
+    private func followLog() {
+        let path = Core.logDir.appendingPathComponent("core.log").path
+        guard let h = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? h.close() }
+        try? h.seek(toOffset: logOffset)
+        let data = h.readDataToEndOfFile()
+        logOffset += UInt64(data.count)
+        if let text = String(data: data, encoding: .utf8), !text.isEmpty { ingest(text) }
+    }
+
+    /// kill(pid, 0) on a root process from a user process fails with EPERM while it lives.
+    private static func alive(_ pid: Int32) -> Bool {
+        kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    func stop() {
+        if let pid = rootPID {
+            stopping = true
+            Task {
+                do {
+                    _ = try await Privileged.run("kill -INT \(pid)")
+                } catch {
+                    stopping = false
+                    lastActionError = "Stop: \(error.localizedDescription)"
+                }
+            }
+            return
+        }
+        guard let p = process else { return }
+        stopping = true
+        p.interrupt()
+        let deadline = Date().addingTimeInterval(3)
+        Task {
+            while p.isRunning && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
+            if p.isRunning { p.terminate() }
+        }
+    }
+
+    func restart() {
+        guard isActive else { return start() }
+        stop()
+        Task {
+            let deadline = Date().addingTimeInterval(15)
+            while isActive && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
+            if !isActive { start() }
+        }
+    }
+
+    /// Synchronous stop used when the app quits, so the child never outlives it.
+    func stopForQuit() {
+        if let pid = rootPID {
+            // Best effort: one more admin prompt so the root core doesn't outlive the app.
+            let sema = DispatchSemaphore(value: 0)
+            Task.detached {
+                _ = try? await Privileged.run("kill -INT \(pid)")
+                sema.signal()
+            }
+            _ = sema.wait(timeout: .now() + 60)
+            return
+        }
+        guard let p = process else { return }
+        stopping = true
+        p.interrupt()
+        let deadline = Date().addingTimeInterval(2)
+        while p.isRunning && Date() < deadline { usleep(50_000) }
+        if p.isRunning { p.terminate() }
+    }
+
+    private func exited(code: Int32) {
+        pollTask?.cancel()
+        process = nil
+        rootPID = nil
+        privileged = false
+        groups = []
+        appendLog(level: "APP", message: "core exited with status \(code)")
+        if stopping || code == 0 {
+            state = .stopped
+        } else {
+            let reason = logs.last(where: { $0.message.hasPrefix("error:") })?.message ?? "the core exited with status \(code)"
+            state = .failed(reason)
+        }
+    }
+
+    private func poll() async {
+        while !Task.isCancelled {
+            if let pid = rootPID {
+                followLog()
+                if !Core.alive(pid) {
+                    followLog()
+                    exited(code: stopping ? 0 : 1)
+                    return
+                }
+            }
+            if let api, let fresh = try? await api.policies() {
+                groups = fresh
+                if state == .starting { state = .running }
+            }
+            try? await Task.sleep(for: .seconds(state == .starting || rootPID != nil ? 0.3 : 2))
+        }
+    }
+
+    // MARK: actions
+
+    private func perform(_ what: String, _ body: @escaping (APIClient) async throws -> Void) {
+        guard let api else { return }
+        Task {
+            do {
+                try await body(api)
+                lastActionError = nil
+                if let fresh = try? await api.policies() { groups = fresh }
+            } catch {
+                lastActionError = "\(what): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func select(group: String, option: String) {
+        perform("Select \(option)") { try await $0.select(group: group, option: option) }
+    }
+
+    func test(group: String) {
+        perform("Test \(group)") { try await $0.test(group: group) }
+    }
+
+    func testAll() {
+        for g in groups where !g.isSelectable { test(group: g.group) }
+    }
+
+    func reload() {
+        refreshSummary()
+        perform("Reload") { try await $0.reload() }
+    }
+
+    func route(_ target: String) async throws -> RouteResult {
+        guard let api, state == .running else { throw APIError(message: "Sluice isn't running") }
+        return try await api.route(target)
+    }
+
+    // MARK: config editing
+
+    func readConfig() -> String {
+        (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
+    }
+
+    /// Runs `sluice check` on `text` (as a sibling temp file, so relative paths still
+    /// resolve); returns the error message, or nil if the config is valid.
+    func validate(_ text: String) async -> String? {
+        guard let binary = coreBinary else { return "Sluice core binary not found" }
+        let dir = URL(fileURLWithPath: configPath).deletingLastPathComponent()
+        let tmp = dir.appendingPathComponent(".sluice-check-\(UUID().uuidString).conf")
+        do { try text.write(to: tmp, atomically: true, encoding: .utf8) } catch { return error.localizedDescription }
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let (status, out) = await runTool(binary.path, ["check", tmp.path])
+        return status == 0 ? nil : out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Validates, saves and (if running) reloads. Returns an error message on failure.
+    @discardableResult
+    func saveConfig(_ text: String) async -> String? {
+        if let err = await validate(text) { return err }
+        do {
+            try text.write(toFile: configPath, atomically: true, encoding: .utf8)
+        } catch {
+            return error.localizedDescription
+        }
+        refreshSummary()
+        if state == .running { reload() }
+        return nil
+    }
+
+    private func uniqueName(_ base: String, in text: String) -> String {
+        let taken = ConfigText.names(in: text)
+        var name = base.isEmpty ? "Node" : base
+        var i = 2
+        while taken.contains(name) { name = "\(base) \(i)"; i += 1 }
+        return name
+    }
+
+    /// Adds a node from a share link or a Surge `[Proxy]` line; returns an error or nil.
+    func addNode(_ input: String) async -> String? {
+        var line = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return "Paste a share link or a proxy line" }
+        if line.contains("://") {
+            guard let binary = coreBinary else { return "Sluice core binary not found" }
+            let (status, out) = await runTool(binary.path, ["convert", line])
+            guard status == 0 else { return out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines) }
+            line = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let eq = line.firstIndex(of: "=") else { return "Expected `Name = type, server, port, ...`" }
+        var text = readConfig()
+        let name = uniqueName(line[..<eq].trimmingCharacters(in: .whitespaces), in: text)
+        line = "\(name) =\(line[line.index(after: eq)...])"
+        text = ConfigText.insert(line, into: "Proxy", of: text)
+        text = ConfigText.addToFinalGroup(name, in: text)
+        return await saveConfig(text)
+    }
+
+    /// Adds a subscription as its own `select` group fed by `policy-path`.
+    func addSubscription(name: String, url: String, filter: String) async -> String? {
+        let url = url.trimmingCharacters(in: .whitespaces)
+        guard url.hasPrefix("http://") || url.hasPrefix("https://") else { return "The subscription URL must start with http:// or https://" }
+        var text = readConfig()
+        let group = uniqueName(name.trimmingCharacters(in: .whitespaces).isEmpty ? "Subscription" : name, in: text)
+        var line = "\(group) = select, policy-path=\(url)"
+        if !filter.trimmingCharacters(in: .whitespaces).isEmpty { line += ", policy-regex-filter=\(filter)" }
+        text = ConfigText.insert(line, into: "Proxy Group", of: text)
+        text = ConfigText.addToFinalGroup(group, in: text)
+        return await saveConfig(text)
+    }
+
+    // MARK: system proxy
+
+    func refreshSystemProxy() {
+        guard let (_, port) = SystemProxy.split(summary.httpListen) else { systemProxyOn = false; return }
+        Task { systemProxyOn = await SystemProxy.isPointing(atPort: port) }
+    }
+
+    func setSystemProxy(_ on: Bool) {
+        let http = SystemProxy.split(summary.httpListen)
+        let socks = SystemProxy.split(summary.socksListen)
+        guard !on || http != nil || socks != nil else {
+            lastActionError = "Add http-listen or socks5-listen to [General] first"
+            return
+        }
+        Task {
+            do {
+                try await SystemProxy.set(enabled: on, http: http, socks: socks)
+                lastActionError = nil
+            } catch {
+                lastActionError = "System proxy: \(error.localizedDescription)"
+            }
+            refreshSystemProxy()
+        }
+    }
+
+    func clearLogs() { logs = [] }
+    func clearConnections() { connections = [] }
+
+    // MARK: output parsing
+
+    private func ingest(_ text: String) {
+        pending += text
+        while let nl = pending.firstIndex(of: "\n") {
+            let line = String(pending[..<nl])
+            pending = String(pending[pending.index(after: nl)...])
+            parse(line)
+        }
+    }
+
+    private static let logPattern = #/^\[(\S+)\s+(\w+)\s*\]\s(.*)$/#
+    private static let connPattern = #/^(UDP )?(\S+) -> (.+) \[(.*)\] via (\S+)$/#
+
+    private func parse(_ line: String) {
+        guard !line.isEmpty else { return }
+        guard let m = line.wholeMatch(of: Core.logPattern) else {
+            appendLog(level: line.hasPrefix("error:") ? "ERROR" : "OUT", message: line)
+            return
+        }
+        let (time, level, message) = (String(m.1), String(m.2), String(m.3))
+        appendLog(time: time, level: level, message: message)
+        if let c = message.wholeMatch(of: Core.connPattern) {
+            nextID += 1
+            connections.append(Connection(
+                id: nextID, time: Core.shortTime(time), proto: c.1 == nil ? "TCP" : "UDP",
+                target: String(c.2), policy: String(c.3), rule: String(c.4), outbound: String(c.5)))
+            if connections.count > maxLines { connections.removeFirst(connections.count - maxLines) }
+        }
+    }
+
+    private func appendLog(time: String? = nil, level: String, message: String) {
+        nextID += 1
+        let t = time.map(Core.shortTime) ?? Core.clock.string(from: Date())
+        logs.append(LogLine(id: nextID, time: t, level: level, message: message))
+        if logs.count > maxLines { logs.removeFirst(logs.count - maxLines) }
+    }
+
+    private static let clock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    /// `2026-10-29T15:16:02Z` -> local `HH:mm:ss`.
+    private static func shortTime(_ iso: String) -> String {
+        let parser = ISO8601DateFormatter()
+        return parser.date(from: iso).map { clock.string(from: $0) } ?? iso
+    }
+}

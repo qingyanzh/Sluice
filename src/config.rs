@@ -45,6 +45,66 @@ pub enum ProxyDef {
     },
 }
 
+impl ProxyDef {
+    /// Renders the proxy as a `[Proxy]` line that `parse_proxy` reads back.
+    pub fn to_line(&self, name: &str) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let tls_bits = |parts: &mut Vec<String>, sni: &Option<String>, skip: bool| {
+            if let Some(s) = sni {
+                parts.push(format!("sni={s}"));
+            }
+            if skip {
+                parts.push("skip-cert-verify=true".into());
+            }
+        };
+        let ws_bits = |parts: &mut Vec<String>, ws: &Option<WsOpts>| {
+            if let Some(w) = ws {
+                parts.push("ws=true".into());
+                parts.push(format!("ws-path={}", w.path));
+                let mut headers: Vec<String> = w.host.iter().map(|h| format!("Host:{h}")).collect();
+                headers.extend(w.headers.iter().map(|(k, v)| format!("{k}:{v}")));
+                if !headers.is_empty() {
+                    parts.push(format!("ws-headers={}", headers.join("|")));
+                }
+            }
+        };
+        match self {
+            ProxyDef::Shadowsocks { server, port, method, password } => {
+                parts.extend(["ss".into(), server.clone(), port.to_string()]);
+                parts.push(format!("encrypt-method={method}"));
+                parts.push(format!("password={password}"));
+            }
+            ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, ws } => {
+                parts.extend(["trojan".into(), server.clone(), port.to_string(), format!("password={password}")]);
+                tls_bits(&mut parts, sni, *skip_cert_verify);
+                ws_bits(&mut parts, ws);
+            }
+            ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, ws } => {
+                parts.extend(["vless".into(), server.clone(), port.to_string(), format!("uuid={uuid}")]);
+                if *tls {
+                    parts.push("tls=true".into());
+                }
+                tls_bits(&mut parts, sni, *skip_cert_verify);
+                ws_bits(&mut parts, ws);
+            }
+            ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify } => {
+                parts.extend(["hysteria2".into(), server.clone(), port.to_string(), format!("password={password}")]);
+                tls_bits(&mut parts, sni, *skip_cert_verify);
+            }
+            ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, ws } => {
+                parts.extend(["vmess".into(), server.clone(), port.to_string(), format!("username={uuid}")]);
+                parts.push(format!("encrypt-method={method}"));
+                if *tls {
+                    parts.push("tls=true".into());
+                }
+                tls_bits(&mut parts, sni, *skip_cert_verify);
+                ws_bits(&mut parts, ws);
+            }
+        }
+        format!("{name} = {}", parts.join(", "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupKind {
     Select,

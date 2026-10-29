@@ -33,9 +33,8 @@ u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 u.settimeout(4)
 head = b"\0\0\0\x01" + socket.inet_aton(server) + struct.pack(">H", 53)
 
-ok, sizes = 0, []
-cases = [("example.com", 1, False)] * 20 + [("google.com", 16, True)] * 3
-for name, qtype, edns in cases:
+def ask(name, qtype, edns):
+    """Sends one query and returns the reply size, or None if nothing came back in time."""
     qid, q = query(name, qtype, edns)
     u.sendto(head + q, relay)
     try:
@@ -43,10 +42,24 @@ for name, qtype, edns in cases:
             data, _ = u.recvfrom(65535)
             body = data[10:]
             if struct.unpack(">H", body[:2])[0] == qid and body[2] & 0x80:
-                ok += 1
-                sizes.append(len(body))
-                break
+                return len(body)
     except socket.timeout:
-        pass
-print(f"replies {ok}/{len(cases)}, largest {max(sizes) if sizes else 0} bytes")
+        return None
+
+
+# UDP to a public resolver may lose a packet now and then, so each query gets up to 3 tries.
+# The query numbers that needed a retry are printed: a miss that is always #1 would point
+# at a bug (first packet of a flow dropped), scattered misses are ordinary loss.
+ok, sizes, retried = 0, [], []
+cases = [("example.com", 1, False)] * 20 + [("google.com", 16, True)] * 3
+for i, case in enumerate(cases, 1):
+    for attempt in range(3):
+        size = ask(*case)
+        if size is not None:
+            ok += 1
+            sizes.append(size)
+            break
+        retried.append(i)
+note = f", retried #{','.join(map(str, retried))}" if retried else ""
+print(f"replies {ok}/{len(cases)}, largest {max(sizes) if sizes else 0} bytes{note}")
 sys.exit(0 if ok == len(cases) else 1)
