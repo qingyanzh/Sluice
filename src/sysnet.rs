@@ -22,6 +22,20 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// Name of the interface already holding `ip`, if any (e.g. another proxy's TUN).
+pub fn interface_with_address(ip: &str) -> Option<String> {
+    let out = sh("ifconfig", &[]).ok()?;
+    let mut iface = None;
+    for line in out.lines() {
+        if !line.starts_with(['\t', ' ']) {
+            iface = line.split(':').next().map(str::to_string);
+        } else if line.trim().starts_with(&format!("inet {ip} ")) {
+            return iface;
+        }
+    }
+    None
+}
+
 pub fn default_interface() -> Result<String> {
     let out = sh("route", &["-n", "get", "default"])?;
     out.lines()

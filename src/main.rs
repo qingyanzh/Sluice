@@ -73,6 +73,12 @@ fn start_tun(
 
     let fake = Arc::new(dns::FakeDns::new(net, prefix, upstream));
     let (tun_ip, dns_ip) = (fake.addr(1), fake.addr(2));
+    if let Some(other) = sysnet::interface_with_address(&tun_ip.to_string()) {
+        bail!(
+            "{tun_ip} is already used by {other}, probably another proxy app's TUN (Surge, Clash...). \
+             Quit it first, or pick another fake-ip-range"
+        );
+    }
     let mtu = g.tun_mtu.unwrap_or(1500);
     let (dev, name) = tun::create(tun_ip, dns_ip, mtu)?;
     log::info!("enhanced mode on {name} ({tun_ip}), fake IPs from {range}");
