@@ -5,6 +5,7 @@ mod hysteria2;
 mod inbound;
 mod router;
 mod rule;
+mod ruleset;
 mod ss;
 mod sysnet;
 mod transport;
@@ -38,6 +39,25 @@ fn load(path: &str) -> Result<(Config, Router)> {
     let cfg = Config::parse(&text)?;
     let router = Router::new(&cfg)?;
     Ok((cfg, router))
+}
+
+fn rule_set_interval(cfg: &Config) -> std::time::Duration {
+    std::time::Duration::from_secs(cfg.general.rule_set_update_interval.unwrap_or(86400).max(60))
+}
+
+/// Fills every RULE-SET / DOMAIN-SET; relative file paths are relative to the config file.
+/// With `strict` off, a set that can't be loaded is left empty with a warning.
+async fn load_rule_sets(router: &Router, config_path: &str, max_age: std::time::Duration, strict: bool) -> Result<()> {
+    let base = std::path::Path::new(config_path).parent().unwrap_or(std::path::Path::new("."));
+    for set in router.rule_sets() {
+        if let Err(e) = ruleset::load(&set, base, max_age).await {
+            if strict {
+                return Err(e);
+            }
+            log::warn!("{e:#}; continuing with it empty");
+        }
+    }
+    Ok(())
 }
 
 fn start_tun(
@@ -99,7 +119,8 @@ async fn run() -> Result<()> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["check", path] => {
-            let (cfg, _) = load(path)?;
+            let (cfg, router) = load(path)?;
+            load_rule_sets(&router, path, rule_set_interval(&cfg), true).await?;
             println!(
                 "config OK: {} proxies, {} groups, {} rules",
                 cfg.proxies.len(),
@@ -108,7 +129,8 @@ async fn run() -> Result<()> {
             );
         }
         ["route", path, target] => {
-            let (_, router) = load(path)?;
+            let (cfg, router) = load(path)?;
+            load_rule_sets(&router, path, rule_set_interval(&cfg), true).await?;
             let t = Target::parse_authority(target, 443)?;
             let d = router.decide(&t).await?;
             println!("{t}\n  rule:     {}\n  policy:   {}\n  outbound: {}", d.rule, d.policy, d.outbound);
@@ -119,6 +141,8 @@ async fn run() -> Result<()> {
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(format!("sluice={level}")))
                 .format_target(false)
                 .init();
+            load_rule_sets(&router, path, rule_set_interval(&cfg), false).await?;
+            ruleset::spawn_refresh(router.rule_sets(), rule_set_interval(&cfg));
             let router = Arc::new(router);
             router.spawn_health_checks();
             let g = cfg.general;

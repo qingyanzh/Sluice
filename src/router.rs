@@ -184,6 +184,17 @@ impl Router {
                     Some(ip) => self.country(ip).as_deref() == Some(country.as_str()),
                     None => false,
                 },
+                Matcher::RuleSet { set, no_resolve } => {
+                    let (domain_hit, has_ip) = {
+                        let data = set.data.read().unwrap();
+                        (matches!(&target.host, Host::Domain(d) if data.match_domain(d)), data.has_ip_rules())
+                    };
+                    domain_hit
+                        || (has_ip
+                            && Self::ip_of(target, *no_resolve, &mut resolved)
+                                .await
+                                .is_some_and(|ip| set.data.read().unwrap().match_ip(ip)))
+                }
             };
             if hit {
                 return rule;
@@ -258,6 +269,16 @@ impl Router {
             Outbound::Hysteria2(h) => h.connect(target).await?,
         };
         Ok(Some(stream))
+    }
+
+    pub fn rule_sets(&self) -> Vec<Arc<crate::ruleset::RuleSet>> {
+        self.rules
+            .iter()
+            .filter_map(|r| match &r.matcher {
+                Matcher::RuleSet { set, .. } => Some(set.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn groups(&self) -> Vec<GroupStatus> {

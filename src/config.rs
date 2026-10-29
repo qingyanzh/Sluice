@@ -16,6 +16,7 @@ pub struct General {
     pub tun_mtu: Option<u16>,
     pub fake_ip_range: Option<String>,
     pub dns_server: Vec<String>,
+    pub rule_set_update_interval: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +216,9 @@ impl Config {
                         "enhanced-mode" => g.enhanced_mode = matches!(v, "true" | "1"),
                         "tun-mtu" => g.tun_mtu = Some(v.parse().map_err(|_| anyhow!("bad tun-mtu")).with_context(ctx)?),
                         "fake-ip-range" => g.fake_ip_range = Some(v.to_string()),
+                        "rule-set-update-interval" => {
+                            g.rule_set_update_interval = Some(v.parse().map_err(|_| anyhow!("bad rule-set-update-interval")).with_context(ctx)?)
+                        }
                         "dns-server" => {
                             g.dns_server = v.split(',').map(str::trim).filter(|s| !s.is_empty() && *s != "system").map(String::from).collect()
                         }

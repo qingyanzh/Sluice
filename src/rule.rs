@@ -1,7 +1,10 @@
 use std::fmt;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
+
+use crate::ruleset::{RuleSet, SetKind};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Cidr {
@@ -54,6 +57,8 @@ pub enum Matcher {
     DomainKeyword(String),
     IpCidr { cidr: Cidr, raw: String, no_resolve: bool },
     GeoIp { country: String, no_resolve: bool },
+    /// Contents are filled in by `ruleset::load` after parsing.
+    RuleSet { set: Arc<RuleSet>, no_resolve: bool },
     Final,
 }
 
@@ -83,6 +88,8 @@ impl Rule {
             "DOMAIN-KEYWORD" => Matcher::DomainKeyword(value.to_ascii_lowercase()),
             "IP-CIDR" | "IP-CIDR6" => Matcher::IpCidr { cidr: Cidr::parse(value)?, raw: value.to_string(), no_resolve },
             "GEOIP" => Matcher::GeoIp { country: value.to_ascii_uppercase(), no_resolve },
+            "RULE-SET" => Matcher::RuleSet { set: RuleSet::new(value, SetKind::Rules), no_resolve },
+            "DOMAIN-SET" => Matcher::RuleSet { set: RuleSet::new(value, SetKind::Domains), no_resolve },
             _ => bail!("unsupported rule type {kind}"),
         };
         Ok(Rule { matcher, policy: parts[2].to_string() })
@@ -111,6 +118,10 @@ impl fmt::Display for Rule {
             Matcher::DomainKeyword(v) => write!(f, "DOMAIN-KEYWORD,{v}"),
             Matcher::IpCidr { raw, .. } => write!(f, "IP-CIDR,{raw}"),
             Matcher::GeoIp { country, .. } => write!(f, "GEOIP,{country}"),
+            Matcher::RuleSet { set, .. } => {
+                let kind = if set.kind == SetKind::Rules { "RULE-SET" } else { "DOMAIN-SET" };
+                write!(f, "{kind},{}", set.source)
+            }
             Matcher::Final => write!(f, "FINAL"),
         }
     }

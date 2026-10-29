@@ -26,6 +26,7 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - Trojan (UDP ASSOCIATE framing)
   - Hysteria2 (QUIC datagrams, with fragmentation)
 - Rules: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, IP-CIDR / IP-CIDR6 (`no-resolve`), GEOIP (needs `geoip-db`), FINAL
+- Rule sets: `RULE-SET,<url|file>,Policy` (Surge rule lists) and `DOMAIN-SET,<url|file>,Policy` (domain lists, `.example.com` = with subdomains; Clash `payload:` lists also accepted). Remote lists are cached in `~/Library/Caches/Sluice/rulesets` and refreshed every `rule-set-update-interval` seconds (default 86400).
 - Policy groups (nestable):
   - `select`: switchable at runtime
   - `url-test`: lowest latency, with `tolerance` to avoid flapping
