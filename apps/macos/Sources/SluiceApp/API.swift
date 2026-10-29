@@ -28,6 +28,12 @@ struct RouteResult: Decodable {
     let outbound: String
 }
 
+struct Traffic: Decodable {
+    let up: UInt64
+    let down: UInt64
+    let active: Int
+}
+
 struct APIError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -67,6 +73,10 @@ struct APIClient {
 
     func test(group: String) async throws {
         _ = try await request("POST", "/v1/policies/\(Self.escape(group))/test")
+    }
+
+    func traffic() async throws -> Traffic {
+        try JSONDecoder().decode(Traffic.self, from: await request("GET", "/v1/traffic"))
     }
 
     func reload() async throws {

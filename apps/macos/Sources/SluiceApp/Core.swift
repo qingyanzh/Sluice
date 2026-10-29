@@ -72,6 +72,13 @@ final class Core: ObservableObject {
     @Published var lastActionError: String?
     @Published private(set) var systemProxyOn = false
     @Published private(set) var privileged = false
+    /// Bytes per second over the last poll interval, and running totals.
+    @Published private(set) var upRate: Double = 0
+    @Published private(set) var downRate: Double = 0
+    @Published private(set) var traffic: Traffic?
+    @Published var autoStart: Bool {
+        didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
+    }
     @Published var configPath: String {
         didSet { UserDefaults.standard.set(configPath, forKey: "configPath") }
     }
@@ -113,6 +120,7 @@ final class Core: ObservableObject {
 
     init() {
         configPath = UserDefaults.standard.string(forKey: "configPath") ?? Core.defaultConfigPath
+        autoStart = UserDefaults.standard.bool(forKey: "autoStart")
         ensureConfigExists()
         refreshSummary()
     }
@@ -142,6 +150,15 @@ final class Core: ObservableObject {
     }
 
     // MARK: lifecycle
+
+    private var autoStarted = false
+
+    /// Starts the core once per launch if the user asked for that.
+    func startIfAutoStart() {
+        guard autoStart, !autoStarted, !isActive else { return }
+        autoStarted = true
+        start()
+    }
 
     var isActive: Bool { process != nil || rootPID != nil }
 
@@ -298,6 +315,9 @@ final class Core: ObservableObject {
         process = nil
         rootPID = nil
         privileged = false
+        traffic = nil
+        upRate = 0
+        downRate = 0
         groups = []
         appendLog(level: "APP", message: "core exited with status \(code)")
         if stopping || code == 0 {
@@ -308,7 +328,18 @@ final class Core: ObservableObject {
         }
     }
 
+    private func sampleTraffic(_ api: APIClient, elapsed: Double) async {
+        guard let now = try? await api.traffic() else { return }
+        if let prev = traffic, elapsed > 0 {
+            upRate = Double(now.up &- prev.up) / elapsed
+            downRate = Double(now.down &- prev.down) / elapsed
+        }
+        traffic = now
+    }
+
     private func poll() async {
+        var tick = 0
+        var last = Date()
         while !Task.isCancelled {
             if let pid = rootPID {
                 followLog()
@@ -318,11 +349,17 @@ final class Core: ObservableObject {
                     return
                 }
             }
-            if let api, let fresh = try? await api.policies() {
+            if let api, state == .starting || tick % 2 == 0, let fresh = try? await api.policies() {
                 groups = fresh
                 if state == .starting { state = .running }
             }
-            try? await Task.sleep(for: .seconds(state == .starting || rootPID != nil ? 0.3 : 2))
+            if let api, state == .running {
+                await sampleTraffic(api, elapsed: Date().timeIntervalSince(last))
+                last = Date()
+            }
+            tick += 1
+            // Policies every 2 s, traffic every 1 s; faster while starting or following a root log.
+            try? await Task.sleep(for: .seconds(state == .starting || rootPID != nil ? 0.3 : 1))
         }
     }
 
@@ -512,4 +549,13 @@ final class Core: ObservableObject {
         let parser = ISO8601DateFormatter()
         return parser.date(from: iso).map { clock.string(from: $0) } ?? iso
     }
+}
+
+/// `1536` -> "1.5 KB".
+func formatBytes(_ n: Double) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB"]
+    var v = n
+    var i = 0
+    while v >= 1024 && i < units.count - 1 { v /= 1024; i += 1 }
+    return i == 0 ? "\(Int(v)) B" : String(format: v < 10 ? "%.1f %@" : "%.0f %@", v, units[i])
 }

@@ -193,6 +193,9 @@ pub fn parse_link(line: &str) -> Result<(Option<String>, ProxyDef)> {
 
 /// Parses a subscription body; returns named nodes and a list of skip reasons.
 pub fn parse(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>) {
+    if crate::clash::looks_like(text) {
+        return crate::clash::parse(text).unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")]));
+    }
     let decoded;
     let text = if text.contains("://") || text.contains(" = ") {
         text

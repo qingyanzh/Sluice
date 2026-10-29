@@ -1,4 +1,5 @@
 mod api;
+mod clash;
 mod config;
 mod dns;
 mod hysteria2;
@@ -8,6 +9,7 @@ mod router;
 mod rule;
 mod ruleset;
 mod ss;
+mod stats;
 mod subscription;
 mod sysnet;
 mod transport;

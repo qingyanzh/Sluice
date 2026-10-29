@@ -239,7 +239,7 @@ impl Router {
     pub async fn dispatch(&self, target: &Target) -> Result<Option<BoxStream>> {
         let d = self.decide(target).await?;
         info!("{target} -> {} [{}] via {}", d.policy, d.rule, d.outbound);
-        self.open(&d.outbound, target).await
+        Ok(self.open(&d.outbound, target).await?.map(crate::stats::counted))
     }
 
     /// UDP counterpart of [`dispatch`]; `None` means rejected.

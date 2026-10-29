@@ -149,6 +149,7 @@ async fn socks5_udp_associate(mut sock: TcpStream, router: Arc<Router>) -> Resul
             let Some((target, off)) = parse_socks_addr(&pkt[3..]) else { continue };
             let payload = pkt[3 + off..].to_vec();
             let key = target.to_string();
+            crate::stats::add_up(payload.len());
             if let Some(tx) = flows.get(&key).filter(|tx| !tx.is_closed()) {
                 let _ = tx.send(payload).await;
                 continue;
@@ -168,6 +169,7 @@ async fn socks5_udp_associate(mut sock: TcpStream, router: Arc<Router>) -> Resul
             target.write_socks_addr(&mut head)?;
             tokio::spawn(async move {
                 while let Some(p) = rx.recv().await {
+                    crate::stats::add_down(p.len());
                     let _ = relay.send_to(&[head.as_slice(), &p].concat(), client).await;
                 }
             });

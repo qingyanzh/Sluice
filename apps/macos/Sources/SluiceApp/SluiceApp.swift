@@ -33,7 +33,7 @@ struct SluiceApp: App {
         MenuBarExtra {
             MenuBarContent().environmentObject(core)
         } label: {
-            Image(systemName: core.state == .running ? "drop.fill" : "drop")
+            MenuBarLabel().environmentObject(core)
         }
     }
 }
@@ -63,5 +63,18 @@ struct MenuBarContent: View {
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Quit Sluice") { NSApp.terminate(nil) }.keyboardShortcut("q")
+    }
+}
+
+/// Drop icon, plus the download speed while traffic is flowing.
+struct MenuBarLabel: View {
+    @EnvironmentObject var core: Core
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: core.state == .running ? "drop.fill" : "drop")
+            if core.state == .running && core.downRate + core.upRate >= 1024 {
+                Text("↓\(formatBytes(core.downRate))/s").monospacedDigit()
+            }
+        }
     }
 }

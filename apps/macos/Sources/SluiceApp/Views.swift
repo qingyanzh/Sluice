@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
@@ -47,7 +48,10 @@ struct MainView: View {
             .navigationTitle(pane?.rawValue ?? "Sluice")
         }
         .frame(minWidth: 820, minHeight: 520)
-        .onAppear { core.refreshSystemProxy() }
+        .onAppear {
+            core.refreshSystemProxy()
+            core.startIfAutoStart()
+        }
     }
 }
 
@@ -168,6 +172,21 @@ struct OverviewView: View {
                 }
                 .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
             }
+            Section("Traffic") {
+                HStack(spacing: 24) {
+                    RateView(label: "Upload", systemImage: "arrow.up", rate: core.upRate, total: core.traffic?.up)
+                    RateView(label: "Download", systemImage: "arrow.down", rate: core.downRate, total: core.traffic?.down)
+                    VStack(alignment: .leading) {
+                        Text("Open connections").font(.caption).foregroundStyle(.secondary)
+                        Text("\(core.traffic?.active ?? 0)").font(.title3.monospacedDigit())
+                    }
+                    Spacer()
+                }
+            }
+            Section("General") {
+                Toggle("Start Sluice when the app opens", isOn: $core.autoStart)
+                LoginItemToggle()
+            }
             Section("Activity") {
                 LabeledContent("Policy groups", value: "\(core.groups.count)")
                 LabeledContent("Connections seen", value: "\(core.connections.count)")
@@ -175,6 +194,44 @@ struct OverviewView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct RateView: View {
+    let label: String
+    let systemImage: String
+    let rate: Double
+    let total: UInt64?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(label, systemImage: systemImage).font(.caption).foregroundStyle(.secondary)
+            Text("\(formatBytes(rate))/s").font(.title3.monospacedDigit())
+            Text("\(formatBytes(Double(total ?? 0))) total").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// "Open at login" via SMAppService; only works for the bundled app (dist/Sluice.app).
+struct LoginItemToggle: View {
+    @State private var enabled = SMAppService.mainApp.status == .enabled
+    @State private var error: String?
+    var body: some View {
+        VStack(alignment: .leading) {
+            Toggle("Open Sluice at login", isOn: Binding(get: { enabled }, set: set))
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+            if SMAppService.mainApp.status == .requiresApproval {
+                Text("Allow Sluice in System Settings › General › Login Items.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private func set(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        enabled = SMAppService.mainApp.status == .enabled
     }
 }
 

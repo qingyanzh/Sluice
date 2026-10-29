@@ -80,9 +80,13 @@ async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<Fa
             r = udp.read(&mut buf) => {
                 let n = r?;
                 if n == 0 || pipe.tx.send(buf[..n].to_vec()).await.is_err() { return Ok(()); }
+                crate::stats::add_up(n);
             }
             p = pipe.rx.recv() => match p {
-                Some(p) => udp.write_all(&p).await?,
+                Some(p) => {
+                    crate::stats::add_down(p.len());
+                    udp.write_all(&p).await?
+                }
                 None => return Ok(()),
             },
         }

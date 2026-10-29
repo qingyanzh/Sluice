@@ -27,7 +27,7 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - Hysteria2 (QUIC datagrams, with fragmentation)
 - Rules: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, IP-CIDR / IP-CIDR6 (`no-resolve`), GEOIP (needs `geoip-db`), FINAL
 - Rule sets: `RULE-SET,<url|file>,Policy` (Surge rule lists) and `DOMAIN-SET,<url|file>,Policy` (domain lists, `.example.com` = with subdomains; Clash `payload:` lists also accepted). Remote lists are cached in `~/Library/Caches/Sluice` and refreshed every `rule-set-update-interval` seconds (default 86400).
-- Subscriptions: `Group = select, policy-path=<url|file>, policy-regex-filter=<regex>, update-interval=86400` imports nodes from share links (`ss://`, `vmess://`, `vless://`, `trojan://`, `hysteria2://`, plain or base64) or Surge proxy lines. Links needing unsupported features (REALITY, XTLS flow, gRPC, Hysteria2 obfs) are skipped and reported. Groups sharing a URL share its nodes.
+- Subscriptions: `Group = select, policy-path=<url|file>, policy-regex-filter=<regex>, update-interval=86400` imports nodes from share links (`ss://`, `vmess://`, `vless://`, `trojan://`, `hysteria2://`, plain or base64), Surge proxy lines, or Clash / Mihomo YAML (`proxies:`). Links needing unsupported features (REALITY, XTLS flow, gRPC, Hysteria2 obfs) are skipped and reported. Groups sharing a URL share its nodes.
 - Policy groups (nestable):
   - `select`: switchable at runtime
   - `url-test`: lowest latency, with `tolerance` to avoid flapping
@@ -40,6 +40,7 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - `POST /v1/policies/<group>/test` (run a health check now)
   - `GET /v1/route?target=host:port`
   - `POST /v1/reload`
+  - `GET /v1/traffic` (bytes up and down, open connections)
 
 ## macOS app
 

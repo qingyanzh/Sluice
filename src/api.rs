@@ -5,6 +5,7 @@
 //!   POST /v1/policies/<group>/test          run an automatic group's health check now
 //!   GET  /v1/route?target=<host[:port]>     explain which rule and outbound a target hits
 //!   POST /v1/reload                         reload the config file (and subscriptions)
+//!   GET  /v1/traffic                        total bytes up/down and open connections
 
 use std::sync::Arc;
 
@@ -107,6 +108,10 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                 },
                 None => ("400 Bad Request", "{\"error\":\"missing ?select=\"}".to_string()),
             }
+        }
+        ("GET", "/v1/traffic") => {
+            let (up, down, active) = crate::stats::snapshot();
+            ("200 OK", format!("{{\"up\":{up},\"down\":{down},\"active\":{active}}}"))
         }
         ("POST", "/v1/reload") => match reloader.reload("API").await {
             Ok(summary) => ("200 OK", format!("{{\"reloaded\":true,\"summary\":{}}}", json_str(&summary))),
