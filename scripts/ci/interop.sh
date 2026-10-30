@@ -79,8 +79,9 @@ VLESS-REALITY-Vision = vless, 127.0.0.1, 19009, uuid=$uuid, sni=www.apple.com, r
 VLESS-TLS-Vision = vless, 127.0.0.1, 19010, uuid=$uuid, tls=true, sni=test.local, skip-cert-verify=true, flow=xtls-rprx-vision
 REALITY-WrongKey = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.apple.com, reality-public-key=$wrong_pub, reality-short-id=0123abcd
 Hy2-Obfs = hysteria2, 127.0.0.1, 19444, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret
+Hy2-Hopping = hysteria2, 127.0.0.1, 19450, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret, port-hopping=19450-19459, port-hopping-interval=1
 [Proxy Group]
-P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, VLESS-REALITY, VLESS-REALITY-Vision, VLESS-TLS-Vision, REALITY-WrongKey, Hysteria2, Hy2-Obfs
+P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, VLESS-REALITY, VLESS-REALITY-Vision, VLESS-TLS-Vision, REALITY-WrongKey, Hysteria2, Hy2-Obfs, Hy2-Hopping
 [Rule]
 FINAL,P
 EOF
@@ -90,6 +91,8 @@ ssserver -s 127.0.0.1:18389 -m chacha20-ietf-poly1305 -k ss -U > "$work/ss2.log"
 xray run -c "$work/xray.json" > "$work/xray.log" 2>&1 &
 hysteria server -c "$work/hy.yaml" > "$work/hy.log" 2>&1 &
 hysteria server -c "$work/hy-obfs.yaml" > "$work/hy-obfs.log" 2>&1 &
+# Port hopping, as a real server deploys it: pf redirects the whole range to one listener.
+echo "rdr pass on lo0 inet proto udp from any to 127.0.0.1 port 19450:19459 -> 127.0.0.1 port 19444" | sudo pfctl -Ef - 2>&1 | grep -v ALTQ || true
 cat > "$work/xray-client.json" <<EOF
 {"log":{"loglevel":"warning"},
 "inbounds":[{"listen":"127.0.0.1","port":10808,"protocol":"socks","settings":{"udp":true}}],
@@ -98,7 +101,7 @@ cat > "$work/xray-client.json" <<EOF
 EOF
 xray run -c "$work/xray-client.json" > "$work/xray-client.log" 2>&1 &
 sleep 2
-RUST_LOG=sluice=info,sluice::vision=debug ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
+RUST_LOG=sluice=info,sluice::vision=debug,sluice::udphop=debug ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
 for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:16170/v1/policies && break; sleep 0.5; done
 
 # Xray's own REALITY client and Sluice against the same server: Sluice must do as well
@@ -119,7 +122,8 @@ echo "REALITY control: xray $xray_ok/20, sluice $sluice_ok/20 $([ $control_fail 
 
 fails=$control_fail
 printf '%-20s %-6s %-12s %s / %s\n' NODE HTTPS DOWNLOAD UDP CONE
-for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision Hysteria2 Hy2-Obfs; do
+for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision Hysteria2 Hy2-Obfs Hy2-Hopping; do
+    log_start=$(wc -l < "$work/sluice.log")
     curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
     https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
     size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \
@@ -131,6 +135,13 @@ for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS
     [ "$size" = 10000000 ] || ok=no
     [[ "$udp" == "replies 23/23"* ]] || ok=no
     [[ "$cone" == "full-cone ok"* ]] || ok=no
+    if [ "$node" = Hy2-Hopping ]; then
+        # The connection must have lived through real hops (interval 1s), not just one port.
+        hops=$(tail -n +$((log_start + 1)) "$work/sluice.log" | grep -c "hysteria2 port hop")
+        conns=$(tail -n +$((log_start + 1)) "$work/sluice.log" | grep -c "hysteria2 connected")
+        [ "$hops" -ge 2 ] && [ "$conns" = 1 ] || ok=no
+        echo "Hy2-Hopping: $hops hops on $conns QUIC connection(s)"
+    fi
     [ $ok = yes ] || fails=$((fails + 1))
     printf '%-20s %-6s %-12s %s / %s %s\n' "$node" "$https" "$size" "$udp" "$cone" "$([ $ok = yes ] && echo PASS || echo FAIL)"
 done

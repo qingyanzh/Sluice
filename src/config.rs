@@ -36,8 +36,18 @@ pub enum ProxyDef {
         /// `xtls-rprx-vision` or none.
         flow: Option<String>,
     },
-    /// `obfs`: Salamander obfuscation password.
-    Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, obfs: Option<String> },
+    /// `obfs`: Salamander obfuscation password. `ports`: port-hopping spec such as
+    /// `443;20000-50000` (`port` is then just the first port); `hop_interval` in seconds.
+    Hysteria2 {
+        server: String,
+        port: u16,
+        password: String,
+        sni: Option<String>,
+        skip_cert_verify: bool,
+        obfs: Option<String>,
+        ports: Option<String>,
+        hop_interval: Option<u64>,
+    },
     Vmess {
         server: String,
         port: u16,
@@ -105,12 +115,18 @@ impl ProxyDef {
                     }
                 }
             }
-            ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
+            ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs, ports, hop_interval } => {
                 parts.extend(["hysteria2".into(), server.clone(), port.to_string(), format!("password={password}")]);
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 if let Some(o) = obfs {
                     parts.push("obfs=salamander".into());
                     parts.push(format!("obfs-password={o}"));
+                }
+                if let Some(p) = ports {
+                    parts.push(format!("port-hopping={}", p.replace(',', ";")));
+                }
+                if let Some(i) = hop_interval {
+                    parts.push(format!("port-hopping-interval={i}"));
                 }
             }
             ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
@@ -254,6 +270,17 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
                 None | Some("none") => None,
                 Some("salamander") => Some(take("obfs-password").ok_or_else(|| anyhow!("obfs=salamander needs obfs-password"))?),
                 Some(other) => bail!("unsupported hysteria2 obfs {other:?} (supported: salamander)"),
+            },
+            ports: match take("port-hopping").or_else(|| take("ports")) {
+                Some(p) => {
+                    crate::udphop::parse_ports(&p)?;
+                    Some(p.replace(';', ","))
+                }
+                None => None,
+            },
+            hop_interval: match take("port-hopping-interval").or_else(|| take("hop-interval")) {
+                Some(i) => Some(i.trim_end_matches('s').parse().map_err(|_| anyhow!("bad port-hopping-interval {i:?}"))?),
+                None => None,
             },
         },
         other => bail!("unsupported proxy type {other:?} (supported: ss, trojan, vless, vmess, hysteria2)"),

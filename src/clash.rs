@@ -109,10 +109,15 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
                 Some("salamander") => Some(need(v, "obfs-password")?),
                 Some(other) => bail!("hysteria2 obfs {other:?} not supported"),
             };
-            if s(v, "ports").is_some() {
-                bail!("hysteria2 port hopping not supported yet");
+            let ports = s(v, "ports");
+            if let Some(p) = &ports {
+                crate::udphop::parse_ports(p)?;
             }
-            ProxyDef::Hysteria2 { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, obfs }
+            let hop_interval = match s(v, "hop-interval") {
+                Some(i) => Some(i.parse().map_err(|_| anyhow!("bad hop-interval {i:?}"))?),
+                None => None,
+            };
+            ProxyDef::Hysteria2 { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, obfs, ports, hop_interval }
         }
         other => bail!("{other} not supported"),
     };
@@ -160,7 +165,7 @@ proxies:
         Host: cdn.example.com
   - {name: US VLESS, type: vless, server: us.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: us.example.com}
   - {name: SG Trojan, type: trojan, server: sg.example.com, port: 443, password: pw, sni: sg.example.com, skip-cert-verify: true}
-  - {name: KR HY2, type: hysteria2, server: kr.example.com, port: 8443, password: pw}
+  - {name: KR HY2, type: hysteria2, server: kr.example.com, port: 8443, password: pw, ports: "443,20000-20010", hop-interval: 15}
   - {name: Reality, type: vless, server: r.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: www.microsoft.com, flow: xtls-rprx-vision, reality-opts: {public-key: 9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4, short-id: ab}}
   - {name: Splice, type: vless, server: s.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, flow: xtls-rprx-splice}
   - {name: Plugin SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: obfs}
@@ -184,6 +189,6 @@ proxy-groups:
             other => panic!("{other:?}"),
         }
         assert!(matches!(&nodes[3].1, ProxyDef::Trojan { skip_cert_verify: true, .. }));
-        assert!(matches!(&nodes[4].1, ProxyDef::Hysteria2 { port: 8443, .. }));
+        assert!(matches!(&nodes[4].1, ProxyDef::Hysteria2 { port: 8443, ports: Some(p), hop_interval: Some(15), .. } if p == "443,20000-20010"));
     }
 }

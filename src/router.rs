@@ -133,8 +133,8 @@ impl Router {
                         flow.as_deref(),
                     )?)
                 }
-                ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
-                    Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs)?)
+                ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs, ports, hop_interval } => {
+                    Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs, ports, hop_interval)?)
                 }
                 ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
                     Outbound::Vmess(VmessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, layer)?, &uuid, &method)?)

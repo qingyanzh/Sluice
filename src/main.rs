@@ -18,6 +18,7 @@ mod transport;
 mod trojan;
 mod tun;
 mod udp;
+mod udphop;
 mod util;
 mod vision;
 mod vless;
