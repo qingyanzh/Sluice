@@ -1389,18 +1389,18 @@ struct RequestsView: View {
 
     var body: some View {
         let source = paused ? frozen : core.connections
+        let query = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         let rows = source.reversed().filter {
-            kind.admits($0.outbound)
-                && (filter.isEmpty || $0.target.localizedCaseInsensitiveContains(filter) || $0.outbound.localizedCaseInsensitiveContains(filter)
-                    || $0.policy.localizedCaseInsensitiveContains(filter))
+            kind.admits($0.outbound) && $0.matches(query)
         }
+        let showsProcess = source.contains { !($0.process ?? "").isEmpty }
         let filtering = kind != .all || !filter.isEmpty
         VStack(spacing: 0) {
             PaneHeader(title: "请求", subtitle: filtering ? "显示 \(rows.count) / \(source.count) 个请求" : "\(source.count) 个请求") {
                 GlassSegmented(options: [(OutboundKind.all, "全部", nil), (.proxy, "代理", nil), (.direct, "直连", nil), (.reject, "拒绝", nil)],
                                selection: $kind)
                     .frame(width: 250)
-                SearchField(prompt: "目标、策略或出站", text: $filter)
+                SearchField(prompt: "目标、进程、策略或出站", text: $filter)
                 Button {
                     if !paused { frozen = core.connections }
                     paused.toggle()
@@ -1410,29 +1410,40 @@ struct RequestsView: View {
                     .labelStyle(.iconOnly).disabled(source.isEmpty)
             }
             HStack(spacing: DS.gap) {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(Array(rows)) { c in
-                            RequestRow(connection: c, selected: c.id == selection) {
-                                withAnimation(DS.spring) { selection = c.id }
-                            }
-                            .contextMenu {
-                                Button("复制目标") { copyText(c.target) }
-                                Button("复制匹配规则") { copyText(c.rule) }
+                VStack(spacing: 0) {
+                    if showsProcess {
+                        HStack(spacing: 12) {
+                            Text("目标与路由").frame(maxWidth: .infinity, alignment: .leading)
+                            Text("进程").frame(width: 100, alignment: .leading)
+                        }
+                        .font(DS.caption).foregroundStyle(DS.ink2)
+                        .padding(.horizontal, 18).padding(.vertical, 12)
+                        Divider()
+                    }
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(rows)) { c in
+                                RequestRow(connection: c, selected: c.id == selection, showsProcess: showsProcess) {
+                                    withAnimation(DS.spring) { selection = c.id }
+                                }
+                                .contextMenu {
+                                    Button("复制目标") { copyText(c.target) }
+                                    Button("复制匹配规则") { copyText(c.rule) }
+                                }
                             }
                         }
+                        .padding(6)
                     }
-                    .padding(6)
-                }
-                .overlay {
-                    if rows.isEmpty {
-                        if !core.isActive && core.connections.isEmpty {
-                            EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                       detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
-                        } else {
-                            EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
-                                       detail: filtering ? "试试其他关键词，或清除筛选查看全部请求。" : "经过 Sluice 的连接会实时显示在这里。",
-                                       action: filtering ? ("清除筛选", { filter = ""; kind = .all }) : nil)
+                    .overlay {
+                        if rows.isEmpty {
+                            if !core.isActive && core.connections.isEmpty {
+                                EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
+                                           detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
+                            } else {
+                                EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
+                                           detail: filtering ? "试试其他关键词，或清除筛选查看全部请求。" : "经过 Sluice 的连接会实时显示在这里。",
+                                           action: filtering ? ("清除筛选", { filter = ""; kind = .all }) : nil)
+                            }
                         }
                     }
                 }
@@ -1469,6 +1480,7 @@ struct OutboundTag: View {
 struct RequestRow: View {
     let connection: Connection
     let selected: Bool
+    let showsProcess: Bool
     let action: () -> Void
     @State private var hovering = false
 
@@ -1489,6 +1501,12 @@ struct RequestRow: View {
                         Spacer(minLength: 4)
                         Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3).fixedSize()
                     }
+                }
+                if showsProcess {
+                    Text(connection.process ?? "").font(DS.small).foregroundStyle(DS.ink2)
+                        .lineLimit(1).truncationMode(.middle)
+                        .frame(width: 100, alignment: .leading)
+                        .help(connection.process ?? "")
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 12)
@@ -1637,18 +1655,33 @@ struct RequestDetail: View {
                         }
                     }
                     detailGroup("路由", [("规则", AnyView(Text(c.rule).textSelection(.enabled))),
-                                         ("策略", AnyView(Text(c.policy))),
+                                         ("策略链", AnyView(Text(c.policyChain).textSelection(.enabled))),
                                          ("出站", AnyView(OutboundTag(name: c.outbound)))])
                     detailGroup("请求", [("时间", AnyView(Text(c.time).monospacedDigit())),
+                                         ("进程", AnyView(Text(c.process ?? "—").textSelection(.enabled))),
                                          ("目标", AnyView(Text(c.target).textSelection(.enabled)))])
+                    detailGroup("流量", [("上传", AnyView(Text(c.up.map { formatBytes(Double($0)) } ?? "—").monospacedDigit())),
+                                         ("下载", AnyView(Text(c.down.map { formatBytes(Double($0)) } ?? "—").monospacedDigit()))])
+                    if c.status != nil || c.durationMs != nil {
+                        detailGroup("连接", statusRows(c))
+                    }
                 }
-                .padding(16)
+                .padding(20)
             }
             .id(c.id)
             .transition(.opacity)
         } else {
             EmptyState(icon: "sidebar.right", title: "未选择请求", detail: "选择左侧的请求查看详情")
         }
+    }
+
+    private func statusRows(_ connection: Connection) -> [(String, AnyView)] {
+        var rows: [(String, AnyView)] = []
+        if let status = connection.status { rows.append(("状态", AnyView(Text(status).textSelection(.enabled)))) }
+        if let duration = connection.durationMs {
+            rows.append(("耗时", AnyView(Text(String(format: "%.0f ms", duration)).monospacedDigit())))
+        }
+        return rows
     }
 
     private func detailGroup(_ title: String, _ rows: [(String, AnyView)]) -> some View {
@@ -1659,7 +1692,7 @@ struct RequestDetail: View {
                     HStack(alignment: .firstTextBaseline) {
                         Text(row.0).font(DS.small).foregroundStyle(DS.ink2)
                         Spacer(minLength: 12)
-                        row.1.font(DS.small).lineLimit(2).multilineTextAlignment(.trailing)
+                        row.1.font(DS.small).multilineTextAlignment(.trailing).fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.vertical, 8)
                     if i < rows.count - 1 { Divider().opacity(0.5) }

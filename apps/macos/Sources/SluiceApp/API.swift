@@ -36,6 +36,7 @@ struct Traffic: Decodable {
 
 struct APIError: LocalizedError {
     let message: String
+    var status: Int? = nil
     var errorDescription: String? { message }
 }
 
@@ -54,7 +55,7 @@ struct APIClient {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
             let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            throw APIError(message: body?["error"] as? String ?? "HTTP \(status)")
+            throw APIError(message: body?["error"] as? String ?? "HTTP \(status)", status: status)
         }
         return data
     }
@@ -86,6 +87,15 @@ struct APIClient {
 
     func traffic() async throws -> Traffic {
         try JSONDecoder().decode(Traffic.self, from: await request("GET", "/v1/traffic"))
+    }
+
+    /// Older cores only report connection events in their logs.
+    func connections() async throws -> [Connection]? {
+        do {
+            return try JSONDecoder().decode([Connection].self, from: await request("GET", "/v1/connections"))
+        } catch let error as APIError where error.status == 404 || error.status == 405 {
+            return nil
+        }
     }
 
     func reload() async throws {

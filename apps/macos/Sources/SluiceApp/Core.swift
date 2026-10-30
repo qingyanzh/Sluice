@@ -8,7 +8,7 @@ struct LogLine: Identifiable {
     let message: String
 }
 
-struct Connection: Identifiable {
+struct Connection: Decodable, Identifiable {
     let id: Int
     let time: String
     let proto: String
@@ -16,6 +16,22 @@ struct Connection: Identifiable {
     let policy: String
     let rule: String
     let outbound: String
+    let process: String?
+    let up: UInt64?
+    let down: UInt64?
+    let durationMs: Double?
+    let status: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, time, proto, target, policy, rule, outbound, process, up, down, status
+        case durationMs = "duration_ms"
+    }
+
+    var policyChain: String { policy == outbound ? policy : "\(policy) → \(outbound)" }
+
+    func matches(_ query: String) -> Bool {
+        query.isEmpty || [target, policy, outbound, process ?? ""].contains { $0.localizedCaseInsensitiveContains(query) }
+    }
 }
 
 /// What the app reads from the config file itself (the core owns the rest).
@@ -109,6 +125,8 @@ final class Core: ObservableObject {
     private var pending = ""
     private var nextID = 0
     private let maxLines = 2000
+    private var usesConnectionAPI = false
+    private var clearedConnectionIDs: Set<Connection.ID> = []
 
     static let defaultConfigPath: String = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -361,6 +379,9 @@ final class Core: ObservableObject {
     private func poll() async {
         var tick = 0
         var last = Date()
+        var connectionsSupported = true
+        usesConnectionAPI = false
+        clearedConnectionIDs = []
         while !Task.isCancelled {
             if let pid = rootPID {
                 followLog()
@@ -378,6 +399,18 @@ final class Core: ObservableObject {
             if let api, state == .running {
                 await sampleTraffic(api, elapsed: Date().timeIntervalSince(last))
                 last = Date()
+                if connectionsSupported {
+                    do {
+                        if let fresh = try await api.connections() {
+                            usesConnectionAPI = true
+                            connections = Array(fresh.filter { !clearedConnectionIDs.contains($0.id) }.suffix(maxLines))
+                        } else {
+                            connectionsSupported = false
+                        }
+                    } catch {
+                        // Keep the last records on a transient API or decoding failure.
+                    }
+                }
             }
             tick += 1
             // Policies every 2 s, traffic every 1 s; faster while starting or following a root log.
@@ -594,7 +627,10 @@ final class Core: ObservableObject {
     }
 
     func clearLogs() { logs = [] }
-    func clearConnections() { connections = [] }
+    func clearConnections() {
+        if usesConnectionAPI { clearedConnectionIDs.formUnion(connections.map(\.id)) }
+        connections = []
+    }
 
     // MARK: output parsing
 
@@ -618,11 +654,12 @@ final class Core: ObservableObject {
         }
         let (time, level, message) = (String(m.1), String(m.2), String(m.3))
         appendLog(time: time, level: level, message: message)
-        if let c = message.wholeMatch(of: Core.connPattern) {
+        if !usesConnectionAPI, let c = message.wholeMatch(of: Core.connPattern) {
             nextID += 1
             connections.append(Connection(
                 id: nextID, time: Core.shortTime(time), proto: c.1 == nil ? "TCP" : "UDP",
-                target: String(c.2), policy: String(c.3), rule: String(c.4), outbound: String(c.5)))
+                target: String(c.2), policy: String(c.3), rule: String(c.4), outbound: String(c.5),
+                process: nil, up: nil, down: nil, durationMs: nil, status: nil))
             if connections.count > maxLines { connections.removeFirst(connections.count - maxLines) }
         }
     }
