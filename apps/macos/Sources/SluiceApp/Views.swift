@@ -946,89 +946,97 @@ struct OverviewView: View {
     private let columns = [GridItem(.flexible(), spacing: DS.gap), GridItem(.flexible(), spacing: DS.gap)]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: DS.gap) {
-                SectionTitle(text: "网络接管")
-                LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(icon: "network", title: "系统代理",
-                                detail: "接管遵循系统代理设置的应用，适合日常使用。",
-                                isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }),
-                                status: core.systemProxyOn
-                                    ? (core.state == .running ? "系统代理正在接管" : "已开启，内核未运行")
-                                    : "未设置为系统代理",
-                                statusOn: core.systemProxyOn && core.state == .running,
-                                statusTone: core.systemProxyOn && core.state != .running ? DS.warn : nil)
-                        .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
-                    FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
-                                detail: "为其他应用提供本机 HTTP 和 SOCKS5 代理。",
-                                status: [core.summary.httpListen.map { "HTTP \($0)" }, core.summary.socksListen.map { "SOCKS5 \($0)" }]
-                                    .compactMap { $0 }.joined(separator: "  ").ifEmpty("已禁用"),
-                                statusOn: core.state == .running && (core.summary.httpListen != nil || core.summary.socksListen != nil))
-                }.entrance(0)
-                SectionTitle(text: "增强模式")
-                LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(icon: "shield.lefthalf.filled", title: "增强模式",
-                                detail: "同时接管不遵循系统代理的应用，需要管理员授权。",
-                                isOn: Binding(get: { core.summary.enhancedMode }, set: { on in
-                                    enhancedBusy = true
-                                    Task {
-                                        if let err = await core.setEnhancedMode(on) { core.lastActionError = "增强模式: \(err)" }
-                                        enhancedBusy = false
-                                    }
-                                }),
-                                status: core.privileged ? "增强模式已激活" : core.summary.enhancedMode ? "已启用，启动后生效" : "已禁用",
-                                statusOn: core.privileged, contentHeight: 180)
-                        .disabled(enhancedBusy)
-                    HelperSettingsCard()
-                }.entrance(1)
-                SectionTitle(text: "代理服务")
-                LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(icon: "terminal", title: "控制 API",
-                                detail: "用于切换策略、读取流量和测试规则。",
-                                status: core.summary.apiPort.map { "127.0.0.1:\($0)" } ?? "未配置（应用需要它）",
-                                statusOn: core.state == .running && core.summary.apiPort != nil)
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 10) {
-                            IconTile(symbol: "doc.text", size: 28)
-                            Text("当前配置").font(DS.heading)
+        ScrollViewReader { scroll in
+            ScrollView {
+                VStack(alignment: .leading, spacing: DS.gap) {
+                    SectionTitle(text: "网络接管")
+                    LazyVGrid(columns: columns, spacing: DS.gap) {
+                        FeatureCard(icon: "network", title: "系统代理",
+                                    detail: "接管遵循系统代理设置的应用，适合日常使用。",
+                                    isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }),
+                                    status: core.systemProxyOn
+                                        ? (core.state == .running ? "系统代理正在接管" : "已开启，内核未运行")
+                                        : "未设置为系统代理",
+                                    statusOn: core.systemProxyOn && core.state == .running,
+                                    statusTone: core.systemProxyOn && core.state != .running ? DS.warn : nil)
+                            .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
+                        FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
+                                    detail: "为其他应用提供本机 HTTP 和 SOCKS5 代理。",
+                                    status: [core.summary.httpListen.map { "HTTP \($0)" }, core.summary.socksListen.map { "SOCKS5 \($0)" }]
+                                        .compactMap { $0 }.joined(separator: "  ").ifEmpty("已禁用"),
+                                    statusOn: core.state == .running && (core.summary.httpListen != nil || core.summary.socksListen != nil))
+                    }.entrance(0)
+                    SectionTitle(text: "增强模式")
+                    LazyVGrid(columns: columns, spacing: DS.gap) {
+                        FeatureCard(icon: "shield.lefthalf.filled", title: "增强模式",
+                                    detail: "同时接管不遵循系统代理的应用，需要管理员授权。",
+                                    isOn: Binding(get: { core.summary.enhancedMode }, set: { on in
+                                        enhancedBusy = true
+                                        Task {
+                                            if let err = await core.setEnhancedMode(on) { core.lastActionError = "增强模式: \(err)" }
+                                            enhancedBusy = false
+                                        }
+                                    }),
+                                    status: core.privileged ? "增强模式已激活" : core.summary.enhancedMode ? "已启用，启动后生效" : "已禁用",
+                                    statusOn: core.privileged, contentHeight: 180)
+                            .disabled(enhancedBusy)
+                        HelperSettingsCard()
+                    }.entrance(1)
+                    SectionTitle(text: "代理服务")
+                    LazyVGrid(columns: columns, spacing: DS.gap) {
+                        FeatureCard(icon: "terminal", title: "控制 API",
+                                    detail: "用于切换策略、读取流量和测试规则。",
+                                    status: core.summary.apiPort.map { "127.0.0.1:\($0)" } ?? "未配置（应用需要它）",
+                                    statusOn: core.state == .running && core.summary.apiPort != nil)
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 10) {
+                                IconTile(symbol: "doc.text", size: 28)
+                                Text("当前配置").font(DS.heading)
+                            }
+                            Text(core.configPath).font(DS.small).foregroundStyle(DS.ink2)
+                                .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(core.configPath)
+                            Spacer(minLength: 0)
+                            Button("显示文件") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
                         }
-                        Text(core.configPath).font(DS.small).foregroundStyle(DS.ink2)
-                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(core.configPath)
-                        Spacer(minLength: 0)
-                        Button("显示文件") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
+                        .frame(minHeight: 120, alignment: .topLeading).card()
+                    }.entrance(2)
+                    HStack(spacing: 8) {
+                        if let listen = core.summary.httpListen, let (host, port) = SystemProxy.split(listen) {
+                            Button { copyText("http://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
+                                Label("复制 HTTP 地址", systemImage: "doc.on.doc")
+                            }.glassButton()
+                        }
+                        if let listen = core.summary.socksListen, let (host, port) = SystemProxy.split(listen) {
+                            Button { copyText("socks5://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
+                                Label("复制 SOCKS5 地址", systemImage: "doc.on.doc")
+                            }.glassButton()
+                        }
+                        Spacer()
                     }
-                    .frame(minHeight: 120, alignment: .topLeading).card()
-                }.entrance(2)
-                HStack(spacing: 8) {
-                    if let listen = core.summary.httpListen, let (host, port) = SystemProxy.split(listen) {
-                        Button { copyText("http://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
-                            Label("复制 HTTP 地址", systemImage: "doc.on.doc")
-                        }.glassButton()
-                    }
-                    if let listen = core.summary.socksListen, let (host, port) = SystemProxy.split(listen) {
-                        Button { copyText("socks5://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
-                            Label("复制 SOCKS5 地址", systemImage: "doc.on.doc")
-                        }.glassButton()
-                    }
-                    Spacer()
+                    SectionTitle(text: "通用").id("maintenance")
+                    LazyVGrid(columns: columns, spacing: DS.gap) {
+                        FeatureCard(icon: "power", title: "打开应用时启动",
+                                    detail: "打开 Sluice 时自动启动代理内核。",
+                                    isOn: $core.autoStart,
+                                    status: core.autoStart ? "已启用" : "已禁用", statusOn: core.autoStart)
+                        LoginItemCard()
+                    }.entrance(2)
+                    UpdateSettingsCard().entrance(3)
+                    AppearanceCard().entrance(4)
+                    MenuBarSettingsCard().entrance(5)
+                    SectionTitle(text: "诊断")
+                    DiagnosticsSettingsCard().entrance(6)
                 }
-                SectionTitle(text: "通用")
-                LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(icon: "power", title: "打开应用时启动",
-                                detail: "打开 Sluice 时自动启动代理内核。",
-                                isOn: $core.autoStart,
-                                status: core.autoStart ? "已启用" : "已禁用", statusOn: core.autoStart)
-                    LoginItemCard()
-                }.entrance(2)
-                UpdateSettingsCard().entrance(3)
-                AppearanceCard().entrance(4)
-                MenuBarSettingsCard().entrance(5)
-                SectionTitle(text: "诊断")
-                DiagnosticsSettingsCard().entrance(6)
+                .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
             }
-            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
+            .paneHeader { PaneHeader(title: Pane.overview.title, subtitle: Pane.overview.subtitle) }
+            .task {
+                if E2ELaunch.current?.destination == "settings-maintenance" {
+                    try? await Task.sleep(for: .seconds(2))
+                    scroll.scrollTo("maintenance", anchor: .top)
+                }
+            }
         }
-        .paneHeader { PaneHeader(title: Pane.overview.title, subtitle: Pane.overview.subtitle) }
     }
 }
 
@@ -1423,7 +1431,7 @@ struct RequestsView: View {
     @State private var selection: Connection.ID?
     @State private var paused = false
     @State private var frozen: [Connection] = []
-    @State private var activity = false
+    @State private var activity = E2ELaunch.current?.destination == "requests-active"
 
     /// Which outbounds to show.
     enum OutboundKind: Hashable { case all, proxy, direct, reject
@@ -2066,7 +2074,7 @@ struct ConfigView: View {
     @State private var pendingSwitch: String?
     @State private var pendingDelete: String?
     @State private var profileEdit: ProfileEdit?
-    @State private var editorMode = "文本"
+    @State private var editorMode = E2ELaunch.current?.editorMode ?? "文本"
 
     var body: some View {
         VStack(spacing: 0) {

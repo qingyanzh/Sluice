@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct SluiceApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var core = Core()
+    @StateObject private var core = Core(attachment: E2ELaunch.current)
 
     init() {
         // `Sluice --helper status|register|unregister|hello` manages the helper without the UI.
@@ -37,7 +37,9 @@ struct SluiceApp: App {
         Window("Sluice", id: "main") {
             MainView()
                 .environmentObject(core)
+                .defaultAppStorage(core.preferences)
                 .onAppear { delegate.core = core }
+                .task { if let launch = E2ELaunch.current { await launch.prepareWindow(core: core) } }
         }
         .defaultSize(width: 1120, height: 860)
         .commands {
@@ -45,9 +47,9 @@ struct SluiceApp: App {
         }
 
         MenuBarExtra {
-            MenuBarContent().environmentObject(core)
+            MenuBarContent().environmentObject(core).defaultAppStorage(core.preferences)
         } label: {
-            MenuBarLabel().environmentObject(core)
+            MenuBarLabel().environmentObject(core).defaultAppStorage(core.preferences)
         }
     }
 }

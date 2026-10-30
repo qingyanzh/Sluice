@@ -9,33 +9,41 @@ struct ActivityView: View {
     @State private var topBy = 0
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: DS.sectionGap) {
-                hero.entrance(0)
-                routeCard.entrance(1)
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("流量与请求").font(DS.heading)
-                        Spacer()
-                        Text("本次运行").font(DS.small).foregroundStyle(DS.ink3)
-                    }
-                    ViewThatFits(in: .horizontal) {
-                        dashboardGrid.frame(minWidth: 640)
-                        VStack(spacing: DS.gap) {
-                            trafficCard
-                            connectionsCard
-                            totalCard
-                            topCard
+        ScrollViewReader { scroll in
+            ScrollView {
+                VStack(alignment: .leading, spacing: DS.sectionGap) {
+                    hero.entrance(0)
+                    routeCard.entrance(1)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("流量与请求").font(DS.heading)
+                            Spacer()
+                            Text("本次运行").font(DS.small).foregroundStyle(DS.ink3)
                         }
-                    }
-                }.entrance(2)
-                TrafficStatsView().entrance(3)
+                        ViewThatFits(in: .horizontal) {
+                            dashboardGrid.frame(minWidth: 640)
+                            VStack(spacing: DS.gap) {
+                                trafficCard
+                                connectionsCard
+                                totalCard
+                                topCard
+                            }
+                        }
+                    }.entrance(2)
+                    TrafficStatsView().entrance(3).id("stats")
+                }
+                .frame(maxWidth: DS.maxContentWidth)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
             }
-            .frame(maxWidth: DS.maxContentWidth)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
+            .paneHeader { PaneHeader(title: "活动", subtitle: Pane.activity.subtitle) }
+            .task {
+                if E2ELaunch.current?.destination == "stats" {
+                    try? await Task.sleep(for: .seconds(2))
+                    scroll.scrollTo("stats", anchor: .top)
+                }
+            }
         }
-        .paneHeader { PaneHeader(title: "活动", subtitle: Pane.activity.subtitle) }
     }
 
     private var dashboardGrid: some View {

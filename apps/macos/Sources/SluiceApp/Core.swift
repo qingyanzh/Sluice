@@ -155,7 +155,9 @@ final class Core: ObservableObject {
         didSet { defaults.set(configPath, forKey: "configPath") }
     }
 
+    var preferences: UserDefaults { defaults }
     private let defaults: UserDefaults
+    private let attachment: E2ELaunch?
     private var process: Process?
     private var profileStore: ProfileStore?
     /// Root core (enhanced mode), started by the helper or the admin prompt; followed via its log file.
@@ -212,13 +214,15 @@ final class Core: ObservableObject {
         FINAL,Proxy
         """
 
-    init(defaults: UserDefaults = .standard, profilesDirectory: URL? = nil) {
+    init(defaults: UserDefaults = .standard, profilesDirectory: URL? = nil, attachment: E2ELaunch? = nil) {
+        self.attachment = attachment
+        let defaults = attachment?.preferences() ?? defaults
         self.defaults = defaults
         configPath = defaults.string(forKey: "configPath") ?? Core.defaultConfigPath
         autoStart = defaults.bool(forKey: "autoStart")
         ensureConfigExists()
         do {
-            let store = try ProfileStore(baseDirectory: profilesDirectory ?? Self.profilesDirectory, defaults: defaults,
+            let store = try ProfileStore(baseDirectory: attachment?.config.deletingLastPathComponent() ?? profilesDirectory ?? Self.profilesDirectory, defaults: defaults,
                                          migratingFrom: URL(fileURLWithPath: configPath))
             profileStore = store
             profileNames = try store.names()
@@ -227,10 +231,25 @@ final class Core: ObservableObject {
             lastActionError = "无法载入配置列表：\(error.localizedDescription)"
         }
         refreshSummary()
+        if let attachment {
+            requestedPane = attachment.pane
+            runningSummary = summary
+            state = .starting
+            if let file = attachment.nodeTests, let data = try? Data(contentsOf: file),
+               let results = try? JSONDecoder().decode([NodeTestResult].self, from: data) {
+                for result in results {
+                    nodeTests[result.node] = result
+                    nodeLatencies[result.node] = result.ok ? (result.latencyMs ?? -1) : -1
+                }
+            }
+            appendLog(level: "APP", message: "attached to existing core at \(attachment.host):\(attachment.port)")
+            pollTask = Task { await self.poll() }
+        }
     }
 
     var api: APIClient? {
-        (isActive ? (runningSummary ?? summary) : summary).apiPort.map { APIClient(port: $0) }
+        if let attachment { return APIClient(port: attachment.port, host: attachment.host) }
+        return (isActive ? (runningSummary ?? summary) : summary).apiPort.map { APIClient(port: $0) }
     }
 
     /// The core binary: bundled in the app, or $SLUICE_CORE, or the repo's release build.
@@ -266,7 +285,7 @@ final class Core: ObservableObject {
         start()
     }
 
-    var isActive: Bool { process != nil || rootPID != nil }
+    var isActive: Bool { attachment != nil || process != nil || rootPID != nil }
 
     static let logDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Sluice")
 
@@ -404,6 +423,7 @@ final class Core: ObservableObject {
     }
 
     func stop() {
+        guard attachment == nil else { return }
         if let pid = rootPID {
             stopping = true
             Task {
@@ -427,6 +447,7 @@ final class Core: ObservableObject {
     }
 
     func restart() {
+        guard attachment == nil else { return }
         guard !restarting else { return }
         guard isActive else { return start() }
         restarting = true
@@ -441,6 +462,13 @@ final class Core: ObservableObject {
 
     /// Synchronous stop used when the app quits, so the child never outlives it.
     func stopForQuit() {
+        if let attachment {
+            defaults.removePersistentDomain(forName: attachment.preferenceDomain)
+            pollTask?.cancel()
+            eventTask?.cancel()
+            eventRefreshTask?.cancel()
+            return
+        }
         if let pid = rootPID {
             // The helper also stops it once the app exits; the admin prompt path needs one more prompt.
             let sema = DispatchSemaphore(value: 0)
@@ -1059,11 +1087,13 @@ final class Core: ObservableObject {
     // MARK: system proxy
 
     func refreshSystemProxy() {
+        guard attachment == nil else { return }
         guard let (_, port) = SystemProxy.split(summary.httpListen) else { systemProxyOn = false; return }
         Task { systemProxyOn = await SystemProxy.isPointing(atPort: port) }
     }
 
     func setSystemProxy(_ on: Bool) {
+        guard attachment == nil else { return }
         let http = SystemProxy.split(summary.httpListen)
         let socks = SystemProxy.split(summary.socksListen)
         guard !on || http != nil || socks != nil else {
