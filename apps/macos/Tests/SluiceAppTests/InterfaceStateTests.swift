@@ -2,6 +2,16 @@ import XCTest
 @testable import SluiceApp
 
 final class InterfaceStateTests: XCTestCase {
+    @MainActor
+    func testSubscriptionValidatorAcceptsLocalFileURLs() {
+        for url in ["https://example.test/sub", "http://127.0.0.1/sub", "file:///tmp/local%20nodes.txt"] {
+            XCTAssertTrue(Core.isSubscriptionURL(url), url)
+        }
+        for url in ["/tmp/nodes.txt", "ftp://example.test/sub", ""] {
+            XCTAssertFalse(Core.isSubscriptionURL(url), url)
+        }
+    }
+
     func testMenuBarSpeedMatchesSurgeUnitsAndPrecision() {
         XCTAssertEqual(menuBarSpeed(0), "0 KB/s")
         XCTAssertEqual(menuBarSpeed(999), "1 KB/s")

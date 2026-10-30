@@ -382,7 +382,7 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
         let (names, metadata, last_error) = &imported[&key];
         let picked: Vec<String> = names.iter().filter(|n| filter.as_ref().is_none_or(|re| re.is_match(n))).cloned().collect();
         let g = &mut cfg.groups[gi];
-        info!("group {}: {} nodes from {source}{note}", g.name, picked.len());
+        info!("{}", expansion_summary(&g.name, picked.len(), &source, &note));
         cfg.subscriptions.push(SubscriptionInfo {
             group: g.name.clone(), url: source.clone(), metadata: metadata.clone(), last_error: last_error.clone(), node_count: picked.len(),
         });
@@ -393,6 +393,10 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn expansion_summary(group: &str, count: usize, source: &str, note: &str) -> String {
+    crate::diag::redact(&format!("group {group}: {count} nodes from {source}{note}"))
 }
 
 fn summarize(skipped: &[String]) -> String {
@@ -414,6 +418,43 @@ fn summarize(skipped: &[String]) -> String {
 mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
+
+    #[test]
+    fn expansion_log_redacts_subscription_secrets() {
+        let message = expansion_summary("Subscription", 30,
+            "https://user:secret@host/api/v1/client/subscribe?token=private-token&format=clash", "");
+        assert!(message.starts_with("group Subscription: 30 nodes from https://"));
+        assert!(message.contains("host/api/v1/client/subscribe?[REDACTED]"));
+        for secret in ["user", "secret", "private-token", "format=clash"] {
+            assert!(!message.contains(secret), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn file_url_subscriptions_parse_all_fixture_formats() {
+        let dir = std::env::temp_dir().join(format!("sluice-file-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("节点 # % ?.txt");
+        let source = url::Url::from_file_path(&path).unwrap();
+        let links = include_str!("../tests/fixtures/local-check/links.txt");
+        for (body, count) in [
+            (links.to_string(), 8),
+            (STANDARD.encode(links), 8),
+            (include_str!("../tests/fixtures/local-check/clash.yaml").to_string(), 2),
+            (include_str!("../tests/fixtures/local-check/surge.conf").to_string(), 2),
+        ] {
+            std::fs::write(&path, &body).unwrap();
+            let expected: Vec<String> = parse(&body).0.into_iter().map(|(name, _)| name).collect();
+            assert_eq!(expected.len(), count);
+            let mut cfg = Config::parse(&format!("[Proxy Group]\nLocal = select, policy-path={source}\n")).unwrap();
+            expand(&mut cfg, Path::new("/unused"), true).await.unwrap();
+            assert_eq!(cfg.proxies.len(), count);
+            assert_eq!(cfg.groups[0].options, expected);
+            assert_eq!(cfg.subscriptions[0].node_count, count);
+            assert!(cfg.subscriptions[0].last_error.is_none());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn surge_managed_profile_extracts_only_proxies() {

@@ -209,7 +209,11 @@ fn age(path: &Path) -> Option<Duration> {
 /// Reads a file or HTTP(S) source, with a disk cache and stale fallback on errors.
 pub async fn fetch(source: &str, base: &Path, max_age: Duration, user_agent: Option<&str>) -> Result<FetchResult> {
     if !(source.starts_with("http://") || source.starts_with("https://")) {
-        let path = base.join(source);
+        let path = if source.starts_with("file://") {
+            url::Url::parse(source)?.to_file_path().map_err(|_| anyhow!("invalid local file URL"))?
+        } else {
+            base.join(source)
+        };
         let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         return Ok(FetchResult { text, from: "file", metadata: FetchMetadata::default(), last_error: None });
     }
@@ -547,6 +551,16 @@ mod tests {
         assert!(d.match_domain("google.com") && d.match_domain("mail.google.com") && !d.match_domain("notgoogle.com"));
         assert!(d.match_domain("x.ads.net"));
         assert!(d.match_ip("10.2.3.4".parse().unwrap()) && !d.match_ip("11.0.0.1".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn file_url_rule_set_uses_shared_fetcher() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/local-check/rules.list");
+        let source = url::Url::from_file_path(path).unwrap();
+        let set = RuleSet::new(source.as_str(), SetKind::Rules);
+        assert!(load(&set, Path::new("/unused"), Duration::ZERO).await.unwrap() > 0);
+        assert!(set.data.read().unwrap().match_domain("set.test"));
+        assert!(fetch("file://remote.example/rules.list", Path::new("."), Duration::ZERO, None).await.is_err());
     }
 
     #[test]

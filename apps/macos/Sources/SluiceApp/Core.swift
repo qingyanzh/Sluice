@@ -736,7 +736,10 @@ final class Core: ObservableObject {
                 }
             }
             if let api, state == .starting || tick % 2 == 0, await refreshPolicies(api) {
-                if state == .starting { state = .running }
+                if state == .starting {
+                    state = .running
+                    refreshSystemProxy()
+                }
                 if let m = try? await api.mode() { mode = m }
             }
             guard !Task.isCancelled else { return }
@@ -1094,7 +1097,7 @@ final class Core: ObservableObject {
     /// Adds a subscription as its own `select` group fed by `policy-path`.
     func addSubscription(name: String, url: String, filter: String, userAgent: String = "") async -> String? {
         let url = url.trimmingCharacters(in: .whitespaces)
-        guard url.hasPrefix("http://") || url.hasPrefix("https://") else { return "订阅地址需要以 http:// 或 https:// 开头。" }
+        guard Self.isSubscriptionURL(url) else { return "订阅地址需要以 http://、https:// 或 file:// 开头。" }
         var text = readConfig()
         let group = uniqueName(name.trimmingCharacters(in: .whitespaces).isEmpty ? "Subscription" : name, in: text)
         var line = "\(group) = select, policy-path=\(url)"
@@ -1118,16 +1121,21 @@ final class Core: ObservableObject {
         return headline + "\n" + detail
     }
 
+    static func isSubscriptionURL(_ url: String) -> Bool {
+        ["http://", "https://", "file://"].contains { url.hasPrefix($0) }
+    }
+
     // MARK: system proxy
 
     func refreshSystemProxy() {
         guard attachment == nil else { return }
         let config = isActive ? (runningSummary ?? summary) : summary
+        let coreRunning = state == .running
         let refreshID = UUID()
         systemProxyRefreshID = refreshID
         Task {
-            let status = await SystemProxy.status(http: config.httpListen, socks: config.socksListen)
-            guard systemProxyRefreshID == refreshID else { return }
+            let status = await SystemProxy.status(http: config.httpListen, socks: config.socksListen, coreRunning: coreRunning)
+            guard systemProxyRefreshID == refreshID, (state == .running) == coreRunning else { return }
             systemProxyOn = status.isSluice
             otherSystemProxy = status.otherProxy
         }

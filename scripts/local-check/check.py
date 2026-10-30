@@ -203,6 +203,13 @@ def diag():
 
 
 def smoke():
+    # Validate file:// sources even when the sandbox prevents the live API check.
+    file_sources = f'''LocalSubscription = select, policy-path={(FIX / 'clash.yaml').as_uri()}
+[Rule]
+RULE-SET,{(FIX / 'rules.list').as_uri()},REJECT
+FINAL,REJECT
+'''
+    assert '2 proxies' in cli('check', write('file-subscription.conf', '[Proxy Group]\n' + file_sources))
     # Reserve distinct free ports together; release immediately before spawning.
     reserved = []
     try:
@@ -226,9 +233,7 @@ api-listen = 127.0.0.1:{api_port}
 dns-server = 127.0.0.1
 [Proxy Group]
 P = select, DIRECT, REJECT, url=http://127.0.0.1:{api_port}/v1/mode
-[Rule]
-FINAL,REJECT
-''')
+''' + file_sources)
     process = None
 
     def call(method, path, expected=200):
@@ -263,6 +268,10 @@ FINAL,REJECT
         for path in ['subscriptions', 'policies', 'route?target=127.0.0.1:80', 'mode', 'traffic',
                      'dns', 'connections', 'connections/active', 'stats', 'profile']:
             call('GET', '/v1/' + path)
+        policies = call('GET', '/v1/policies')
+        subscription = next(group for group in policies if group['group'] == 'LocalSubscription')
+        assert {node['name'] for node in subscription['options']} == {'Clash-SS', 'Clash-Trojan'}, subscription
+        print('file:// subscription: both fixture nodes appear in /v1/policies', flush=True)
         for method in ['POST', 'PUT']:
             assert call(method, '/v1/policies/P?select=REJECT')['selected'] == 'REJECT'
             assert call(method, '/v1/mode?set=rule')['mode'] == 'rule'

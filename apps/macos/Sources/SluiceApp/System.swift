@@ -43,9 +43,10 @@ enum SystemProxy {
     struct Status: Equatable {
         var isSluice = false
         var otherAddresses: [String] = []
+        var otherOwners: [String] = []
 
         var otherProxy: String? {
-            otherAddresses.isEmpty ? nil : "another proxy (\(otherAddresses.joined(separator: ", ")))"
+            otherAddresses.isEmpty ? nil : "其他代理 (\((otherOwners + otherAddresses).joined(separator: ", ")))"
         }
     }
 
@@ -54,13 +55,19 @@ enum SystemProxy {
         return out.split(separator: "\n").dropFirst().map(String.init).filter { !$0.hasPrefix("*") && !$0.isEmpty }
     }
 
-    static func status(http: String?, socks: String?) async -> Status {
+    static func status(http: String?, socks: String?, coreRunning: Bool) async -> Status {
         let (_, out) = await runTool("/usr/sbin/scutil", ["--proxy"])
-        return parseStatus(out, http: http, socks: socks)
+        var listenerOutput: [Int: String] = [:]
+        if !coreRunning {
+            let ports = Set([split(http ?? defaultHTTP)?.1, split(socks ?? defaultSOCKS)?.1].compactMap { $0 })
+            for port in ports { listenerOutput[port] = await ListenConflict.output(port: port) }
+        }
+        return parseStatus(out, http: http, socks: socks, coreRunning: coreRunning, listenerOutput: listenerOutput)
     }
 
     /// Every enabled proxy must match its corresponding listener, including the host.
-    static func parseStatus(_ output: String, http: String?, socks: String?) -> Status {
+    static func parseStatus(_ output: String, http: String?, socks: String?, coreRunning: Bool = true,
+                            listenerOutput: [Int: String] = [:]) -> Status {
         var values: [String: String] = [:]
         for line in output.split(separator: "\n") {
             guard let colon = line.firstIndex(of: ":") else { continue }
@@ -69,16 +76,22 @@ enum SystemProxy {
         }
         var enabled = 0
         var other: [String] = []
+        var owners: [String] = []
         for (kind, listener) in [("HTTP", http ?? defaultHTTP), ("HTTPS", http ?? defaultHTTP), ("SOCKS", socks ?? defaultSOCKS)] {
             guard values["\(kind)Enable"] == "1" else { continue }
             enabled += 1
             let host = values["\(kind)Proxy"] ?? "?"
             let port = Int(values["\(kind)Port"] ?? "")
-            if let expected = split(listener), host == expected.0, port == expected.1 { continue }
+            if let expected = split(listener), host == expected.0, port == expected.1 {
+                let foreign = coreRunning ? [] : ListenConflict.parseOwners(listenerOutput[expected.1] ?? "")
+                    .filter { $0.process != "sluice" }
+                if foreign.isEmpty { continue }
+                for owner in foreign where !owners.contains(owner.process) { owners.append(owner.process) }
+            }
             let address = "\(host.contains(":") ? "[\(host)]" : host):\(values["\(kind)Port"] ?? "?")"
             if !other.contains(address) { other.append(address) }
         }
-        return Status(isSluice: enabled > 0 && other.isEmpty, otherAddresses: other)
+        return Status(isSluice: enabled > 0 && other.isEmpty, otherAddresses: other, otherOwners: owners)
     }
 
     /// Points (or stops pointing) every network service's HTTP, HTTPS and SOCKS proxy at Sluice.
@@ -145,9 +158,13 @@ enum ListenConflict {
 
     static func message(for error: String) async -> String? {
         guard let port = port(in: error) else { return nil }
-        let (_, output) = await runTool("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"])
-        let messages = parseOwners(output).map { $0.message(port: port) }
+        let messages = parseOwners(await output(port: port)).map { $0.message(port: port) }
         return messages.isEmpty ? nil : messages.joined(separator: "\n")
+    }
+
+    static func output(port: Int) async -> String {
+        let (_, output) = await runTool("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"])
+        return output
     }
 }
 

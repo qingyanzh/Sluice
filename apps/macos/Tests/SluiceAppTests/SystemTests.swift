@@ -21,7 +21,7 @@ final class SystemTests: XCTestCase {
         let surge = proxy("HTTP", "127.0.0.1", 6152) + proxy("HTTPS", "127.0.0.1", 6152) + proxy("SOCKS", "127.0.0.1", 6153)
         let status = SystemProxy.parseStatus(surge, http: nil, socks: nil)
         XCTAssertFalse(status.isSluice)
-        XCTAssertEqual(status.otherProxy, "another proxy (127.0.0.1:6152, 127.0.0.1:6153)")
+        XCTAssertEqual(status.otherProxy, "其他代理 (127.0.0.1:6152, 127.0.0.1:6153)")
 
         let remote = SystemProxy.parseStatus(proxy("HTTP", "192.168.1.2", 6252), http: nil, socks: nil)
         XCTAssertFalse(remote.isSluice)
@@ -55,6 +55,44 @@ final class SystemTests: XCTestCase {
         XCTAssertEqual(ListenConflict.parseOwners(output).first?.message(port: 6252), "端口 6252 已被 Surge(1234) 占用")
         XCTAssertTrue(ListenConflict.parseOwners("").isEmpty)
         XCTAssertTrue(ListenConflict.parseOwners("lsof: permission denied").isEmpty)
+    }
+
+    func testStoppedCoreRecognizesAnotherOwnerOfConfiguredListener() {
+        let proxies = proxy("HTTP", "127.0.0.1", 6152) + proxy("HTTPS", "127.0.0.1", 6152)
+        let lsof = "Surge 1234 user 12u IPv4 0x123 0t0 TCP 127.0.0.1:6152 (LISTEN)\n"
+        let status = SystemProxy.parseStatus(proxies, http: "127.0.0.1:6152", socks: nil,
+                                            coreRunning: false, listenerOutput: [6152: lsof])
+        XCTAssertFalse(status.isSluice)
+        XCTAssertEqual(status.otherAddresses, ["127.0.0.1:6152"])
+        XCTAssertEqual(status.otherProxy, "其他代理 (Surge, 127.0.0.1:6152)")
+
+        let running = SystemProxy.parseStatus(proxies, http: "127.0.0.1:6152", socks: nil,
+                                             coreRunning: true, listenerOutput: [6152: lsof])
+        XCTAssertTrue(running.isSluice)
+        XCTAssertNil(running.otherProxy)
+    }
+
+    func testStoppedCoreKeepsWarningForUnownedOrSluiceListeners() {
+        let proxies = proxy("HTTP", "127.0.0.1", 6152)
+        for output in ["", "lsof: permission denied",
+                       "sluice 1234 user 12u IPv4 0x123 0t0 TCP 127.0.0.1:6152 (LISTEN)"] {
+            let status = SystemProxy.parseStatus(proxies, http: "127.0.0.1:6152", socks: nil,
+                                                coreRunning: false, listenerOutput: [6152: output])
+            XCTAssertTrue(status.isSluice)
+            XCTAssertNil(status.otherProxy)
+        }
+    }
+
+    func testStoppedCoreChecksSOCKSAndPreservesMixedProxyStatus() {
+        let lsof = "Surge 1234 user 12u IPv6 0x123 0t0 TCP [::1]:6153 (LISTEN)\n"
+        let proxies = proxy("HTTP", "127.0.0.1", 6252) + proxy("SOCKS", "::1", 6153)
+        let status = SystemProxy.parseStatus(proxies, http: nil, socks: "[::1]:6153",
+                                            coreRunning: false, listenerOutput: [6153: lsof])
+        XCTAssertFalse(status.isSluice)
+        XCTAssertEqual(status.otherProxy, "其他代理 (Surge, [::1]:6153)")
+        let unrelated = SystemProxy.parseStatus(proxy("HTTP", "127.0.0.1", 6252), http: nil, socks: nil,
+                                               coreRunning: false, listenerOutput: [6153: lsof])
+        XCTAssertTrue(unrelated.isSluice)
     }
 
     func testListenConflictExtractsOnlyTheFailedPort() {
