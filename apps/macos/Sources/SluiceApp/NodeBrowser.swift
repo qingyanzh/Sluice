@@ -80,6 +80,8 @@ struct NodesView: View {
                         .buttonStyle(.plain)
                         .contextMenu {
                             Button("查看详情") { selected = node }
+                            Button(core.testingNodes.contains(node.name) ? "测试中…" : "测试节点") { core.test(node: node.name) }
+                                .disabled(core.state != .running || core.testingNodes.contains(node.name))
                             Button("复制名称") { copyText(node.name) }
                             Button("复制服务器") { copyText(node.endpoint) }
                         }
@@ -119,7 +121,7 @@ struct NodesView: View {
     }
 
     private func latency(for node: NodeRecord) -> Int? {
-        core.groups.lazy.flatMap(\.options).first { $0.name == node.name && $0.latencyMs != nil }?.latencyMs
+        core.nodeLatencies[node.name] ?? core.groups.lazy.flatMap(\.options).first { $0.name == node.name && $0.latencyMs != nil }?.latencyMs
     }
 
     private func refresh() {
@@ -162,6 +164,7 @@ struct NodeBrowserRow: View {
 }
 
 struct NodeDetailSheet: View {
+    @EnvironmentObject var core: Core
     @Environment(\.dismiss) private var dismiss
     let node: NodeRecord
     let latency: Int?
@@ -181,7 +184,16 @@ struct NodeDetailSheet: View {
                     HStack {
                         Text("最近延迟").font(DS.label).foregroundStyle(DS.ink2)
                         Spacer(minLength: 16)
-                        LatencyBadge(latency: latency)
+                        LatencyBadge(latency: core.nodeLatencies[node.name] ?? latency)
+                    }
+                }
+                if let result = core.nodeTests[node.name] {
+                    row("连接耗时", result.connectMs.map { "\($0) ms" } ?? "—")
+                    row("响应延迟", result.latencyMs.map { "\($0) ms" } ?? "—")
+                    if let outbound = result.outbound { row("实际出站", outbound) }
+                    if let status = result.status { row("HTTP 状态", String(status)) }
+                    if let error = result.error {
+                        Text(error).font(DS.small).foregroundStyle(DS.fail).textSelection(.enabled)
                     }
                 }
             }
@@ -190,6 +202,8 @@ struct NodeDetailSheet: View {
                 .font(DS.small).foregroundStyle(DS.ink2)
             HStack {
                 Button("复制服务器") { copyText(node.endpoint) }.glassButton()
+                Button(core.testingNodes.contains(node.name) ? "测试中…" : "测试节点") { core.test(node: node.name) }
+                    .glassButton().disabled(core.state != .running || core.testingNodes.contains(node.name))
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction).glassButton(prominent: true)
             }

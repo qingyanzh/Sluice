@@ -88,7 +88,7 @@ struct APIClient {
     }
 
     private static func escape(_ s: String) -> String {
-        s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=+/?"))) ?? s
+        s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=+/?#%"))) ?? s
     }
 
     func policies() async throws -> [PolicyGroup] {
@@ -99,8 +99,51 @@ struct APIClient {
         _ = try await request("POST", "/v1/policies/\(Self.escape(group))?select=\(Self.escape(option))")
     }
 
-    func test(group: String) async throws {
-        _ = try await request("POST", "/v1/policies/\(Self.escape(group))/test")
+    func test(group: String) async throws -> GroupTestResult {
+        try JSONDecoder().decode(GroupTestResult.self, from: await request("POST", "/v1/policies/\(Self.escape(group))/test"))
+    }
+
+    func test(node: String) async throws -> NodeTestResult {
+        try JSONDecoder().decode(NodeTestResult.self, from: await request("POST", "/v1/nodes/\(Self.escape(node))/test"))
+    }
+
+    func activeConnections() async throws -> [ActiveConnection] {
+        try JSONDecoder().decode([ActiveConnection].self, from: await request("GET", "/v1/connections/active"))
+    }
+
+    func closeConnection(_ id: UInt64) async throws {
+        _ = try await request("DELETE", "/v1/connections/\(id)")
+    }
+
+    func closeAllConnections() async throws {
+        _ = try await request("DELETE", "/v1/connections")
+    }
+
+    func switchProfile(path: String) async throws {
+        _ = try await request("POST", "/v1/profile?path=\(Self.escape(path))")
+    }
+
+    /// Cancellation closes URLSession's byte stream. A quiet stream times out so the
+    /// caller can reconnect; the core normally sends a heartbeat every 15 seconds.
+    func events(opened: @MainActor () async throws -> Void,
+                receive: @MainActor (SSEFrame) async throws -> Void) async throws {
+        var req = URLRequest(url: url("/v1/events"), timeoutInterval: 45)
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let (bytes, response) = try await session.bytes(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200,
+              (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")?
+                .lowercased().hasPrefix("text/event-stream") == true else {
+            throw APIError(message: "事件流不可用 (HTTP \(status))", status: status)
+        }
+        try Task.checkCancellation()
+        try await opened()
+        var parser = SSEParser()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            if let frame = try parser.append(byte) { try await receive(frame) }
+        }
+        throw APIError(message: "事件流已结束")
     }
 
     func mode() async throws -> String {

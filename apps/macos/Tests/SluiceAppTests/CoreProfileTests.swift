@@ -22,13 +22,27 @@ final class CoreProfileTests: XCTestCase {
         try FileManager.default.removeItem(at: directory)
     }
 
+    func testOnlyListenerAndEnhancedModeChangesRequireRestart() {
+        let base = "[General]\napi-listen = 127.0.0.1:6170\nhttp-listen = 127.0.0.1:6152\nsocks5-listen = 127.0.0.1:6153\nenhanced-mode = false\n"
+        let running = ConfigSummary(text: base)
+        XCTAssertFalse(ConfigSummary(text: base + "[Proxy]\nHK = direct\n[Rule]\nFINAL,HK\n").requiresRestart(comparedTo: running))
+        for change in [
+            base.replacingOccurrences(of: "127.0.0.1:6170", with: "127.0.0.2:6170"),
+            base.replacingOccurrences(of: "127.0.0.1:6152", with: "127.0.0.1:6154"),
+            base.replacingOccurrences(of: "socks5-listen = 127.0.0.1:6153\n", with: ""),
+            base.replacingOccurrences(of: "enhanced-mode = false", with: "enhanced-mode = true")
+        ] {
+            XCTAssertTrue(ConfigSummary(text: change).requiresRestart(comparedTo: running))
+        }
+    }
+
     @MainActor
     private func makeCore() -> Core {
         Core(defaults: defaults, profilesDirectory: directory.appendingPathComponent("profiles"))
     }
 
     @MainActor
-    func testMigrationSwitchAndRelaunchUseSelectedFileAndSummary() throws {
+    func testMigrationSwitchAndRelaunchUseSelectedFileAndSummary() async throws {
         let core = makeCore()
         XCTAssertNil(core.lastActionError)
         XCTAssertEqual(core.activeProfileName, "Default")
@@ -38,7 +52,7 @@ final class CoreProfileTests: XCTestCase {
 
         let work = "[General]\napi-listen = 127.0.0.1:6180\nhttp-listen = 127.0.0.1:6182\n"
         try core.createProfile(name: "Work", contents: work)
-        try core.switchProfile(to: "Work")
+        try await core.switchProfile(to: "Work")
         XCTAssertEqual(core.activeProfileName, "Work")
         XCTAssertEqual(core.readConfig(), work)
         XCTAssertEqual(core.summary.apiPort, 6180)
@@ -54,11 +68,11 @@ final class CoreProfileTests: XCTestCase {
     }
 
     @MainActor
-    func testRenameActiveUpdatesCorePathAndDeleteProtection() throws {
+    func testRenameActiveUpdatesCorePathAndDeleteProtection() async throws {
         let core = makeCore()
         let original = core.readConfig()
         let oldPath = core.configPath
-        try core.renameProfile("Default", to: "Home")
+        try await core.renameProfile("Default", to: "Home")
         XCTAssertEqual(core.activeProfileName, "Home")
         XCTAssertEqual(URL(fileURLWithPath: core.configPath).lastPathComponent, "Home.conf")
         XCTAssertFalse(FileManager.default.fileExists(atPath: oldPath))
@@ -68,17 +82,20 @@ final class CoreProfileTests: XCTestCase {
         XCTAssertThrowsError(try core.deleteProfile("Home"))
 
         try core.duplicateProfile("Home", as: "Copy")
-        try core.switchProfile(to: "Copy")
+        try await core.switchProfile(to: "Copy")
         try core.deleteProfile("Home")
         XCTAssertEqual(core.profileNames, ["Copy"])
         XCTAssertEqual(core.readConfig(), original)
     }
 
     @MainActor
-    func testFailedSwitchLeavesCorePathAndSelectionUnchanged() throws {
+    func testFailedSwitchLeavesCorePathAndSelectionUnchanged() async throws {
         let core = makeCore()
         let path = core.configPath
-        XCTAssertThrowsError(try core.switchProfile(to: "missing"))
+        do {
+            try await core.switchProfile(to: "missing")
+            XCTFail("Missing profile must fail")
+        } catch {}
         XCTAssertEqual(core.configPath, path)
         XCTAssertEqual(core.activeProfileName, "Default")
         XCTAssertEqual(core.summary.apiPort, 6170)
