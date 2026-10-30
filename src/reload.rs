@@ -72,9 +72,30 @@ impl Fixed {
     }
 }
 
+/// Checks that `path` is a config Sluice can run, without touching the running one:
+/// it must parse and its proxies, groups and rules must build into a router.
+pub fn validate_profile(path: &str) -> Result<Config> {
+    let cfg = read_config(path)?;
+    Router::new(&cfg).with_context(|| format!("profile {path}"))?;
+    Ok(cfg)
+}
+
+/// Other config files next to `path` (`.conf`), sorted, for a profile picker.
+pub fn sibling_profiles(path: &str) -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir(config_dir(path)) else { return Vec::new() };
+    let mut out: Vec<String> = dir
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "conf") && p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
 pub struct Reloader {
     pub handle: Arc<RouterHandle>,
-    path: String,
+    /// The active config file; `switch_profile` changes it.
+    path: Mutex<String>,
     fixed: Fixed,
     lock: tokio::sync::Mutex<()>,
     last: Mutex<Instant>,
@@ -95,7 +116,7 @@ impl Reloader {
         crate::dns::set_router(handle.clone());
         Arc::new(Reloader {
             handle,
-            path: path.to_string(),
+            path: Mutex::new(path.to_string()),
             fixed: Fixed::of(&cfg.general),
             lock: tokio::sync::Mutex::new(()),
             last: Mutex::new(Instant::now()),
@@ -107,11 +128,31 @@ impl Reloader {
     /// current one stays. Returns a short summary.
     pub async fn reload(&self, reason: &str) -> Result<String> {
         let _one_at_a_time = self.lock.lock().await;
-        let cfg = read_config(&self.path)?;
+        let path = self.path();
+        self.reload_from(&path, reason).await
+    }
+
+    pub fn path(&self) -> String {
+        self.path.lock().unwrap().clone()
+    }
+
+    /// Makes `path` the active config file and loads it. The file is parsed and its
+    /// router built before anything changes; on any error the current file and config stay.
+    pub async fn switch_profile(&self, path: &str) -> Result<String> {
+        let _one_at_a_time = self.lock.lock().await;
+        let path = std::fs::canonicalize(path).with_context(|| format!("profile {path}"))?.to_string_lossy().into_owned();
+        validate_profile(&path)?;
+        let summary = self.reload_from(&path, "profile switch").await?;
+        *self.path.lock().unwrap() = path;
+        Ok(summary)
+    }
+
+    async fn reload_from(&self, path: &str, reason: &str) -> Result<String> {
+        let cfg = read_config(path)?;
         if Fixed::of(&cfg.general) != self.fixed {
             warn!("listen or enhanced-mode settings changed; restart Sluice to apply them");
         }
-        let (cfg, router) = build(cfg, &self.path, false).await?;
+        let (cfg, router) = build(cfg, path, false).await?;
         let router = Arc::new(router);
         router.inherit_state(&self.handle.current());
         activate(&router, &cfg);
@@ -135,17 +176,24 @@ impl Reloader {
         let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
         let mtime = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         tokio::spawn(async move {
-            let mut seen: Option<SystemTime> = mtime(&me.path);
+            let mut watched = me.path();
+            let mut seen: Option<SystemTime> = mtime(&watched);
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             loop {
                 tokio::select! {
                     _ = hup.recv() => me.try_reload("SIGHUP").await,
                     _ = tick.tick() => {
-                        let now = mtime(&me.path);
+                        if me.path() != watched {
+                            // Switched profiles; the switch already loaded the new file.
+                            watched = me.path();
+                            seen = mtime(&watched);
+                            continue;
+                        }
+                        let now = mtime(&watched);
                         if now != seen {
                             // Let an editor finish writing before reading.
                             tokio::time::sleep(Duration::from_millis(300)).await;
-                            seen = mtime(&me.path);
+                            seen = mtime(&watched);
                             me.try_reload("config file changed").await;
                         } else {
                             let every = *me.subscription_every.lock().unwrap();
@@ -159,5 +207,41 @@ impl Reloader {
             }
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, text: &str) -> String {
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn profile_switch_validates_and_keeps_old_on_error() {
+        let dir = std::env::temp_dir().join(format!("sluice-profile-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = write(&dir, "a.conf", "[Rule]\nFINAL,DIRECT\n");
+        let b = write(&dir, "b.conf", "[Proxy Group]\nG = select, DIRECT, REJECT\n[Rule]\nFINAL,G\n");
+        let bad = write(&dir, "bad.conf", "[Rule]\nFINAL,NoSuchPolicy\n");
+        let garbage = write(&dir, "garbage.conf", "[Proxy]\nA = vless, h, 1\n");
+        assert!(validate_profile(&a).is_ok());
+        assert!(validate_profile(&bad).is_err());
+        assert!(validate_profile(&garbage).is_err());
+        assert!(validate_profile(&dir.join("missing.conf").to_string_lossy()).is_err());
+        assert_eq!(sibling_profiles(&a), vec![a.clone(), b.clone(), bad.clone(), garbage.clone()]);
+
+        let cfg = read_config(&a).unwrap();
+        let r = Reloader::start(Router::new(&cfg).unwrap(), &cfg, &a);
+        assert!(r.switch_profile(&bad).await.is_err());
+        assert_eq!(r.path(), a);
+        assert!(r.handle.current().groups().is_empty());
+        r.switch_profile(&b).await.unwrap();
+        assert_eq!(r.path(), b);
+        assert_eq!(r.handle.current().groups()[0].name, "G");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

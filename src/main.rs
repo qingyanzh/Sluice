@@ -5,6 +5,7 @@ mod conns;
 mod dns;
 mod hysteria2;
 mod inbound;
+mod live;
 mod mitm;
 mod process;
 mod obfs;
@@ -160,9 +161,11 @@ async fn run() -> Result<()> {
         ["run", path] => {
             let cfg = read_config(path)?;
             let level = cfg.general.loglevel.as_deref().unwrap_or("info");
-            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(format!("sluice={level}")))
+            let logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(format!("sluice={level}")))
                 .format_target(false)
-                .init();
+                .build();
+            log::set_max_level(logger.filter());
+            log::set_boxed_logger(Box::new(live::EventLogger(logger)))?;
             sysnet::raise_fd_limit();
             let (cfg, router) = build(cfg, path, false).await?;
             let reloader = reload::Reloader::start(router, &cfg, path);

@@ -2,7 +2,7 @@
 # Interop test against real servers on a proxy-free machine: Shadowsocks (ssserver), VMess /
 # VLESS / Trojan incl. WebSocket, gRPC, XHTTP (Xray) and Hysteria2 (official server). For each node it checks
 # HTTPS, a 10 MB download, UDP DNS (public targets) and full-cone UDP (two local ports on one
-# association) through Sluice's SOCKS5 inbound.
+# association) through Sluice's SOCKS5 inbound, then the control API (scripts/ci/api_check.py).
 # Shadowsocks plugins (obfs-server, v2ray-plugin) and legacy VMess (v2fly's v2ray, alterId > 0) too.
 # Needs: ssserver, obfs-server, v2ray-plugin, v2ray, xray, hysteria on PATH and a built ./target/release/sluice.
 set -u
@@ -196,6 +196,9 @@ for dir in uplink downlink; do
         echo "Vision $dir direct copy never happened FAIL"; fails=$((fails + 1))
     fi
 done
+
+# Control API endpoints the app uses, checked while traffic flows.
+python3 -I scripts/ci/api_check.py 127.0.0.1:16170 16153 "$work" || fails=$((fails + 1))
 
 if [ $fails != 0 ]; then
     echo; echo "== sluice log (warnings)"; grep -E "WARN|ERROR" "$work/sluice.log" | tail -30

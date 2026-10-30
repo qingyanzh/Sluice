@@ -82,6 +82,15 @@ pub struct OptionStatus {
     pub latency: Option<Option<u64>>,
 }
 
+/// Result of [`Router::test_node`].
+pub struct NodeTest {
+    /// The concrete outbound the test went through.
+    pub outbound: String,
+    pub connect_ms: u64,
+    pub latency_ms: u64,
+    pub status: u16,
+}
+
 pub struct GroupStatus {
     pub name: String,
     pub kind: &'static str,
@@ -404,10 +413,40 @@ impl Router {
         Ok(d)
     }
 
+    /// The groups followed from `policy` down to `outbound`, `outbound` last. Load-balance
+    /// groups pick per connection, so the walk takes the option that leads to `outbound`.
+    pub fn chain(&self, policy: &str, outbound: &str) -> Vec<String> {
+        let selected = self.selected.read().unwrap();
+        let mut out = vec![policy.to_string()];
+        let mut cur = policy.to_string();
+        while cur != outbound && out.len() < 16 {
+            let Some(g) = self.group(&cur) else { break };
+            cur = match selected.get(&cur) {
+                Some(s) if g.kind != GroupKind::LoadBalance => s.clone(),
+                _ => g.options.iter().find(|o| *o == outbound).unwrap_or(&outbound.to_string()).clone(),
+            };
+            out.push(cur.clone());
+        }
+        if out.last().map(String::as_str) != Some(outbound) {
+            out.push(outbound.to_string());
+        }
+        out
+    }
+
     /// Connects to `target` through whatever the rules pick; `None` means rejected.
     pub async fn dispatch_with(&self, target: &Target, ctx: &ConnInfo) -> Result<Option<BoxStream>> {
         let d = self.decide_logged(target, ctx).await?;
-        Ok(self.open(&d.outbound, target).await?.map(crate::stats::counted))
+        let meta = crate::live::ConnMeta {
+            network: ctx.proto.name(),
+            target: target.to_string(),
+            src: ctx.src.map(|s| s.to_string()),
+            chain: self.chain(&d.policy, &d.outbound),
+            rule: d.rule,
+            policy: d.policy,
+            outbound: d.outbound.clone(),
+            process: d.process,
+        };
+        Ok(self.open(&d.outbound, target).await?.map(|s| crate::stats::counted_live(s, meta)))
     }
 
     /// The outbound for UDP to `target`; `None` means rejected. Every outbound's UDP is
@@ -506,6 +545,37 @@ impl Router {
         Ok(())
     }
 
+    /// Tests one node or group through its current selection: time to open the stream
+    /// through it (TCP connect plus the proxy handshake), and time until the test URL's
+    /// HTTP status line arrives. Also stored as the option's health-check result.
+    pub async fn test_node(&self, name: &str, url: &str, timeout: Duration) -> Result<NodeTest> {
+        if !self.outbounds.contains_key(name) && self.group(name).is_none() {
+            bail!("no such node or group {name:?}");
+        }
+        let start = Instant::now();
+        let attempt = async {
+            let (target, path) = parse_test_url(url)?;
+            let outbound = self.resolve(name)?;
+            let mut s = self.open(&outbound, &target).await?.ok_or_else(|| anyhow!("rejected by {outbound}"))?;
+            let connect_ms = start.elapsed().as_millis() as u64;
+            let req = format!("HEAD {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", target.host_str());
+            s.write_all(req.as_bytes()).await?;
+            let mut head = [0u8; 12];
+            s.read_exact(&mut head).await?;
+            if !head.starts_with(b"HTTP/1.") {
+                bail!("not an HTTP response");
+            }
+            let status = std::str::from_utf8(&head[9..12]).ok().and_then(|c| c.parse().ok()).unwrap_or(0);
+            Ok(NodeTest { outbound, connect_ms, latency_ms: start.elapsed().as_millis() as u64, status })
+        };
+        let r = match tokio::time::timeout(timeout, attempt).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow!("timed out after {}ms", timeout.as_millis())),
+        };
+        self.latency.write().unwrap().insert(name.to_string(), r.as_ref().ok().map(|t| t.latency_ms));
+        r
+    }
+
     /// Time until the test URL's status line arrives through `option`, or `None` on failure.
     async fn probe(&self, option: &str, url: &str) -> Option<u64> {
         let start = Instant::now();
@@ -532,9 +602,10 @@ impl Router {
         }
     }
 
-    /// Probes every option of an automatic group and updates its selection.
-    pub async fn check_group(self: &Arc<Self>, name: &str) {
-        let Some(g) = self.group(name).cloned() else { return };
+    /// Probes every option of a group, updates an automatic group's selection, and
+    /// returns each option's latency (`None`: failed), or `None` for no such group.
+    pub async fn check_group(self: &Arc<Self>, name: &str) -> Option<Vec<(String, Option<u64>)>> {
+        let g = self.group(name).cloned()?;
         let mut set = tokio::task::JoinSet::new();
         for (i, o) in g.options.iter().enumerate() {
             let (me, o, url) = (self.clone(), o.clone(), g.url.clone());
@@ -575,6 +646,7 @@ impl Router {
             info!("group {name}: {current} -> {p}");
             self.selected.write().unwrap().insert(name.to_string(), p);
         }
+        Some(g.options.into_iter().zip(results).collect())
     }
 
     /// Runs health checks for every automatic group, forever, each on its own interval.
