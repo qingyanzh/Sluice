@@ -33,19 +33,6 @@ enum Pane: String, CaseIterable, Identifiable {
         }
     }
 
-    var tint: Color {
-        switch self {
-        case .activity: .blue
-        case .overview: .indigo
-        case .requests: .teal
-        case .policy: .purple
-        case .nodes: .orange
-        case .rule: .pink
-        case .logs: .gray
-        case .profile: .green
-        }
-    }
-
     /// Sidebar sections, Surge-style: an untitled top group, then titled groups.
     static let sections: [(String?, [Pane])] = [
         (nil, [.activity, .overview]),
@@ -95,9 +82,7 @@ struct MainView: View {
                             Label {
                                 Text(p.title).font(DS.label)
                             } icon: {
-                                Image(systemName: p.icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
-                                    .frame(width: 22, height: 22)
-                                    .background(p.tint.gradient, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                Image(systemName: p.icon).font(.system(size: 13, weight: .regular)).frame(width: 20)
                             }
                             .labelStyle(BadgeLabelStyle())
                             .tag(p)
@@ -303,10 +288,10 @@ enum DS {
     })
 
     /// Type scale: one face (SF Pro) at a few fixed steps; rounded only for figures.
-    static let title = Font.system(size: 26, weight: .bold)
-    static let caption = Font.system(size: 11, weight: .semibold)
+    static let title = Font.system(size: 24, weight: .semibold)
+    static let caption = Font.system(size: 11, weight: .medium)
     static let label = Font.system(size: 13)
-    static func figure(_ size: CGFloat) -> Font { .system(size: size, weight: .semibold, design: .rounded).monospacedDigit() }
+    static func figure(_ size: CGFloat) -> Font { .system(size: size, weight: .medium).monospacedDigit() }
 }
 
 /// Solid page colour: a quiet off-white in light mode, deep graphite in dark mode.
@@ -350,12 +335,12 @@ struct GlassSegmented<T: Hashable>: View {
                         Text(title)
                     }
                     .font(.system(size: 13, weight: on ? .semibold : .medium))
-                    .foregroundStyle(on ? Color.white : Color.secondary)
+                    .foregroundStyle(on ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity).padding(.vertical, 7)
                     .background {
                         if on {
-                            Capsule().fill(Color.accentColor.gradient)
-                                .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
+                            Capsule().fill(DS.surface)
+                                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
                                 .matchedGeometryEffect(id: "thumb", in: ns)
                         }
                     }
@@ -422,7 +407,7 @@ struct PaneHeader<Trailing: View>: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(DS.title)
+                Text(title).font(DS.title).tracking(-0.3)
                 if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
@@ -474,14 +459,11 @@ struct HoverLift: ViewModifier {
 struct CardTitle: View {
     let text: String
     let icon: String
-    var tint: Color = .accentColor
     var body: some View {
         Label {
             Text(text).font(DS.caption).foregroundStyle(.secondary)
         } icon: {
-            Image(systemName: icon).font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
-                .frame(width: 18, height: 18)
-                .background(tint.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            Image(systemName: icon).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
         }
         .labelStyle(BadgeLabelStyle())
     }
@@ -509,9 +491,10 @@ struct BigNumber: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
             Text(value).font(DS.figure(30))
+                .fixedSize()
                 .contentTransition(.numericText())
                 .animation(.smooth(duration: 0.4), value: value)
-            if !unit.isEmpty { Text(unit).font(.callout).foregroundStyle(.secondary) }
+            if !unit.isEmpty { Text(unit).font(.callout).foregroundStyle(.secondary).fixedSize() }
         }
     }
 }
@@ -541,9 +524,9 @@ struct ActivityView: View {
                 infoRow
                 HStack(alignment: .top, spacing: DS.gap) {
                     statusCard.frame(maxWidth: .infinity)
-                    RateCard(title: "上传", rate: core.upRate, series: core.rateHistory.map(\.up), color: .purple)
+                    RateCard(title: "上传", rate: core.upRate, series: core.rateHistory.map(\.up), color: .secondary)
                         .frame(maxWidth: .infinity)
-                    RateCard(title: "下载", rate: core.downRate, series: core.rateHistory.map(\.down), color: .cyan)
+                    RateCard(title: "下载", rate: core.downRate, series: core.rateHistory.map(\.down), color: .accentColor)
                         .frame(maxWidth: .infinity)
                 }
                 .fixedSize(horizontal: false, vertical: true)
@@ -583,7 +566,7 @@ struct ActivityView: View {
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                CardTitle(text: "SLUICE 内核", icon: "cpu", tint: .indigo)
+                CardTitle(text: "SLUICE 内核", icon: "cpu")
                 Spacer()
                 StatusDot(state: core.state)
             }
@@ -609,9 +592,9 @@ struct ActivityView: View {
     private var connectionsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                CardTitle(text: "活动连接", icon: "point.3.connected.trianglepath.dotted", tint: .green)
+                CardTitle(text: "活动连接", icon: "point.3.connected.trianglepath.dotted")
                 Spacer()
-                Circle().fill(core.state == .running ? Color.green : Color.secondary.opacity(0.4)).frame(width: 10, height: 10)
+                StatusDot(state: core.state)
             }
             BigNumber(value: "\(core.traffic?.active ?? 0)")
             Divider()
@@ -640,7 +623,7 @@ struct ActivityView: View {
         let up = Double(core.traffic?.up ?? 0), down = Double(core.traffic?.down ?? 0)
         let (n, u) = splitBytes(up + down)
         return VStack(alignment: .leading, spacing: 8) {
-            CardTitle(text: "总计", icon: "chart.bar.fill", tint: .orange)
+            CardTitle(text: "总计", icon: "chart.bar.fill")
             BigNumber(value: n, unit: u)
             HStack {
                 VStack(alignment: .leading) {
@@ -656,8 +639,8 @@ struct ActivityView: View {
             GeometryReader { geo in
                 let total = max(up + down, 1)
                 HStack(spacing: 3) {
-                    RoundedRectangle(cornerRadius: 3).fill(.purple).frame(width: max(4, (geo.size.width - 3) * up / total))
-                    RoundedRectangle(cornerRadius: 3).fill(.cyan)
+                    RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.22)).frame(width: max(4, (geo.size.width - 3) * up / total))
+                    RoundedRectangle(cornerRadius: 3).fill(Color.accentColor)
                 }
             }
             .frame(height: 14)
@@ -675,7 +658,7 @@ struct ActivityView: View {
         let maxCount = top.first?.value ?? 1
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                CardTitle(text: "请求排行", icon: "list.bullet", tint: .pink)
+                CardTitle(text: "请求排行", icon: "list.bullet")
                 Spacer()
                 Button("查看全部") { pane = .requests }.buttonStyle(.link).font(.caption)
             }
@@ -686,17 +669,16 @@ struct ActivityView: View {
             ForEach(Array(top), id: \.key) { name, count in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
-                        Image(systemName: topBy == 0 ? "globe" : "arrow.triangle.branch").foregroundStyle(.secondary).frame(width: 16)
                         Text(name).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         Text("\(count)").monospacedDigit().foregroundStyle(.secondary)
                     }
                     GeometryReader { geo in
-                        Capsule().fill(Color.accentColor.opacity(0.35))
+                        Capsule().fill(Color.primary.opacity(0.14))
                             .frame(width: geo.size.width * CGFloat(count) / CGFloat(maxCount))
                             .animation(.smooth, value: count)
                     }
-                    .frame(height: 3).padding(.leading, 22)
+                    .frame(height: 2)
                 }
             }
             Spacer(minLength: 0)
@@ -717,7 +699,7 @@ struct RateCard: View {
         let peak = series.max() ?? 0
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                CardTitle(text: title, icon: title == "上传" ? "arrow.up" : "arrow.down", tint: color)
+                CardTitle(text: title, icon: title == "上传" ? "arrow.up" : "arrow.down")
                 Spacer()
                 Text("\(formatBytes(peak))/s").font(.caption2).foregroundStyle(.tertiary)
             }
@@ -826,7 +808,7 @@ struct FeatureCard: View {
             Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
             HStack(spacing: 6) {
-                Circle().fill(statusOn ? Color.green : Color.orange).frame(width: 7, height: 7)
+                Circle().fill(statusOn ? Color.green : Color.primary.opacity(0.2)).frame(width: 6, height: 6)
                 Text(status).font(.caption).lineLimit(1).truncationMode(.middle)
             }
         }
@@ -1007,12 +989,12 @@ struct NodesView: View {
         let subs = ConfigText.lines(of: "Proxy Group", in: text).filter { $0.contains("policy-path=") }
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                SectionTitle(text: "代理 (\(proxies.count))", color: .purple)
+                SectionTitle(text: "代理 (\(proxies.count))")
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(proxies, id: \.self) { NodeCard(line: $0) }
                     AddCard { showAddNode = true }.help("添加节点")
                 }
-                SectionTitle(text: "订阅 (\(subs.count))", color: .blue)
+                SectionTitle(text: "订阅 (\(subs.count))")
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(subs, id: \.self) { NodeCard(line: $0) }
                     AddCard { showAddSub = true }.help("添加订阅")
@@ -1202,7 +1184,7 @@ struct RequestsView: View {
 struct OutboundTag: View {
     let name: String
     var body: some View {
-        let color: Color = name == "DIRECT" ? .green : name == "REJECT" ? .red : .accentColor
+        let color: Color = name == "REJECT" ? .red : name == "DIRECT" ? .secondary : .accentColor
         Text(name).font(.caption.weight(.medium)).lineLimit(1)
             .foregroundStyle(color)
             .padding(.horizontal, 6).padding(.vertical, 1)
