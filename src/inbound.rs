@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
-use crate::udp::{parse_socks_addr, UdpPipe, MAX_PACKET};
+use crate::udp::{parse_socks_addr, Packet, UdpPipe, MAX_PACKET};
 
 use crate::reload::RouterHandle;
 use crate::router::Router;
@@ -128,7 +128,9 @@ pub async fn http_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
 }
 
 /// UDP ASSOCIATE: relays `RSV(2) FRAG ATYP addr port data` datagrams until the TCP
-/// control connection closes. Each destination gets its own flow through the router.
+/// control connection closes. Each destination is routed on its first packet; all that go
+/// through one outbound share its association, and replies carry their real source, so
+/// the association is full-cone.
 async fn socks5_udp_associate(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
     let relay = Arc::new(UdpSocket::bind((sock.local_addr()?.ip(), 0)).await?);
     let bound = relay.local_addr()?;
@@ -137,7 +139,9 @@ async fn socks5_udp_associate(mut sock: TcpStream, router: Arc<Router>) -> Resul
     sock.write_all(&reply).await?;
 
     let relay_loop = async {
-        let mut flows: HashMap<String, mpsc::Sender<Vec<u8>>> = HashMap::new();
+        // Destination -> outbound (None: rejected), and outbound -> its association.
+        let mut routes: HashMap<String, Option<String>> = HashMap::new();
+        let mut assocs: HashMap<String, mpsc::Sender<Packet>> = HashMap::new();
         let mut buf = vec![0u8; MAX_PACKET];
         loop {
             let (n, client) = relay.recv_from(&mut buf).await?;
@@ -148,29 +152,50 @@ async fn socks5_udp_associate(mut sock: TcpStream, router: Arc<Router>) -> Resul
             }
             let Some((target, off)) = parse_socks_addr(&pkt[3..]) else { continue };
             let payload = pkt[3 + off..].to_vec();
-            let key = target.to_string();
             crate::stats::add_up(payload.len());
-            if let Some(tx) = flows.get(&key).filter(|tx| !tx.is_closed()) {
-                let _ = tx.send(payload).await;
+            let key = target.to_string();
+            let outbound = match routes.get(&key) {
+                Some(o) => o.clone(),
+                None => {
+                    let o = match router.route_udp(&target).await {
+                        Ok(o) => o,
+                        Err(e) => {
+                            warn!("UDP {target}: {e:#}");
+                            continue;
+                        }
+                    };
+                    if routes.len() > 4096 {
+                        routes.clear();
+                    }
+                    routes.insert(key, o.clone());
+                    o
+                }
+            };
+            let Some(outbound) = outbound else { continue };
+            let packet = Packet { addr: target, data: payload };
+            if let Some(tx) = assocs.get(&outbound).filter(|tx| !tx.is_closed()) {
+                let _ = tx.send(packet).await;
                 continue;
             }
-            let pipe = match router.dispatch_udp(&target).await {
-                Ok(Some(p)) => p,
-                Ok(None) => continue,
+            let UdpPipe { tx, mut rx } = match router.open_udp(&outbound, &packet.addr).await {
+                Ok(p) => p,
                 Err(e) => {
-                    warn!("UDP {target}: {e:#}");
+                    warn!("UDP {} via {outbound}: {e:#}", packet.addr);
                     continue;
                 }
             };
-            let UdpPipe { tx, mut rx } = pipe;
-            let _ = tx.send(payload).await;
-            flows.insert(key, tx);
-            let (relay, mut head) = (relay.clone(), vec![0u8, 0, 0]);
-            target.write_socks_addr(&mut head)?;
+            let _ = tx.send(packet).await;
+            assocs.insert(outbound, tx);
+            let relay = relay.clone();
             tokio::spawn(async move {
                 while let Some(p) = rx.recv().await {
-                    crate::stats::add_down(p.len());
-                    let _ = relay.send_to(&[head.as_slice(), &p].concat(), client).await;
+                    crate::stats::add_down(p.data.len());
+                    let mut out = vec![0u8, 0, 0];
+                    if p.addr.write_socks_addr(&mut out).is_err() {
+                        continue;
+                    }
+                    out.extend_from_slice(&p.data);
+                    let _ = relay.send_to(&out, client).await;
                 }
             });
         }

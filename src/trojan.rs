@@ -11,7 +11,7 @@ use sha2::{Digest, Sha224};
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsConnector;
 
-use crate::udp::{over_stream, Framing, UdpPipe};
+use crate::udp::{over_stream, pipe_pair, Framing, UdpPipe};
 use crate::transport::Transport;
 use crate::util::{BoxStream, Target};
 
@@ -120,8 +120,12 @@ impl TrojanServer {
     }
 
     /// UDP ASSOCIATE (cmd 3): every packet is `ATYP addr port len CRLF payload`.
+    /// Full-cone: every packet in the stream carries its own address.
     pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
-        Ok(over_stream(self.connect_cmd(target, 3).await?, Framing::Trojan(target.clone())))
+        let stream = self.connect_cmd(target, 3).await?;
+        let (app, side) = pipe_pair();
+        over_stream(stream, Framing::Trojan, side.rx, side.tx, false);
+        Ok(app)
     }
 
     async fn connect_cmd(&self, target: &Target, cmd: u8) -> Result<BoxStream> {

@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Mutex;
 
 use crate::trojan::quic_tls_config;
-use crate::udp::{pipe_pair, UdpPipe};
+use crate::udp::{pipe_pair, Packet, UdpPipe};
 use crate::util::{resolve, udp_socket_std, BoxStream, Target};
 
 const TCP_REQUEST: u64 = 0x401;
@@ -79,6 +79,7 @@ struct Datagram<'a> {
     packet: u16,
     frag_id: u8,
     frag_count: u8,
+    addr: &'a [u8],
     payload: &'a [u8],
 }
 
@@ -88,7 +89,7 @@ fn parse_datagram(b: &[u8]) -> Option<Datagram<'_>> {
     let (frag_id, frag_count) = (*b.get(6)?, *b.get(7)?);
     let (alen, n) = get_varint(b.get(8..)?)?;
     let start = 8 + n + alen as usize;
-    Some(Datagram { session, packet, frag_id, frag_count, payload: b.get(start..)? })
+    Some(Datagram { session, packet, frag_id, frag_count, addr: b.get(8 + n..start)?, payload: b.get(start..)? })
 }
 
 /// Splits one UDP packet into datagrams no larger than `max`.
@@ -119,7 +120,7 @@ fn build_datagrams(session: u32, packet: u16, target: &str, payload: &[u8], max:
 /// Routes incoming datagrams of one connection to their UDP sessions.
 #[derive(Default)]
 struct UdpDemux {
-    sessions: std::sync::Mutex<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    sessions: std::sync::Mutex<HashMap<u32, tokio::sync::mpsc::Sender<Packet>>>,
     next: AtomicU32,
 }
 
@@ -143,9 +144,10 @@ async fn demux_loop(conn: quinn::Connection, demux: Arc<UdpDemux>) {
             }
             partial.remove(&(d.session, d.packet)).unwrap().into_iter().flatten().flatten().collect()
         };
+        let Some(addr) = std::str::from_utf8(d.addr).ok().and_then(|a| Target::parse_authority(a, 0).ok()) else { continue };
         let tx = demux.sessions.lock().unwrap().get(&d.session).cloned();
         if let Some(tx) = tx {
-            let _ = tx.try_send(whole);
+            let _ = tx.try_send(Packet { addr, data: whole });
         }
     }
 }
@@ -269,7 +271,8 @@ impl Hy2Server {
     }
 
     /// UDP rides QUIC datagrams, demultiplexed by session id.
-    pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
+    /// Full-cone: every datagram names its destination, and replies their source.
+    pub async fn open_udp(&self) -> Result<UdpPipe> {
         let (conn, demux) = self.current().await?;
         if conn.max_datagram_size().is_none() {
             bail!("hysteria2 server does not support UDP (QUIC datagrams disabled)");
@@ -278,7 +281,6 @@ impl Hy2Server {
         let (in_tx, mut in_rx) = tokio::sync::mpsc::channel(256);
         demux.sessions.lock().unwrap().insert(session, in_tx);
         let (app, mut side) = pipe_pair();
-        let addr = target.to_string();
         tokio::spawn(async move {
             let mut packet: u16 = 0;
             loop {
@@ -286,7 +288,7 @@ impl Hy2Server {
                     p = side.rx.recv() => match p {
                         Some(p) => {
                             let max = conn.max_datagram_size().unwrap_or(1200);
-                            for d in build_datagrams(session, packet, &addr, &p, max) {
+                            for d in build_datagrams(session, packet, &p.addr.to_string(), &p.data, max) {
                                 let _ = conn.send_datagram(d);
                             }
                             packet = packet.wrapping_add(1);

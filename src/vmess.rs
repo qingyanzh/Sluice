@@ -1,7 +1,7 @@
 //! VMess client with AEAD headers (alterId 0), chunk stream + length masking,
 //! body security aes-128-gcm or chacha20-poly1305, over any stream transport (TCP, TLS, WebSocket).
 
-use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aes::Aes128;
@@ -19,8 +19,8 @@ use sha3::Shake128;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::transport::Transport;
-use crate::udp::{pipe_pair, UdpPipe};
-use crate::util::{BoxStream, Host, Target};
+use crate::udp::{write_port_addr, UdpPipe};
+use crate::util::{BoxStream, Target};
 use crate::vless::parse_uuid;
 
 const TAG: usize = 16;
@@ -130,7 +130,7 @@ fn fnv1a32(data: &[u8]) -> u32 {
     data.iter().fold(0x811c9dc5u32, |h, b| (h ^ *b as u32).wrapping_mul(0x01000193))
 }
 
-fn request_header(sec: Security, key: &[u8; 16], iv: &[u8; 16], resp_v: u8, cmd: u8, target: &Target) -> Result<Vec<u8>> {
+fn request_header(sec: Security, key: &[u8; 16], iv: &[u8; 16], resp_v: u8, cmd: u8, target: Option<&Target>) -> Result<Vec<u8>> {
     let mut rng = rand::thread_rng();
     let padding = (rng.next_u32() % 16) as usize;
     let mut h = Vec::with_capacity(64 + padding);
@@ -142,24 +142,9 @@ fn request_header(sec: Security, key: &[u8; 16], iv: &[u8; 16], resp_v: u8, cmd:
     h.push(((padding as u8) << 4) | sec.id());
     h.push(0);
     h.push(cmd);
-    h.extend_from_slice(&target.port.to_be_bytes());
-    match &target.host {
-        Host::Ip(IpAddr::V4(v4)) => {
-            h.push(1);
-            h.extend_from_slice(&v4.octets());
-        }
-        Host::Domain(d) => {
-            if d.len() > 255 {
-                bail!("domain too long");
-            }
-            h.push(2);
-            h.push(d.len() as u8);
-            h.extend_from_slice(d.as_bytes());
-        }
-        Host::Ip(IpAddr::V6(v6)) => {
-            h.push(3);
-            h.extend_from_slice(&v6.octets());
-        }
+    // Mux (XUDP) requests carry no address.
+    if let Some(t) = target {
+        write_port_addr(t, &mut h)?;
     }
     let mut pad = vec![0u8; padding];
     rng.fill_bytes(&mut pad);
@@ -337,7 +322,7 @@ where
 pub struct VmessServer {
     cmd_key: [u8; 16],
     sec: Security,
-    transport: Transport,
+    transport: Arc<Transport>,
 }
 
 impl VmessServer {
@@ -345,76 +330,43 @@ impl VmessServer {
         let mut h = Md5::new();
         Digest::update(&mut h, parse_uuid(uuid)?);
         Digest::update(&mut h, b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
-        Ok(VmessServer { cmd_key: h.finalize().into(), sec: Security::parse(method)?, transport })
+        Ok(VmessServer { cmd_key: h.finalize().into(), sec: Security::parse(method)?, transport: Arc::new(transport) })
     }
 
-    /// UDP (cmd 2): each body chunk carries exactly one packet.
-    pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
-        let stream = self.transport.connect().await?;
-        let sess = Session::new(self.sec);
-        let head = seal_header(&self.cmd_key, &request_header(sess.sec, &sess.key, &sess.iv, sess.resp_v, 2, target)?);
-        let (mut rd, mut wr) = tokio::io::split(stream);
-        let (app, side) = pipe_pair();
-        let UdpPipe { tx, mut rx } = side;
-        let (sec, key, iv) = (sess.sec, sess.key, sess.iv);
-        tokio::spawn(async move {
-            let mut st = BodyState::new(sec, &key, &iv);
-            if wr.write_all(&head).await.is_err() {
-                return;
-            }
-            // An empty chunk means end of stream, so empty datagrams can't be sent.
-            while let Some(p) = rx.recv().await {
-                if p.is_empty() {
-                    continue;
-                }
-                let mut out = Vec::with_capacity(p.len() + 32);
-                st.seal_chunk(&p, &mut out);
-                if wr.write_all(&out).await.is_err() {
-                    return;
-                }
-            }
-            let mut out = Vec::new();
-            st.seal_chunk(&[], &mut out);
-            let _ = wr.write_all(&out).await;
-        });
-        tokio::spawn(async move {
-            if read_response_header(&sess, &mut rd).await.is_err() {
-                return;
-            }
-            let mut st = BodyState::new(sess.sec, &sess.resp_key, &sess.resp_iv);
-            loop {
-                tokio::select! {
-                    _ = tx.closed() => break,
-                    r = read_chunk(&mut st, &mut rd) => match r {
-                        Ok(Some(p)) => if tx.send(p).await.is_err() { break },
-                        _ => break,
-                    },
-                }
-            }
-        });
-        Ok(app)
+    /// UDP is XUDP over a Mux (cmd 3) request, so one connection reaches any number of remotes.
+    pub fn open_udp(&self, target: &Target) -> UdpPipe {
+        let (cmd_key, sec, transport) = (self.cmd_key, self.sec, self.transport.clone());
+        crate::udp::xudp(target, move |first| async move {
+            let mut s = connect_cmd(&cmd_key, sec, &transport, 3, None).await?;
+            s.write_all(&first).await?;
+            Ok(s)
+        })
     }
 
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
-        let stream = self.transport.connect().await?;
-        let sess = Session::new(self.sec);
-        let head = seal_header(&self.cmd_key, &request_header(sess.sec, &sess.key, &sess.iv, sess.resp_v, 1, target)?);
-        let (rd, wr) = tokio::io::split(stream);
-        let (app, inner) = tokio::io::duplex(64 * 1024);
-        let (ird, iwr) = tokio::io::split(inner);
-        let (sec, key, iv) = (sess.sec, sess.key, sess.iv);
-        tokio::spawn(async move {
-            if let Err(e) = encrypt_loop(sec, key, iv, head, ird, wr).await {
-                debug!("vmess upstream closed: {e:#}");
-            }
-        });
-        tokio::spawn(async move {
-            if let Err(e) = decrypt_loop(sess, rd, iwr).await {
-                debug!("vmess downstream closed: {e:#}");
-            }
-        });
-        Ok(Box::new(app))
+        connect_cmd(&self.cmd_key, self.sec, &self.transport, 1, Some(target)).await
     }
+}
+
+async fn connect_cmd(cmd_key: &[u8; 16], sec: Security, transport: &Transport, cmd: u8, target: Option<&Target>) -> Result<BoxStream> {
+    let stream = transport.connect().await?;
+    let sess = Session::new(sec);
+    let head = seal_header(cmd_key, &request_header(sess.sec, &sess.key, &sess.iv, sess.resp_v, cmd, target)?);
+    let (rd, wr) = tokio::io::split(stream);
+    let (app, inner) = tokio::io::duplex(64 * 1024);
+    let (ird, iwr) = tokio::io::split(inner);
+    let (sec, key, iv) = (sess.sec, sess.key, sess.iv);
+    tokio::spawn(async move {
+        if let Err(e) = encrypt_loop(sec, key, iv, head, ird, wr).await {
+            debug!("vmess upstream closed: {e:#}");
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = decrypt_loop(sess, rd, iwr).await {
+            debug!("vmess downstream closed: {e:#}");
+        }
+    });
+    Ok(Box::new(app))
 }
 
 #[cfg(test)]
