@@ -305,7 +305,8 @@ struct TogglePill: View {
                     .shadow(color: on ? .green.opacity(0.6) : .clear, radius: 3)
                     .scaleEffect(on ? 1 : 0.8)
                     .animation(DS.spring, value: on)
-                Text(title).font(DS.small.weight(.medium))
+                Text(title).font(DS.small.weight(on ? .semibold : .medium))
+                    .foregroundStyle(on ? Color.primary : DS.ink2)
             }
             .padding(.horizontal, 4)
         }
@@ -341,7 +342,8 @@ struct StatusFooter: View {
                 }
             }
             Spacer()
-            StartStopButton(compact: true).buttonStyle(.borderless).font(.system(size: 13, weight: .medium)).foregroundStyle(DS.ink2)
+            StartStopButton(compact: true)
+                .buttonStyle(RoundIconStyle(prominent: !core.isActive))
         }
         .padding(8)
         .liquidGlass(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -563,6 +565,24 @@ struct FlowMark: View {
     }
 }
 
+/// A 26pt round icon button: accent when it starts something, quiet grey otherwise.
+struct RoundIconStyle: ButtonStyle {
+    var prominent = false
+    @State private var hovering = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(prominent ? Color.white : Color.primary.opacity(0.75))
+            .frame(width: 26, height: 26)
+            .background(prominent ? AnyShapeStyle(DS.accent.gradient) : AnyShapeStyle(Color.primary.opacity(hovering ? 0.12 : 0.07)), in: Circle())
+            .shadow(color: prominent ? DS.accent.opacity(0.35) : .clear, radius: 4, y: 1)
+            .scaleEffect(configuration.isPressed ? 0.9 : hovering ? 1.06 : 1)
+            .animation(DS.spring, value: configuration.isPressed)
+            .animation(DS.spring, value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+
 /// Every plain, tappable surface (rows, tiles, segments) sinks slightly while pressed.
 struct PressableStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
@@ -599,7 +619,9 @@ struct PaneHeader<Trailing: View>: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(DS.title).tracking(-0.3)
-                if let subtitle { Text(subtitle).font(DS.small).foregroundStyle(DS.ink2) }
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
+                }
             }
             Spacer()
             HStack(spacing: 8) { trailing }.glassButton()
@@ -777,9 +799,9 @@ struct ActivityView: View {
                 Spacer(minLength: 12)
                 HStack(spacing: 8) {
                     Button { core.reload() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
-                        .help("重载配置").disabled(core.state != .running)
+                        .help("重载配置").accessibilityLabel("重载配置").disabled(core.state != .running)
                     Button { core.restart() } label: { Image(systemName: "arrow.clockwise") }
-                        .help("重启内核").disabled(!core.isActive)
+                        .help("重启内核").accessibilityLabel("重启内核").disabled(!core.isActive)
                     StartStopButton().glassButton(prominent: true)
                 }
                 .glassButton()
@@ -888,17 +910,23 @@ struct ActivityView: View {
             }
             ForEach(Array(top), id: \.key) { name, count in
                 VStack(alignment: .leading, spacing: 3) {
+                    let leader = name == top.first?.key
                     HStack {
-                        Text(name).lineLimit(1).truncationMode(.middle)
+                        Text(name).font(DS.label.weight(leader ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
                         Spacer()
-                        Text("\(count)").monospacedDigit().foregroundStyle(DS.ink2)
+                        Text("\(count)").font(DS.label.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(leader ? DS.accent : DS.ink2)
+                            .contentTransition(.numericText()).animation(.smooth, value: count)
                     }
                     GeometryReader { geo in
-                        Capsule().fill(Color.primary.opacity(0.14))
-                            .frame(width: geo.size.width * CGFloat(count) / CGFloat(maxCount))
-                            .animation(.smooth, value: count)
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.primary.opacity(0.06))
+                            Capsule().fill(leader ? AnyShapeStyle(DS.accent.gradient) : AnyShapeStyle(Color.primary.opacity(0.22)))
+                                .frame(width: max(5, geo.size.width * CGFloat(count) / CGFloat(maxCount)))
+                                .animation(DS.spring, value: count)
+                        }
                     }
-                    .frame(height: 2)
+                    .frame(height: 5)
                 }
             }
             Spacer(minLength: 0)
@@ -940,6 +968,20 @@ struct TrafficCard: View {
                     LineMark(x: .value("t", i), y: .value("rate", v.up), series: .value("s", "up"))
                         .foregroundStyle(Color.secondary.opacity(0.7)).lineStyle(StrokeStyle(lineWidth: 1.5))
                         .interpolationMethod(.monotone)
+                }
+            }
+            .chartBackground { _ in
+                VStack(spacing: 0) {
+                    ForEach(0..<3) { _ in
+                        Spacer()
+                        Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
+                            .mask(HStack(spacing: 3) { ForEach(0..<120, id: \.self) { _ in Rectangle().frame(width: 3) } })
+                    }
+                }
+            }
+            .overlay {
+                if peak == 0 {
+                    Text("等待流量…").font(DS.small).foregroundStyle(DS.ink3)
                 }
             }
             .chartXScale(domain: 0...59)
@@ -1243,12 +1285,12 @@ struct NodesView: View {
                 SectionTitle(text: "代理 (\(proxies.count))")
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(Array(proxies.enumerated()), id: \.element) { i, l in NodeCard(line: l).entrance(i) }
-                    AddCard { showAddNode = true }.help("添加节点")
+                    AddCard(title: "添加节点") { showAddNode = true }
                 }
                 SectionTitle(text: "订阅 (\(subs.count))")
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(subs, id: \.self) { NodeCard(line: $0) }
-                    AddCard { showAddSub = true }.help("添加订阅")
+                    AddCard(title: "添加订阅") { showAddSub = true }
                 }
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
@@ -1305,10 +1347,15 @@ struct NodeCard: View {
 }
 
 struct AddCard: View {
+    let title: String
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Image(systemName: "plus").font(.system(size: 18, weight: .light)).foregroundStyle(DS.ink2)
+            VStack(spacing: 6) {
+                Image(systemName: "plus").font(.system(size: 16, weight: .medium))
+                Text(title).font(DS.small.weight(.medium))
+            }
+            .foregroundStyle(DS.ink2)
                 .frame(maxWidth: .infinity, minHeight: 102)
                 .overlay(RoundedRectangle(cornerRadius: DS.smallRadius + 2, style: .continuous).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(.separator))
                 .contentShape(Rectangle())
@@ -1454,7 +1501,7 @@ struct RequestRow: View {
         let host = connection.target.split(separator: ":").dropLast().joined(separator: ":").ifEmpty(connection.target)
         Button(action: action) {
             HStack(spacing: 12) {
-                Monogram(text: host)
+                Monogram(text: host, outbound: connection.outbound)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(host).font(DS.label.weight(.medium)).lineLimit(1).truncationMode(.middle)
                     Text("\(connection.proto) · \(connection.policy) · \(connection.rule)")
@@ -1482,14 +1529,16 @@ struct RequestRow: View {
 /// A quiet initial in a grey tile standing in for a site's icon.
 struct Monogram: View {
     let text: String
+    var outbound = "DIRECT"
     var body: some View {
+        let tone: Color? = outbound == "REJECT" ? .red : outbound == "DIRECT" ? nil : DS.accent
         let parts = text.split(separator: ".")
         let core = parts.count >= 2 ? parts[parts.count - 2] : Substring(text)
         Text(String(core.prefix(1)).uppercased())
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(DS.ink2)
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(tone ?? DS.ink2)
             .frame(width: 28, height: 28)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
+            .background((tone ?? .primary).opacity(tone == nil ? 0.07 : 0.12), in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
     }
 }
 
@@ -1517,7 +1566,7 @@ struct RequestDetail: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 12) {
-                        Monogram(text: host)
+                        Monogram(text: host, outbound: c.outbound)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(host).font(DS.heading).lineLimit(2).textSelection(.enabled)
                             Text("\(c.proto) · 端口 \(port)").font(DS.caption).foregroundStyle(DS.ink2)
@@ -1726,7 +1775,7 @@ struct ConfigView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PaneHeader(title: "配置", subtitle: core.configPath) {
+            PaneHeader(title: "配置", subtitle: URL(fileURLWithPath: core.configPath).lastPathComponent) {
                 Button("选取…", action: choose)
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }
             }
