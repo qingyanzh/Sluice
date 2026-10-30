@@ -41,3 +41,4 @@ blake2 = "0.10"
 h2 = "0.4"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hmac = "0.12"
+ml-kem = "0.2"

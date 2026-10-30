@@ -1,4 +1,5 @@
-//! REALITY client: a minimal TLS 1.3 client (X25519, AES-128/256-GCM / ChaCha20-Poly1305) with a Chrome-like ClientHello whose session ID carries REALITY's
+//! REALITY client: a minimal TLS 1.3 client (X25519MLKEM768 / X25519, AES-128/256-GCM,
+//! ChaCha20-Poly1305) with a Chrome-like ClientHello whose session ID carries REALITY's
 //! authentication. Instead of a CA chain, the server proves itself with an ed25519
 //! certificate whose signature is HMAC-SHA512(auth key, public key).
 //!
@@ -16,6 +17,8 @@ use chacha20poly1305::ChaCha20Poly1305;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use log::debug;
+use ml_kem::kem::Decapsulate;
+use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
 use rand::RngCore;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -249,9 +252,17 @@ fn u16_list(items: &[u16]) -> Vec<u8> {
 /// Offset of the 32-byte session ID inside the ClientHello handshake message.
 const SESSION_ID_AT: usize = 4 + 2 + 32 + 1;
 
+const X25519: u16 = 0x001d;
+/// Hybrid post-quantum group; REALITY servers insist on a share for it ahead of X25519.
+const X25519_MLKEM768: u16 = 0x11ec;
+const MLKEM_EK_LEN: usize = 1184;
+const MLKEM_CT_LEN: usize = 1088;
+
 /// A Chrome-shaped ClientHello handshake message (type + length + body) with an all-zero
-/// session ID, offering TLS 1.3 with an X25519 key share.
-fn client_hello(random: &[u8; 32], key_share: &[u8; 32], server_name: &str) -> Vec<u8> {
+/// session ID, offering TLS 1.3 with X25519MLKEM768 and X25519 key shares (`mlkem_ek` is
+/// the ML-KEM-768 encapsulation key; the hybrid share reuses the X25519 key, like Chrome).
+fn client_hello(random: &[u8; 32], key_share: &[u8; 32], mlkem_ek: &[u8], server_name: &str) -> Vec<u8> {
+    debug_assert_eq!(mlkem_ek.len(), MLKEM_EK_LEN);
     let mut rng = rand::thread_rng();
     let (g1, g2, g3, g4) = (grease(&mut rng), grease(&mut rng), grease(&mut rng), grease(&mut rng));
     let mut body = vec![0x03, 0x03];
@@ -274,7 +285,7 @@ fn client_hello(random: &[u8; 32], key_share: &[u8; 32], server_name: &str) -> V
     ext(&mut exts, 0x0000, &sni);
     ext(&mut exts, 0x0017, &[]);
     ext(&mut exts, 0xff01, &[0]);
-    ext(&mut exts, 0x000a, &u16_list(&[g3, 0x001d, 0x0017, 0x0018]));
+    ext(&mut exts, 0x000a, &u16_list(&[g3, X25519_MLKEM768, X25519, 0x0017, 0x0018]));
     ext(&mut exts, 0x000b, &[1, 0]);
     ext(&mut exts, 0x0023, &[]);
     ext(&mut exts, 0x0010, &[0x00, 0x0c, 2, b'h', b'2', 8, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1']);
@@ -284,7 +295,11 @@ fn client_hello(random: &[u8; 32], key_share: &[u8; 32], server_name: &str) -> V
     let mut shares = Vec::new();
     shares.extend_from_slice(&g3.to_be_bytes());
     shares.extend_from_slice(&[0, 1, 0]);
-    shares.extend_from_slice(&0x001du16.to_be_bytes());
+    shares.extend_from_slice(&X25519_MLKEM768.to_be_bytes());
+    shares.extend_from_slice(&((mlkem_ek.len() + 32) as u16).to_be_bytes());
+    shares.extend_from_slice(mlkem_ek);
+    shares.extend_from_slice(key_share);
+    shares.extend_from_slice(&X25519.to_be_bytes());
     shares.extend_from_slice(&32u16.to_be_bytes());
     shares.extend_from_slice(key_share);
     let mut ks = (shares.len() as u16).to_be_bytes().to_vec();
@@ -336,8 +351,8 @@ fn short() -> anyhow::Error {
     anyhow!("truncated TLS message")
 }
 
-/// From a ServerHello body: (cipher suite, server X25519 share).
-fn parse_server_hello(body: &[u8]) -> Result<(u16, [u8; 32])> {
+/// From a ServerHello body: (cipher suite, key share group, server share).
+fn parse_server_hello(body: &[u8]) -> Result<(u16, u16, Vec<u8>)> {
     const HRR: [u8; 32] = [
         0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11,
         0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
@@ -357,8 +372,17 @@ fn parse_server_hello(body: &[u8]) -> Result<(u16, [u8; 32])> {
         let data = body.get(p + 4..p + 4 + len).ok_or_else(short)?;
         match kind {
             0x002b => version = be16(data, 0)?,
-            0x0033 if be16(data, 0)? == 0x001d && be16(data, 2)? == 32 => {
-                share = Some(<[u8; 32]>::try_from(data.get(4..36).ok_or_else(short)?).unwrap())
+            0x0033 => {
+                let (group, len) = (be16(data, 0)?, be16(data, 2)? as usize);
+                let want = match group {
+                    X25519 => 32,
+                    X25519_MLKEM768 => MLKEM_CT_LEN + 32,
+                    other => bail!("server chose key share group {other:#06x}"),
+                };
+                if len != want {
+                    bail!("bad key share length {len} for group {group:#06x}");
+                }
+                share = Some((group, data.get(4..4 + len).ok_or_else(short)?.to_vec()));
             }
             _ => {}
         }
@@ -367,7 +391,8 @@ fn parse_server_hello(body: &[u8]) -> Result<(u16, [u8; 32])> {
     if version != 0x0304 {
         bail!("server didn't negotiate TLS 1.3");
     }
-    Ok((suite, share.ok_or_else(|| anyhow!("server sent no X25519 key share"))?))
+    let (group, share) = share.ok_or_else(|| anyhow!("server sent no key share"))?;
+    Ok((suite, group, share))
 }
 
 /// Reads one DER TLV at `at`; returns (tag, content range).
@@ -410,7 +435,9 @@ fn cert_key_and_signature(cert: &[u8]) -> Result<([u8; 32], Vec<u8>)> {
 }
 
 fn verify_reality_cert(cert: &[u8], auth_key: &[u8; 32]) -> Result<()> {
-    let (key, signature) = cert_key_and_signature(cert).context("REALITY certificate")?;
+    // Without valid auth the server relays the real site, whose certificate isn't ed25519.
+    let (key, signature) = cert_key_and_signature(cert)
+        .map_err(|e| anyhow!("REALITY verification failed: {e} (got the real site's certificate? check public key, short id and sni)"))?;
     let mut m = <Hmac<Sha512> as Mac>::new_from_slice(auth_key).expect("hmac key");
     m.update(&key);
     if m.finalize().into_bytes().as_slice() != signature.as_slice() {
@@ -498,7 +525,8 @@ pub async fn handshake(stream: &mut BoxStream, opts: &RealityOpts) -> Result<Rea
     let mut random = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut random);
 
-    let mut hello = client_hello(&random, public.as_bytes(), &opts.server_name);
+    let (mlkem_dk, mlkem_ek) = MlKem768::generate(&mut rand::thread_rng());
+    let mut hello = client_hello(&random, public.as_bytes(), mlkem_ek.as_bytes().as_slice(), &opts.server_name);
     let auth_shared = secret.diffie_hellman(&PublicKey::from(opts.public_key));
     let auth_key = reality_auth_key(auth_shared.as_bytes(), &random);
     let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
@@ -531,16 +559,25 @@ pub async fn handshake(stream: &mut BoxStream, opts: &RealityOpts) -> Result<Rea
     if server_hello[0] != 0x02 {
         bail!("expected ServerHello");
     }
-    let (suite_id, server_share) = parse_server_hello(&server_hello[4..])?;
+    let (suite_id, group, server_share) = parse_server_hello(&server_hello[4..])?;
     let suite = Suite::from_id(suite_id)?;
     let hash = suite.hash();
     transcript.extend_from_slice(&server_hello);
 
-    let shared = secret.diffie_hellman(&PublicKey::from(server_share));
+    // X25519MLKEM768: the share is ML-KEM ciphertext then X25519; the secret is the
+    // ML-KEM secret then the X25519 one.
+    let x_share = <[u8; 32]>::try_from(&server_share[server_share.len() - 32..]).unwrap();
+    let mut shared = Vec::with_capacity(64);
+    if group == X25519_MLKEM768 {
+        let ct = ml_kem::Ciphertext::<MlKem768>::try_from(&server_share[..MLKEM_CT_LEN]).map_err(|_| anyhow!("bad ML-KEM ciphertext"))?;
+        let ss = mlkem_dk.decapsulate(&ct).map_err(|_| anyhow!("ML-KEM decapsulation failed"))?;
+        shared.extend_from_slice(ss.as_slice());
+    }
+    shared.extend_from_slice(secret.diffie_hellman(&PublicKey::from(x_share)).as_bytes());
     let zeros = vec![0u8; hash.len()];
     let early = hash.extract(&zeros, &zeros);
     let empty_hash = hash.digest(b"");
-    let hs_secret = hash.extract(&derive_secret(hash, &early, "derived", &empty_hash), shared.as_bytes());
+    let hs_secret = hash.extract(&derive_secret(hash, &early, "derived", &empty_hash), &shared);
     let th = hash.digest(&transcript);
     let c_hs = derive_secret(hash, &hs_secret, "c hs traffic", &th);
     let s_hs = derive_secret(hash, &hs_secret, "s hs traffic", &th);
@@ -609,7 +646,7 @@ pub async fn handshake(stream: &mut BoxStream, opts: &RealityOpts) -> Result<Rea
     out.extend(client_cipher.seal(0x16, &fin));
     stream.write_all(&out).await?;
     stream.flush().await?;
-    debug!("REALITY handshake with {} done ({suite:?})", opts.server_name);
+    debug!("REALITY handshake with {} done ({suite:?}, group {group:#06x})", opts.server_name);
 
     if !hs_buf.is_empty() {
         debug!("REALITY: {} stray handshake bytes after Finished", hs_buf.len());
@@ -682,11 +719,16 @@ mod tests {
     fn hello_shape_and_session_id_sealing() {
         let random = [7u8; 32];
         let share = [9u8; 32];
-        let mut hello = client_hello(&random, &share, "www.example.com");
+        let mut hello = client_hello(&random, &share, &[4u8; MLKEM_EK_LEN], "www.example.com");
         assert_eq!(hello[0], 1);
         assert_eq!(u32::from_be_bytes([0, hello[1], hello[2], hello[3]]) as usize, hello.len() - 4);
         assert!(hello[SESSION_ID_AT..SESSION_ID_AT + 32].iter().all(|b| *b == 0));
         assert!(hello.windows(15).any(|w| w == b"www.example.com"));
+        // The hybrid share (1216 bytes) comes before the plain X25519 one.
+        let hybrid = hello.windows(4).position(|w| w == [0x11, 0xec, 0x04, 0xc0]).unwrap();
+        let plain = hello.windows(4).position(|w| w == [0x00, 0x1d, 0x00, 0x20]).unwrap();
+        assert!(hybrid < plain);
+        assert_eq!(&hello[hybrid + 4 + MLKEM_EK_LEN..hybrid + 4 + MLKEM_EK_LEN + 32], &share);
         let zeroed = hello.clone();
         let key = [3u8; 32];
         seal_session_id(&mut hello, &random, &key, &[0xab; 8], 1_700_000_000);
