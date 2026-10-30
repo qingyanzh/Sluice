@@ -204,6 +204,11 @@ struct MainView: View {
                 if let err = core.lastActionError {
                     ErrorBanner(message: err) { core.lastActionError = nil }
                 }
+                if let other = core.otherSystemProxy {
+                    Text("系统代理：\(other)")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .padding(.horizontal, DS.gutter).padding(.top, 8)
+                }
                 if core.systemProxyOn && core.state != .running && core.state != .starting {
                     // Inconsistent and harmful: the system sends traffic to a port nobody listens on.
                     Notice(tone: DS.warn, icon: "exclamationmark.triangle.fill", title: "系统代理已开启，但内核未运行",
@@ -956,7 +961,7 @@ struct OverviewView: View {
                                     isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }),
                                     status: core.systemProxyOn
                                         ? (core.state == .running ? "系统代理正在接管" : "已开启，内核未运行")
-                                        : "未设置为系统代理",
+                                        : (core.otherSystemProxy ?? "未设置为系统代理"),
                                     statusOn: core.systemProxyOn && core.state == .running,
                                     statusTone: core.systemProxyOn && core.state != .running ? DS.warn : nil)
                             .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)

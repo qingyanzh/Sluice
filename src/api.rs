@@ -392,7 +392,7 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
 }
 
 pub async fn serve(addr: String, reloader: Arc<Reloader>) -> Result<()> {
-    let listener = TcpListener::bind(&addr).await.map_err(|e| anyhow::anyhow!("bind api on {addr}: {e}"))?;
+    let listener = TcpListener::bind(&addr).await.map_err(|e| crate::util::listen_error("api", &addr, e))?;
     info!("control API listening on http://{addr}");
     crate::stats::spawn_sampler();
     loop {

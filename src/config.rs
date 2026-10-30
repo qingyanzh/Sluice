@@ -849,7 +849,7 @@ example.com = 1.2.3.4, ::1
     #[test]
     fn parse_sample() {
         let cfg = Config::parse(include_str!("../examples/sluice.conf")).unwrap();
-        assert_eq!(cfg.general.http_listen.as_deref(), Some("127.0.0.1:6152"));
+        assert_eq!(cfg.general.http_listen.as_deref(), Some("127.0.0.1:6252"));
         assert_eq!(cfg.proxies.len(), 6);
         assert!(matches!(&cfg.proxies[2].1, ProxyDef::Vmess { tls: true, layer: None, .. }));
         match &cfg.proxies[4].1 {

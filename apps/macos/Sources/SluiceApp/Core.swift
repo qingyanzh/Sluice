@@ -128,6 +128,7 @@ final class Core: ObservableObject {
     @Published private(set) var summary = ConfigSummary(text: "")
     @Published var lastActionError: String?
     @Published private(set) var systemProxyOn = false
+    @Published private(set) var otherSystemProxy: String?
     @Published private(set) var privileged = false
     /// Bytes per second over the last poll interval, and running totals.
     @Published private(set) var upRate: Double = 0
@@ -170,6 +171,7 @@ final class Core: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var eventRefreshTask: Task<Void, Never>?
     private var monitoringID = UUID()
+    private var systemProxyRefreshID = UUID()
     private var observingActiveConnections = false
     private var runningSummary: ConfigSummary?
     private var requestsDirty = true
@@ -198,8 +200,8 @@ final class Core: ObservableObject {
     static let starterConfig = """
         # Sluice config created by the app. Edit it, then press Reload.
         [General]
-        http-listen = 127.0.0.1:6152
-        socks5-listen = 127.0.0.1:6153
+        http-listen = 127.0.0.1:6252
+        socks5-listen = 127.0.0.1:6253
         api-listen = 127.0.0.1:6170
         loglevel = info
 
@@ -275,6 +277,7 @@ final class Core: ObservableObject {
 
     func refreshSummary() {
         summary = ConfigSummary(text: (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? "")
+        refreshSystemProxy()
     }
 
     // MARK: lifecycle
@@ -309,6 +312,8 @@ final class Core: ObservableObject {
         }
 
         usesConnectionAPI = true
+        pending = ""
+        startupError = nil
         resetStats()
         runningSummary = summary
 
@@ -322,15 +327,6 @@ final class Core: ObservableObject {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.ingest(text) }
-        }
-        p.terminationHandler = { [weak self] proc in
-            let code = proc.terminationStatus
-            Task { @MainActor in self?.exited(code: code) }
-        }
         do {
             try p.run()
         } catch {
@@ -338,6 +334,19 @@ final class Core: ObservableObject {
             return
         }
         process = p
+        // Read through EOF before reporting exit, so short-lived startup errors are
+        // always ingested before the failure is presented. The main queue preserves order.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            while true {
+                let data = pipe.fileHandleForReading.availableData
+                if data.isEmpty { break }
+                let text = String(decoding: data, as: UTF8.self)
+                DispatchQueue.main.async { self?.ingest(text) }
+            }
+            p.waitUntilExit()
+            let code = p.terminationStatus
+            DispatchQueue.main.async { self?.exited(code: code) }
+        }
         stopping = false
         state = .starting
         appendLog(level: "APP", message: "started core \(binary.path) with \(configPath)")
@@ -492,6 +501,7 @@ final class Core: ObservableObject {
     }
 
     private func exited(code: Int32) {
+        if !pending.isEmpty { parse(pending); pending = "" }
         pollTask?.cancel()
         eventTask?.cancel()
         eventTask = nil
@@ -517,9 +527,15 @@ final class Core: ObservableObject {
         if stopping || code == 0 {
             state = .stopped
         } else {
-            let reason = logs.last(where: { $0.message.hasPrefix("error:") })?.message ?? "the core exited with status \(code)"
+            let reason = startupError ?? "the core exited with status \(code)"
             state = .failed(reason)
+            Task {
+                guard let message = await ListenConflict.message(for: reason),
+                      state == .failed(reason), !isActive else { return }
+                state = .failed(message)
+            }
         }
+        refreshSystemProxy()
     }
 
     private func resetStats() {
@@ -1103,14 +1119,22 @@ final class Core: ObservableObject {
 
     func refreshSystemProxy() {
         guard attachment == nil else { return }
-        guard let (_, port) = SystemProxy.split(summary.httpListen) else { systemProxyOn = false; return }
-        Task { systemProxyOn = await SystemProxy.isPointing(atPort: port) }
+        let config = isActive ? (runningSummary ?? summary) : summary
+        let refreshID = UUID()
+        systemProxyRefreshID = refreshID
+        Task {
+            let status = await SystemProxy.status(http: config.httpListen, socks: config.socksListen)
+            guard systemProxyRefreshID == refreshID else { return }
+            systemProxyOn = status.isSluice
+            otherSystemProxy = status.otherProxy
+        }
     }
 
     func setSystemProxy(_ on: Bool) {
         guard attachment == nil else { return }
-        let http = SystemProxy.split(summary.httpListen)
-        let socks = SystemProxy.split(summary.socksListen)
+        let config = isActive ? (runningSummary ?? summary) : summary
+        let http = SystemProxy.split(config.httpListen)
+        let socks = SystemProxy.split(config.socksListen)
         guard !on || http != nil || socks != nil else {
             lastActionError = "无法开启系统代理：配置的 [General] 中没有 http-listen 或 socks5-listen。"
             return
@@ -1176,6 +1200,8 @@ final class Core: ObservableObject {
 
     // MARK: output parsing
 
+    private var startupError: String?
+
     private func ingest(_ text: String) {
         pending += text
         while let nl = pending.firstIndex(of: "\n") {
@@ -1190,6 +1216,7 @@ final class Core: ObservableObject {
 
     private func parse(_ line: String) {
         guard !line.isEmpty else { return }
+        if line.hasPrefix("error:") { startupError = line }
         guard let m = line.wholeMatch(of: Core.logPattern) else {
             appendLog(level: line.hasPrefix("error:") ? "ERROR" : "OUT", message: line)
             return

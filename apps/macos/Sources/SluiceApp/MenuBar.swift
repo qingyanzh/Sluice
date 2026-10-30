@@ -60,6 +60,7 @@ struct MenuBarContent: View {
         } else if core.systemProxyOn {
             Text("系统代理已开启，内核未运行")
         }
+        if let other = core.otherSystemProxy { Text("系统代理：\(other)") }
 
         Divider()
         Button(core.isActive ? "停止 Sluice" : "启动 Sluice", systemImage: core.isActive ? "stop.fill" : "play.fill") {

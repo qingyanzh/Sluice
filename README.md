@@ -11,7 +11,7 @@ cargo build --release
 ./target/release/sluice run examples/sluice.conf
 ```
 
-Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153` (SOCKS5).
+Then point the system or app proxy at `127.0.0.1:6252` (HTTP) or `127.0.0.1:6253` (SOCKS5).
 
 ## M1 features
 

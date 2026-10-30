@@ -37,19 +37,48 @@ enum Privileged {
 }
 
 enum SystemProxy {
+    static let defaultHTTP = "127.0.0.1:6252"
+    static let defaultSOCKS = "127.0.0.1:6253"
+
+    struct Status: Equatable {
+        var isSluice = false
+        var otherAddresses: [String] = []
+
+        var otherProxy: String? {
+            otherAddresses.isEmpty ? nil : "another proxy (\(otherAddresses.joined(separator: ", ")))"
+        }
+    }
+
     static func services() async -> [String] {
         let (_, out) = await runTool("/usr/sbin/networksetup", ["-listallnetworkservices"])
         return out.split(separator: "\n").dropFirst().map(String.init).filter { !$0.hasPrefix("*") && !$0.isEmpty }
     }
 
-    /// Whether the system HTTP proxy currently points at `port` on localhost.
-    static func isPointing(atPort port: Int) async -> Bool {
+    static func status(http: String?, socks: String?) async -> Status {
         let (_, out) = await runTool("/usr/sbin/scutil", ["--proxy"])
-        func value(_ key: String) -> String? {
-            out.split(separator: "\n").first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("\(key) :") }
-                .map { $0.split(separator: ":").last!.trimmingCharacters(in: .whitespaces) }
+        return parseStatus(out, http: http, socks: socks)
+    }
+
+    /// Every enabled proxy must match its corresponding listener, including the host.
+    static func parseStatus(_ output: String, http: String?, socks: String?) -> Status {
+        var values: [String: String] = [:]
+        for line in output.split(separator: "\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            values[line[..<colon].trimmingCharacters(in: .whitespaces)] =
+                line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
-        return value("HTTPEnable") == "1" && value("HTTPPort") == String(port)
+        var enabled = 0
+        var other: [String] = []
+        for (kind, listener) in [("HTTP", http ?? defaultHTTP), ("HTTPS", http ?? defaultHTTP), ("SOCKS", socks ?? defaultSOCKS)] {
+            guard values["\(kind)Enable"] == "1" else { continue }
+            enabled += 1
+            let host = values["\(kind)Proxy"] ?? "?"
+            let port = Int(values["\(kind)Port"] ?? "")
+            if let expected = split(listener), host == expected.0, port == expected.1 { continue }
+            let address = "\(host.contains(":") ? "[\(host)]" : host):\(values["\(kind)Port"] ?? "?")"
+            if !other.contains(address) { other.append(address) }
+        }
+        return Status(isSluice: enabled > 0 && other.isEmpty, otherAddresses: other)
     }
 
     /// Points (or stops pointing) every network service's HTTP, HTTPS and SOCKS proxy at Sluice.
@@ -74,13 +103,51 @@ enum SystemProxy {
         _ = try await Privileged.run(cmds.joined(separator: " && "))
     }
 
-    /// `127.0.0.1:6152` -> ("127.0.0.1", 6152); a bare port means localhost.
+    /// `127.0.0.1:6252` -> ("127.0.0.1", 6252); a bare port means localhost.
     static func split(_ listen: String?) -> (String, Int)? {
-        guard let listen else { return nil }
-        let parts = listen.split(separator: ":")
-        guard let port = parts.last.flatMap({ Int($0) }) else { return nil }
-        let host = parts.count > 1 ? parts.dropLast().joined(separator: ":") : "127.0.0.1"
-        return (host == "0.0.0.0" ? "127.0.0.1" : host, port)
+        guard let listen = listen?.trimmingCharacters(in: .whitespaces) else { return nil }
+        let colon = listen.lastIndex(of: ":")
+        let portText = colon.map { String(listen[listen.index(after: $0)...]) } ?? listen
+        guard let port = Int(portText), (1...65535).contains(port) else { return nil }
+        let host = colon.map { String(listen[..<$0]) } ?? "127.0.0.1"
+        let unbracketed = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return (unbracketed == "0.0.0.0" ? "127.0.0.1" : unbracketed == "::" ? "::1" : unbracketed, port)
+    }
+}
+
+enum ListenConflict {
+    struct Owner: Equatable {
+        let process: String
+        let pid: Int
+
+        func message(port: Int) -> String { "端口 \(port) 已被 \(process)(\(pid)) 占用" }
+    }
+
+    /// Parses the standard `lsof -nP -iTCP:<port> -sTCP:LISTEN` table.
+    static func parseOwners(_ output: String) -> [Owner] {
+        var owners: [Owner] = []
+        for line in output.split(separator: "\n") {
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 3, let pid = Int(fields[1]), pid > 0,
+                  fields.last == "(LISTEN)" else { continue }
+            let owner = Owner(process: String(fields[0]), pid: pid)
+            if !owners.contains(owner) { owners.append(owner) }
+        }
+        return owners
+    }
+
+    /// Rust includes a stable error kind and the exact failing listener in its message.
+    static func port(in error: String) -> Int? {
+        guard error.contains("AddrInUse"), let start = error.range(of: " on "),
+              let end = error.range(of: ": AddrInUse", range: start.upperBound..<error.endIndex) else { return nil }
+        return SystemProxy.split(String(error[start.upperBound..<end.lowerBound]))?.1
+    }
+
+    static func message(for error: String) async -> String? {
+        guard let port = port(in: error) else { return nil }
+        let (_, output) = await runTool("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"])
+        let messages = parseOwners(output).map { $0.message(port: port) }
+        return messages.isEmpty ? nil : messages.joined(separator: "\n")
     }
 }
 

@@ -55,15 +55,15 @@ cargo build --release
 
 | 用途 | 地址 |
 | --- | --- |
-| HTTP 代理，也用于 HTTPS 的 CONNECT 隧道 | `127.0.0.1:6152` |
-| SOCKS5 代理 | `127.0.0.1:6153` |
+| HTTP 代理，也用于 HTTPS 的 CONNECT 隧道 | `127.0.0.1:6252` |
+| SOCKS5 代理 | `127.0.0.1:6253` |
 | 应用控制 API | `127.0.0.1:6170` |
 
 例如，可以先用显式代理测试，排除系统代理设置的影响：
 
 ```sh
-curl --proxy http://127.0.0.1:6152 https://example.com/
-curl --proxy socks5h://127.0.0.1:6153 https://example.com/
+curl --proxy http://127.0.0.1:6252 https://example.com/
+curl --proxy socks5h://127.0.0.1:6253 https://example.com/
 ```
 
 默认情况下，关闭主窗口后应用仍在菜单栏运行。停止或退出内核前，先关闭“系统代理”；当前停止/退出逻辑不负责自动关闭系统代理，否则应用可能继续向已停止的本地端口发请求。
@@ -74,8 +74,8 @@ curl --proxy socks5h://127.0.0.1:6153 https://example.com/
 
 ```ini
 [General]
-http-listen = 127.0.0.1:6152
-socks5-listen = 127.0.0.1:6153
+http-listen = 127.0.0.1:6252
+socks5-listen = 127.0.0.1:6253
 api-listen = 127.0.0.1:6170
 loglevel = info
 
@@ -393,7 +393,7 @@ URL 重写先于分流；内部 `header` 重写后的 URL 用于后续 Header、
 保存并应用配置后，可用以下命令检查示例的响应头和文本替换；`--cacert` 显式为这次 curl 请求指定 CA，不依赖 curl 是否使用钥匙串：
 
 ```sh
-curl --proxy http://127.0.0.1:6152 \
+curl --proxy http://127.0.0.1:6252 \
   --cacert "$HOME/Library/Application Support/Sluice/ca.crt" \
   -D - https://example.com/
 ```

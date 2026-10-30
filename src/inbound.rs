@@ -25,7 +25,7 @@ where
     F: Fn(TcpStream, Arc<Router>) -> Fut + Copy + Send + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
-    let listener = TcpListener::bind(&addr).await.map_err(|e| anyhow::anyhow!("bind {name} on {addr}: {e}"))?;
+    let listener = TcpListener::bind(&addr).await.map_err(|e| crate::util::listen_error(name, &addr, e))?;
     info!("{name} proxy listening on {addr}");
     loop {
         let (sock, peer) = listener.accept().await?;

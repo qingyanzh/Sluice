@@ -23,13 +23,13 @@ final class CoreProfileTests: XCTestCase {
     }
 
     func testOnlyListenerAndEnhancedModeChangesRequireRestart() {
-        let base = "[General]\napi-listen = 127.0.0.1:6170\nhttp-listen = 127.0.0.1:6152\nsocks5-listen = 127.0.0.1:6153\nenhanced-mode = false\n"
+        let base = "[General]\napi-listen = 127.0.0.1:6170\nhttp-listen = 127.0.0.1:6252\nsocks5-listen = 127.0.0.1:6253\nenhanced-mode = false\n"
         let running = ConfigSummary(text: base)
         XCTAssertFalse(ConfigSummary(text: base + "[Proxy]\nHK = direct\n[Rule]\nFINAL,HK\n").requiresRestart(comparedTo: running))
         for change in [
             base.replacingOccurrences(of: "127.0.0.1:6170", with: "127.0.0.2:6170"),
-            base.replacingOccurrences(of: "127.0.0.1:6152", with: "127.0.0.1:6154"),
-            base.replacingOccurrences(of: "socks5-listen = 127.0.0.1:6153\n", with: ""),
+            base.replacingOccurrences(of: "127.0.0.1:6252", with: "127.0.0.1:6154"),
+            base.replacingOccurrences(of: "socks5-listen = 127.0.0.1:6253\n", with: ""),
             base.replacingOccurrences(of: "enhanced-mode = false", with: "enhanced-mode = true")
         ] {
             XCTAssertTrue(ConfigSummary(text: change).requiresRestart(comparedTo: running))

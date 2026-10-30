@@ -16,6 +16,12 @@ pub type BoxStream = Box<dyn AsyncStream>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Keep the OS error as a source while giving the app a stable kind and address.
+pub fn listen_error(name: &str, addr: &str, error: std::io::Error) -> anyhow::Error {
+    let kind = error.kind();
+    anyhow::Error::new(error).context(format!("bind {name} on {addr}: {kind:?}"))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Host {
     Domain(String),
@@ -177,6 +183,14 @@ pub fn udp_socket(dest: &SocketAddr) -> std::io::Result<UdpSocket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listen_error_names_address_and_preserves_kind() {
+        let error = listen_error("HTTP", "127.0.0.1:6252", std::io::Error::from(std::io::ErrorKind::AddrInUse));
+        let message = format!("{error:#}");
+        assert!(message.contains("bind HTTP on 127.0.0.1:6252: AddrInUse"), "{message}");
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::AddrInUse);
+    }
 
     #[test]
     fn authority() {

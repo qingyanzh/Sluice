@@ -797,11 +797,11 @@ IP-CIDR6,2001:db8::/32,DIRECT
 FINAL,DIRECT
 ",
         );
-        let tcp = || ConnInfo::new(Proto::Https, Some("127.0.0.1:50000".parse().unwrap()), Some(6152), 6152);
+        let tcp = || ConnInfo::new(Proto::Https, Some("127.0.0.1:50000".parse().unwrap()), Some(6252), 6252);
         assert_eq!(decide_ctx(&r, "x.a.com", tcp()).await, "AND,((DOMAIN-SUFFIX,a.com),(DST-PORT,443))");
         assert_eq!(decide_ctx(&r, "x.a.com:80", tcp().with_process("other")).await, "FINAL");
         assert_eq!(decide_ctx(&r, "b.com", tcp().with_process("curl")).await, "OR,((PROCESS-NAME,Curl),(SRC-IP,192.168.9.0/24))");
-        let lan = ConnInfo::new(Proto::Tcp, Some("192.168.9.4:1234".parse().unwrap()), Some(6152), 6152).with_process("x");
+        let lan = ConnInfo::new(Proto::Tcp, Some("192.168.9.4:1234".parse().unwrap()), Some(6252), 6252).with_process("x");
         assert_eq!(decide_ctx(&r, "b.com", lan).await.split(',').next(), Some("OR"));
         let quic = ConnInfo::new(Proto::Quic, None, None, 0).with_process("x");
         assert_eq!(decide_ctx(&r, "b.com", quic).await, "NOT,((PROTOCOL,TCP))");
