@@ -91,6 +91,7 @@ struct MainView: View {
                 if let err = core.lastActionError {
                     ErrorBanner(message: err) { core.lastActionError = nil }
                 }
+                Group {
                 switch pane ?? .activity {
                 case .activity: ActivityView(pane: $pane)
                 case .overview: OverviewView()
@@ -101,7 +102,11 @@ struct MainView: View {
                 case .logs: LogsView()
                 case .profile: ConfigView()
                 }
+                }
+                .id(pane)
+                .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 8)), removal: .opacity))
             }
+            .animation(.smooth(duration: 0.25), value: pane)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(Color(nsColor: .windowBackgroundColor))
             .toolbar {
@@ -134,7 +139,18 @@ struct StatusDot: View {
         case .failed: .red
         }
     }
-    var body: some View { Circle().fill(color).frame(width: 8, height: 8) }
+    var body: some View {
+        Circle().fill(color).frame(width: 8, height: 8)
+            .background {
+                // A soft halo breathes while the core is running.
+                if state == .running {
+                    Circle().fill(color.opacity(0.35)).frame(width: 8, height: 8)
+                        .phaseAnimator([1.0, 2.2]) { v, scale in v.scaleEffect(scale).opacity(2.4 - scale) }
+                            animation: { _ in .easeInOut(duration: 1.4) }
+                }
+            }
+            .animation(.smooth, value: color)
+    }
 }
 
 /// Toolbar capsule with a status dot, like Surge's System Proxy / Enhanced Mode buttons.
@@ -286,6 +302,33 @@ extension View {
 
 extension View {
     func card() -> some View { modifier(CardModifier()) }
+    func hoverLift() -> some View { modifier(HoverLift()) }
+}
+
+/// Clickable tiles rise slightly under the pointer.
+struct HoverLift: ViewModifier {
+    @State private var hovering = false
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(hovering ? 1.02 : 1)
+            .shadow(color: .black.opacity(hovering ? 0.10 : 0), radius: 10, y: 4)
+            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+
+/// Card caption with a tinted symbol, e.g. "↑ 上传".
+struct CardTitle: View {
+    let text: String
+    let icon: String
+    var tint: Color = .accentColor
+    var body: some View {
+        Label {
+            Text(text).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        } icon: {
+            Image(systemName: icon).font(.caption.weight(.semibold)).foregroundStyle(tint)
+        }
+    }
 }
 
 struct SectionTitle: View {
@@ -299,7 +342,9 @@ struct BigNumber: View {
     var unit: String = ""
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
-            Text(value).font(.system(size: 30, weight: .semibold).monospacedDigit())
+            Text(value).font(.system(size: 30, weight: .semibold, design: .rounded).monospacedDigit())
+                .contentTransition(.numericText())
+                .animation(.smooth(duration: 0.4), value: value)
             if !unit.isEmpty { Text(unit).font(.callout).foregroundStyle(.secondary) }
         }
     }
@@ -372,7 +417,7 @@ struct ActivityView: View {
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("SLUICE 内核").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                CardTitle(text: "SLUICE 内核", icon: "cpu", tint: .indigo)
                 Spacer()
                 StatusDot(state: core.state)
             }
@@ -397,7 +442,7 @@ struct ActivityView: View {
     private var connectionsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("活动连接").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                CardTitle(text: "活动连接", icon: "point.3.connected.trianglepath.dotted", tint: .green)
                 Spacer()
                 Circle().fill(core.state == .running ? Color.green : Color.secondary.opacity(0.4)).frame(width: 10, height: 10)
             }
@@ -416,7 +461,9 @@ struct ActivityView: View {
 
     private func stat(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(value).font(.title2.weight(.medium).monospacedDigit())
+            Text(value).font(.system(.title2, design: .rounded).weight(.medium).monospacedDigit())
+                .contentTransition(.numericText())
+                .animation(.smooth, value: value)
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -426,7 +473,7 @@ struct ActivityView: View {
         let up = Double(core.traffic?.up ?? 0), down = Double(core.traffic?.down ?? 0)
         let (n, u) = splitBytes(up + down)
         return VStack(alignment: .leading, spacing: 8) {
-            Text("总计").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            CardTitle(text: "总计", icon: "chart.bar.fill", tint: .orange)
             BigNumber(value: n, unit: u)
             HStack {
                 VStack(alignment: .leading) {
@@ -461,7 +508,7 @@ struct ActivityView: View {
         let maxCount = top.first?.value ?? 1
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("请求").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                CardTitle(text: "请求排行", icon: "list.bullet", tint: .pink)
                 Spacer()
                 Button("查看全部") { pane = .requests }.buttonStyle(.link).font(.caption)
             }
@@ -482,7 +529,9 @@ struct ActivityView: View {
                         Text("\(count)").monospacedDigit().foregroundStyle(.secondary)
                     }
                     GeometryReader { geo in
-                        Capsule().fill(.quaternary).frame(width: geo.size.width * CGFloat(count) / CGFloat(maxCount))
+                        Capsule().fill(Color.accentColor.opacity(0.35))
+                            .frame(width: geo.size.width * CGFloat(count) / CGFloat(maxCount))
+                            .animation(.smooth, value: count)
                     }
                     .frame(height: 3).padding(.leading, 22)
                 }
@@ -505,7 +554,7 @@ struct RateCard: View {
         let peak = series.max() ?? 0
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                CardTitle(text: title, icon: title == "上传" ? "arrow.up" : "arrow.down", tint: color)
                 Spacer()
                 Text("\(formatBytes(peak))/s").font(.caption2).foregroundStyle(.tertiary)
             }
@@ -524,6 +573,7 @@ struct RateCard: View {
             }
             .chartXScale(domain: 0...59)
             .chartYScale(domain: 0...max(peak * 1.2, 1024))
+            .animation(.smooth(duration: 0.6), value: series.last)
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .frame(height: 56)
@@ -723,6 +773,7 @@ struct GroupCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .hoverLift()
         .popover(isPresented: $showing, arrowEdge: .bottom) { GroupOptions(group: group) }
     }
 }
@@ -850,6 +901,7 @@ struct NodeCard: View {
         .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
         .padding(10)
         .tileBackground()
+        .hoverLift()
         .help(name)
     }
 }
@@ -864,6 +916,7 @@ struct AddCard: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .hoverLift()
     }
 }
 
