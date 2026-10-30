@@ -17,7 +17,7 @@ keys=$(xray x25519)
 reality_priv=$(echo "$keys" | awk -F': ' '/^Private ?[Kk]ey/{print $2}')
 reality_pub=$(echo "$keys" | awk -F': ' '/Public ?[Kk]ey/{print $2}')
 wrong_pub=$(xray x25519 | awk -F': ' '/Public ?[Kk]ey/{print $2}')
-reality="\"security\":\"reality\",\"realitySettings\":{\"dest\":\"www.microsoft.com:443\",\"serverNames\":[\"www.microsoft.com\"],\"privateKey\":\"$reality_priv\",\"shortIds\":[\"0123abcd\"]}"
+reality="\"security\":\"reality\",\"realitySettings\":{\"show\":true,\"dest\":\"www.microsoft.com:443\",\"serverNames\":[\"www.microsoft.com\"],\"privateKey\":\"$reality_priv\",\"shortIds\":[\"0123abcd\"]}"
 ws='"network":"ws","wsSettings":{"path":"/ray"}'
 grpc='"network":"grpc","grpcSettings":{"serviceName":"gun"}'
 cat > "$work/xray.json" <<EOF
