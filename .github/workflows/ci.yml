@@ -20,6 +20,38 @@ jobs:
           name: sluice
           path: target/release/sluice
 
+  e2e:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: sluice
+          path: target/release
+      - run: chmod +x target/release/sluice
+      - run: brew install shadowsocks-rust xray hysteria
+      # build-app.sh also builds the Rust core and Swift helper, resolves Sparkle,
+      # embeds the framework and ad-hoc signs the complete app bundle.
+      - name: Build app
+        run: |
+          mkdir -p ci-logs/e2e/screenshots
+          bash scripts/build-app.sh 2>&1 | tee ci-logs/e2e/build-app.log
+      - run: bash scripts/ci/e2e.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: ci-logs/e2e
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: ci-logs/e2e/screenshots
+
   interop:
     needs: build
     runs-on: macos-15
