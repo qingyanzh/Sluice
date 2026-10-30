@@ -116,6 +116,15 @@ struct APIClient {
         try JSONDecoder().decode(Traffic.self, from: await request("GET", "/v1/traffic"))
     }
 
+    /// Only a missing endpoint enables the overall-only compatibility history.
+    func stats() async throws -> TrafficStats? {
+        do {
+            return try JSONDecoder().decode(TrafficStats.self, from: await request("GET", "/v1/stats"))
+        } catch let error as APIError where error.status == 404 {
+            return nil
+        }
+    }
+
     /// Older cores only report connection events in their logs.
     func connections() async throws -> [Connection]? {
         do {

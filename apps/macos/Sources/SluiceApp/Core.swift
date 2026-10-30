@@ -122,6 +122,10 @@ final class Core: ObservableObject {
     @Published private(set) var traffic: Traffic?
     /// Last 60 one-second samples of (up, down) bytes per second, oldest first.
     @Published private(set) var rateHistory: [(up: Double, down: Double)] = []
+    @Published private(set) var stats: TrafficStats?
+    @Published private(set) var statsFallback = false
+    @Published private(set) var statsHistory: [TrafficRatePoint] = []
+    @Published private(set) var statsError: String?
     /// Outbound mode reported by the core: "rule", "direct" or "global".
     @Published private(set) var mode = "rule"
     @Published private(set) var testingGroups: Set<String> = []
@@ -152,6 +156,8 @@ final class Core: ObservableObject {
     // Prefer the API until the core explicitly reports 404.
     private var usesConnectionAPI = true
     private var clearedConnectionIDs: Set<Connection.ID> = []
+    private var trafficHistory = TrafficHistory()
+    private var lastTrafficSampleAt: Date?
 
     static let defaultConfigPath: String = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -257,6 +263,7 @@ final class Core: ObservableObject {
         }
 
         usesConnectionAPI = true
+        resetStats()
 
         if summary.enhancedMode {
             startPrivileged(binary)
@@ -401,6 +408,7 @@ final class Core: ObservableObject {
         mode = "rule"
         upRate = 0
         downRate = 0
+        resetStats()
         groups = []
         appendLog(level: "APP", message: "core exited with status \(code)")
         if stopping || code == 0 {
@@ -411,8 +419,20 @@ final class Core: ObservableObject {
         }
     }
 
-    private func sampleTraffic(_ api: APIClient, elapsed: Double) async {
+    private func resetStats() {
+        stats = nil
+        statsFallback = false
+        statsHistory = []
+        statsError = nil
+        trafficHistory = TrafficHistory()
+        lastTrafficSampleAt = nil
+    }
+
+    private func sampleTraffic(_ api: APIClient) async {
         guard let now = try? await api.traffic() else { return }
+        guard !Task.isCancelled else { return }
+        let time = Date()
+        let elapsed = lastTrafficSampleAt.map { time.timeIntervalSince($0) } ?? 0
         if let prev = traffic, elapsed > 0 {
             upRate = Double(now.up >= prev.up ? now.up - prev.up : 0) / elapsed
             downRate = Double(now.down >= prev.down ? now.down - prev.down : 0) / elapsed
@@ -420,11 +440,29 @@ final class Core: ObservableObject {
             if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
         }
         traffic = now
+        lastTrafficSampleAt = time
+        trafficHistory.record(now, at: time)
+        if statsFallback { statsHistory = trafficHistory.samples }
+    }
+
+    private func sampleStats(_ api: APIClient) async {
+        guard !statsFallback else { return }
+        do {
+            let fresh = try await api.stats()
+            guard !Task.isCancelled else { return }
+            stats = fresh
+            statsFallback = fresh == nil
+            if statsFallback { statsHistory = trafficHistory.samples }
+            statsError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            statsError = "统计刷新失败：\(error.localizedDescription)"
+        }
     }
 
     private func poll() async {
         var tick = 0
-        var last = Date()
+        var lastStatsPoll = Date.distantPast
         var connectionsSupported = true
         usesConnectionAPI = true
         clearedConnectionIDs = []
@@ -443,8 +481,11 @@ final class Core: ObservableObject {
                 if let m = try? await api.mode() { mode = m }
             }
             if let api, state == .running {
-                await sampleTraffic(api, elapsed: Date().timeIntervalSince(last))
-                last = Date()
+                await sampleTraffic(api)
+                if Date().timeIntervalSince(lastStatsPoll) >= 1 {
+                    await sampleStats(api)
+                    lastStatsPoll = Date()
+                }
                 if connectionsSupported {
                     do {
                         let fresh = try await api.connections()

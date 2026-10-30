@@ -29,7 +29,10 @@ struct ActivityView: View {
                         }
                     }
                 }.entrance(2)
+                TrafficStatsView().entrance(3)
             }
+            .frame(maxWidth: DS.maxContentWidth)
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .paneHeader { PaneHeader(title: "活动", subtitle: Pane.activity.subtitle) }
