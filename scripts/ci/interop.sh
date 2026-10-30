@@ -21,6 +21,7 @@ wrong_pub=$(xray x25519 | awk -F': ' '/Public ?[Kk]ey/{print $2}')
 reality="\"security\":\"reality\",\"realitySettings\":{\"dest\":\"www.apple.com:443\",\"serverNames\":[\"www.apple.com\"],\"privateKey\":\"$reality_priv\",\"shortIds\":[\"0123abcd\"]}"
 ws='"network":"ws","wsSettings":{"path":"/ray"}'
 grpc='"network":"grpc","grpcSettings":{"serviceName":"gun"}'
+# Xray 26.10+ blocks private destinations by default; the full-cone check uses loopback.
 cat > "$work/xray.json" <<EOF
 {"log":{"loglevel":"warning"},
 "inbounds":[
@@ -34,7 +35,7 @@ cat > "$work/xray.json" <<EOF
  {"listen":"127.0.0.1","port":19008,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{"network":"tcp",$reality}},
  {"listen":"127.0.0.1","port":19009,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp",$reality}},
  {"listen":"127.0.0.1","port":19010,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp",$tls}}],
-"outbounds":[{"protocol":"freedom"}]}
+"outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow","ip":["127.0.0.0/8"]}]}}]}
 EOF
 cat > "$work/hy.yaml" <<EOF
 listen: 127.0.0.1:19443

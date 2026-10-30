@@ -1,6 +1,6 @@
 """Full-cone check through SOCKS5 UDP ASSOCIATE: one association, two remote ports.
 
-Usage: udp_fullcone_check.py <socks-port>. Runs two UDP servers A and B on this machine. A packet to A
+Usage: udp_fullcone_check.py <socks-port>. Runs two local UDP servers A and B. A packet to A
 is answered by A and also by B (a source the client never sent to); a packet to B is
 answered by B. A full-cone proxy delivers all three replies on the one association, each
 with its real source address in the SOCKS header. Exits non-zero otherwise.
@@ -11,14 +11,10 @@ import sys
 import threading
 
 proxy_port = int(sys.argv[1])
-# The machine's own non-loopback address: newer Xray servers drop UDP to loopback.
-probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-probe.connect(("8.8.8.8", 53))
-host = probe.getsockname()[0]
 a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-a.bind((host, 0))
-b.bind((host, 0))
+a.bind(("127.0.0.1", 0))
+b.bind(("127.0.0.1", 0))
 pa, pb = a.getsockname()[1], b.getsockname()[1]
 
 
@@ -50,7 +46,7 @@ u.settimeout(3)
 
 
 def send(port, data):
-    u.sendto(b"\0\0\0\x01" + socket.inet_aton(host) + struct.pack(">H", port) + data, relay)
+    u.sendto(b"\0\0\0\x01" + socket.inet_aton("127.0.0.1") + struct.pack(">H", port) + data, relay)
 
 
 def collect(want):
