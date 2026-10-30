@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 
 struct LogLine: Identifiable {
     let id: Int
@@ -101,8 +102,10 @@ final class Core: ObservableObject {
     }
 
     private var process: Process?
-    /// Root core started through the admin prompt (enhanced mode); followed via its log file.
+    /// Root core (enhanced mode), started by the helper or the admin prompt; followed via its log file.
     private var rootPID: Int32?
+    private var rootViaHelper = false
+    private var rootLog = Core.logDir.appendingPathComponent("core.log").path
     private var logOffset: UInt64 = 0
     private var stopping = false
     private var pollTask: Task<Void, Never>?
@@ -229,16 +232,37 @@ final class Core: ObservableObject {
         pollTask = Task { await self.poll() }
     }
 
-    /// Enhanced mode needs root: launch the core detached via the admin prompt and follow
-    /// its log file. Its PID is written next to the log so Stop can signal it.
+    /// Enhanced mode needs root: the privileged helper runs the core (docs/helper.md); if it
+    /// can't be used, launch it detached via the admin prompt. Either way its log file is followed.
     private func startPrivileged(_ binary: URL) {
+        state = .starting
+        stopping = false
+        logOffset = 0
+        Task {
+            switch HelperClient.prepare() {
+            case .ready:
+                do {
+                    let (pid, log) = try await HelperClient.start(config: configPath)
+                    rootStarted(pid: pid, log: log, viaHelper: true)
+                    return
+                } catch {
+                    appendLog(level: "APP", message: "helper failed (\(error.localizedDescription)); using the administrator prompt")
+                }
+            case .needsApproval:
+                appendLog(level: "APP", message: "allow Sluice in System Settings › Login Items & Extensions to skip the administrator prompt next time")
+                SMAppService.openSystemSettingsLoginItems()
+            case .unavailable(let why):
+                appendLog(level: "APP", message: "helper unavailable (\(why)); using the administrator prompt")
+            }
+            startWithAdminPrompt(binary)
+        }
+    }
+
+    private func startWithAdminPrompt(_ binary: URL) {
         try? FileManager.default.createDirectory(at: Core.logDir, withIntermediateDirectories: true)
         let log = Core.logDir.appendingPathComponent("core.log").path
         let pidFile = Core.logDir.appendingPathComponent("core.pid").path
         try? "".write(toFile: log, atomically: true, encoding: .utf8)
-        logOffset = 0
-        state = .starting
-        stopping = false
         appendLog(level: "APP", message: "asking for administrator access to start enhanced mode")
         Task {
             do {
@@ -248,20 +272,34 @@ final class Core: ObservableObject {
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") else {
                     throw APIError(message: "the core didn't report a PID")
                 }
-                rootPID = pid
-                privileged = true
-                appendLog(level: "APP", message: "started core as root (pid \(pid)) with \(configPath)")
-                pollTask = Task { await self.poll() }
+                rootStarted(pid: pid, log: log, viaHelper: false)
             } catch {
                 state = .failed("Couldn't start enhanced mode: \(error.localizedDescription)")
             }
         }
     }
 
+    private func rootStarted(pid: Int32, log: String, viaHelper: Bool) {
+        rootPID = pid
+        rootLog = log
+        rootViaHelper = viaHelper
+        privileged = true
+        appendLog(level: "APP", message: "started core as root (pid \(pid)\(viaHelper ? ", via helper" : "")) with \(configPath)")
+        pollTask = Task { await self.poll() }
+    }
+
+    /// Asks whoever started the root core to stop it.
+    private static func stopRoot(pid: Int32, viaHelper: Bool) async throws {
+        if viaHelper {
+            try await HelperClient.stop()
+        } else {
+            _ = try await Privileged.run("kill -INT \(pid)")
+        }
+    }
+
     /// Reads whatever the root core appended to its log since last time.
     private func followLog() {
-        let path = Core.logDir.appendingPathComponent("core.log").path
-        guard let h = FileHandle(forReadingAtPath: path) else { return }
+        guard let h = FileHandle(forReadingAtPath: rootLog) else { return }
         defer { try? h.close() }
         try? h.seek(toOffset: logOffset)
         let data = h.readDataToEndOfFile()
@@ -279,7 +317,7 @@ final class Core: ObservableObject {
             stopping = true
             Task {
                 do {
-                    _ = try await Privileged.run("kill -INT \(pid)")
+                    try await Core.stopRoot(pid: pid, viaHelper: rootViaHelper)
                 } catch {
                     stopping = false
                     lastActionError = "停止失败：\(error.localizedDescription)"
@@ -310,10 +348,11 @@ final class Core: ObservableObject {
     /// Synchronous stop used when the app quits, so the child never outlives it.
     func stopForQuit() {
         if let pid = rootPID {
-            // Best effort: one more admin prompt so the root core doesn't outlive the app.
+            // The helper also stops it once the app exits; the admin prompt path needs one more prompt.
             let sema = DispatchSemaphore(value: 0)
+            let viaHelper = rootViaHelper
             Task.detached {
-                _ = try? await Privileged.run("kill -INT \(pid)")
+                try? await Core.stopRoot(pid: pid, viaHelper: viaHelper)
                 sema.signal()
             }
             _ = sema.wait(timeout: .now() + 60)

@@ -38,8 +38,11 @@ bin=apps/macos/${bin#"$PWD/apps/macos/"}
 
 app=dist/Sluice.app
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks" "$app/Contents/Library/LaunchDaemons"
 cp "$bin/SluiceApp" "$app/Contents/MacOS/Sluice"
+# Privileged helper for enhanced mode, registered by the app with SMAppService (docs/helper.md).
+cp "$bin/SluiceHelper" "$app/Contents/MacOS/SluiceHelper"
+cp apps/macos/Helper/dev.sluice.Sluice.helper.plist "$app/Contents/Library/LaunchDaemons/"
 ditto "$bin/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 cp "$core" "$app/Contents/Resources/sluice"
 cp apps/macos/Icon/Sluice.icns "$app/Contents/Resources/Sluice.icns"
@@ -79,6 +82,7 @@ codesign "${opts[@]}" "$sparkle/Autoupdate"
 codesign "${opts[@]}" "$sparkle/Updater.app"
 codesign "${opts[@]}" "$app/Contents/Frameworks/Sparkle.framework"
 codesign "${opts[@]}" --entitlements apps/macos/Entitlements/core.entitlements "$app/Contents/Resources/sluice"
+codesign "${opts[@]}" --identifier dev.sluice.Sluice.helper "$app/Contents/MacOS/SluiceHelper"
 codesign "${opts[@]}" --entitlements apps/macos/Entitlements/Sluice.entitlements "$app"
 codesign --verify --deep --strict "$app"
 echo "built $app ($version, build $build, signed by ${identity/#-/ad-hoc})"

@@ -69,6 +69,25 @@ jobs:
           name: tun-logs
           path: ci-logs
 
+  helper:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sluice
+          path: target/release
+      - run: chmod +x target/release/sluice
+      - run: cd apps/macos && swift build -c release --product SluiceHelper
+      - run: bash scripts/ci/helper.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helper-logs
+          path: ci-logs
+
   rules:
     needs: build
     runs-on: macos-15

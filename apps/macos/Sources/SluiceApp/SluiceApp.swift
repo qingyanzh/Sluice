@@ -27,6 +27,12 @@ struct SluiceApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var core = Core()
 
+    init() {
+        // `Sluice --helper status|register|unregister|hello` manages the helper without the UI.
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--helper") { exit(HelperClient.command(args.count > i + 1 ? args[i + 1] : "")) }
+    }
+
     var body: some Scene {
         Window("Sluice", id: "main") {
             MainView()
