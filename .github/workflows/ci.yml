@@ -5,10 +5,20 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: macOS runner image (overrides the CI_RUNNER repository variable)
+        type: choice
+        options:
+          - macos-15
+          - macos-14
+          - macos-15-intel
+          - macos-13
+        default: macos-15
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,7 +32,7 @@ jobs:
 
   e2e:
     needs: build
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'macos-15' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +79,7 @@ jobs:
 
   interop:
     needs: build
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'macos-15' }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +108,7 @@ jobs:
 
   tun:
     needs: build
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'macos-15' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -117,10 +127,10 @@ jobs:
           name: tun-logs
           path: ci-logs
 
-  helper:
+  misc:
     needs: build
-    runs-on: macos-15
-    timeout-minutes: 20
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'macos-15' }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -128,52 +138,26 @@ jobs:
           name: sluice
           path: target/release
       - run: chmod +x target/release/sluice
-      - run: cd apps/macos && swift build -c release --product SluiceHelper
-      - run: bash scripts/ci/helper.sh
+      - name: Rules checks
+        run: bash scripts/ci/rules.sh
+      - name: MITM checks
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/mitm.sh
+      - name: Build helper
+        id: helper-build
+        if: ${{ !cancelled() }}
+        run: cd apps/macos && swift build -c release --product SluiceHelper
+      - name: Helper checks
+        if: ${{ !cancelled() && steps.helper-build.outcome == 'success' }}
+        run: bash scripts/ci/helper.sh
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: helper-logs
-          path: ci-logs
-
-  rules:
-    needs: build
-    runs-on: macos-15
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: sluice
-          path: target/release
-      - run: chmod +x target/release/sluice
-      - run: bash scripts/ci/rules.sh
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rules-logs
-          path: ci-logs
-
-  mitm:
-    needs: build
-    runs-on: macos-15
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: sluice
-          path: target/release
-      - run: chmod +x target/release/sluice
-      - run: bash scripts/ci/mitm.sh
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mitm-logs
+          name: misc-logs
           path: ci-logs
 
   subscription:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'macos-15' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
