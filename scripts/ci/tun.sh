@@ -63,6 +63,14 @@ cat > "$work/tun-proxy.conf" <<'EOF'
 loglevel = debug
 enhanced-mode = true
 api-listen = 127.0.0.1:6170
+encrypted-dns-server = https://1.1.1.1/dns-query, tls://8.8.8.8
+# DoH and DoT go through the SS node here.
+encrypted-dns-follow-outbound-mode = true
+[Host]
+sluice-static.test = 10.9.8.7
+example.net = server:https://1.1.1.1/dns-query
+iana.org = server:tls://8.8.8.8
+wikipedia.org = server:quic://dns.adguard-dns.com
 [Proxy]
 SS = ss, 127.0.0.1, 18388, encrypt-method=aes-256-gcm, password=ss
 [Rule]
@@ -87,6 +95,8 @@ run_case() {
     repair_if_offline
     echo "-- sluice log"
     grep -vE "^\[.*INFO \] [0-9a-z.:\[\]-]+ -> |DEBUG" "ci-logs/tun-$name.log" | tail -20
+    echo "-- DNS upstreams"
+    grep -E "DEBUG.*DNS .* (answered by|via) " "ci-logs/tun-$name.log" | grep -E "https://|tls://|quic://" | tail -12
     echo "-- UDP debug"
     grep -E "DEBUG.*UDP" "ci-logs/tun-$name.log" | grep -vE "apple-dns|icloud" | tail -12
     echo "   ($(grep -c ' -> ' "ci-logs/tun-$name.log") connections logged; $(grep -c 'via SS' "ci-logs/tun-$name.log") via SS)"

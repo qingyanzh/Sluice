@@ -8,6 +8,8 @@
 //!   GET  /v1/mode                           outbound mode: rule, direct or global
 //!   POST /v1/mode?set=<mode>                switch the outbound mode
 //!   GET  /v1/traffic                        total bytes up/down and open connections
+//!   GET  /v1/dns                            cached DNS answers with their remaining TTL
+//!   POST /v1/dns/flush                      empty the DNS cache
 
 use std::sync::Arc;
 
@@ -124,6 +126,23 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
             let (up, down, active) = crate::stats::snapshot();
             ("200 OK", format!("{{\"up\":{up},\"down\":{down},\"active\":{active}}}"))
         }
+        ("GET", "/v1/dns") => {
+            let items: Vec<String> = crate::dns::cached_answers()
+                .iter()
+                .map(|e| {
+                    let ips: Vec<String> = e.ips.iter().map(|ip| json_str(&ip.to_string())).collect();
+                    format!(
+                        "{{\"name\":{},\"type\":{},\"ttl\":{},\"answers\":[{}]}}",
+                        json_str(&e.name),
+                        json_str(&e.qtype),
+                        e.ttl_left,
+                        ips.join(",")
+                    )
+                })
+                .collect();
+            ("200 OK", format!("{{\"entries\":[{}]}}", items.join(",")))
+        }
+        ("POST", "/v1/dns/flush") => ("200 OK", format!("{{\"flushed\":{}}}", crate::dns::flush_cache())),
         ("POST", "/v1/reload") => match reloader.reload("API").await {
             Ok(summary) => ("200 OK", format!("{{\"reloaded\":true,\"summary\":{}}}", json_str(&summary))),
             Err(e) => ("400 Bad Request", format!("{{\"error\":{}}}", json_str(&format!("{e:#}")))),

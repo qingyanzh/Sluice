@@ -132,13 +132,16 @@ pub async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    match EGRESS.get() {
-        Some(e) if !e.dns.is_empty() => {
-            let ips = crate::dns::resolve_a(host, &e.dns).await?;
-            Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect())
-        }
-        _ => Ok(tokio::net::lookup_host((host, port)).await?.collect()),
+    if crate::dns::active() || !egress_dns().is_empty() {
+        let ips = crate::dns::resolver().lookup_v4(host).await?;
+        return Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect());
     }
+    Ok(tokio::net::lookup_host((host, port)).await?.collect())
+}
+
+/// The real (pre-TUN) DNS servers, when enhanced mode has set them.
+pub fn egress_dns() -> Vec<SocketAddr> {
+    EGRESS.get().map(|e| e.dns.clone()).unwrap_or_default()
 }
 
 pub async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {

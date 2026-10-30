@@ -61,7 +61,7 @@ async fn handle_tcp(mut tcp: IpStackTcpStream, router: Arc<Router>, fake: Arc<Fa
 async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<FakeDns>) -> Result<()> {
     let dst = udp.peer_addr();
     let mut buf = vec![0u8; 65535];
-    if dst.port() == 53 {
+    if fake.hijacks(dst) {
         loop {
             let n = udp.read(&mut buf).await?;
             if n == 0 {
