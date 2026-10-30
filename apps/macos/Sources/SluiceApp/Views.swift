@@ -95,7 +95,7 @@ struct Sidebar: View {
                     ForEach(Pane.sections, id: \.1) { title, panes in
                         VStack(alignment: .leading, spacing: 2) {
                             if let title {
-                                Text(title).font(DS.caption).foregroundStyle(.tertiary)
+                                Text(title).font(DS.caption).foregroundStyle(DS.ink3)
                                     .padding(.leading, 12).padding(.bottom, 4)
                             }
                             ForEach(panes) { row($0) }
@@ -123,7 +123,7 @@ struct Sidebar: View {
                 Text(p.title).font(.system(size: 13, weight: on ? .semibold : .medium))
                 Spacer()
             }
-            .foregroundStyle(on ? Color.primary : Color.secondary)
+            .foregroundStyle(on ? Color.primary : DS.ink2)
             .padding(.leading, 6).padding(.trailing, 12).frame(height: 32)
             .background {
                 if on {
@@ -262,15 +262,15 @@ struct IconTile: View {
     var size: CGFloat = 30
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-            .fill(on ? AnyShapeStyle(Color.accentColor.gradient) : AnyShapeStyle(Color.primary.opacity(0.06)))
+            .fill(on ? AnyShapeStyle(DS.accent.gradient) : AnyShapeStyle(Color.primary.opacity(0.075)))
             .overlay(RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
                 .strokeBorder(Color.white.opacity(on ? 0.25 : 0), lineWidth: 0.5))
-            .shadow(color: Color.accentColor.opacity(on ? 0.30 : 0), radius: 3, y: 1)
+            .shadow(color: DS.accent.opacity(on ? 0.30 : 0), radius: 3, y: 1)
             .overlay {
                 Image(systemName: symbol)
                     .symbolVariant(on ? .fill : .none)
                     .font(.system(size: size * 0.5, weight: .medium))
-                    .foregroundStyle(on ? Color.white : Color.secondary)
+                    .foregroundStyle(on ? Color.white : Color.primary.opacity(0.72))
                     .contentTransition(.symbolEffect(.replace))
             }
             .frame(width: size, height: size)
@@ -337,11 +337,11 @@ struct StatusFooter: View {
                 Text("Sluice").font(DS.label.weight(.semibold))
                 HStack(spacing: 4) {
                     StatusDot(state: core.state)
-                    Text(core.privileged ? "\(core.state.label) · root" : core.state.label).font(DS.caption).foregroundStyle(.secondary)
+                    Text(core.privileged ? "\(core.state.label) · root" : core.state.label).font(DS.caption).foregroundStyle(DS.ink2)
                 }
             }
             Spacer()
-            StartStopButton(compact: true).buttonStyle(.borderless).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
+            StartStopButton(compact: true).buttonStyle(.borderless).font(.system(size: 13, weight: .medium)).foregroundStyle(DS.ink2)
         }
         .padding(8)
         .liquidGlass(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -410,6 +410,18 @@ enum DS {
     static let radius: CGFloat = 14
     static let smallRadius: CGFloat = 10
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.82)
+    /// Entrance: cards rise into place one after another.
+    static let entrance = Animation.spring(response: 0.5, dampingFraction: 0.86)
+
+    /// Brand accent, the blue-violet of the app icon. The only colour that means "active".
+    static let accent = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua]) == .darkAqua
+            ? NSColor(red: 0.42, green: 0.52, blue: 1.0, alpha: 1)
+            : NSColor(red: 0.24, green: 0.36, blue: 0.98, alpha: 1)
+    })
+    /// Text inks, darker than the system secondary/tertiary so supporting text stays legible.
+    static let ink2 = Color.primary.opacity(0.66)
+    static let ink3 = Color.primary.opacity(0.46)
 
     static let page = Color(nsColor: NSColor(name: nil) { a in
         a.bestMatch(from: [.darkAqua]) == .darkAqua
@@ -423,13 +435,13 @@ enum DS {
     })
 
     /// Type scale: one face (SF Pro) at a few fixed steps; rounded only for figures.
-    static let title = Font.system(size: 24, weight: .semibold)
+    static let title = Font.system(size: 26, weight: .bold)
     static let display = Font.system(size: 22, weight: .semibold)
     static let heading = Font.system(size: 14, weight: .semibold)
     static let label = Font.system(size: 13)
     static let small = Font.system(size: 12)
-    static let caption = Font.system(size: 11, weight: .medium)
-    static func figure(_ size: CGFloat) -> Font { .system(size: size, weight: .medium).monospacedDigit() }
+    static let caption = Font.system(size: 11, weight: .semibold)
+    static func figure(_ size: CGFloat) -> Font { .system(size: size, weight: .semibold).monospacedDigit() }
 }
 
 /// Solid page colour: a quiet off-white in light mode, deep graphite in dark mode.
@@ -443,10 +455,10 @@ struct SearchField: View {
     @Binding var text: String
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            Image(systemName: "magnifyingglass").foregroundStyle(DS.ink2)
             TextField(prompt, text: $text).textFieldStyle(.plain)
             if !text.isEmpty {
-                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(DS.ink3) }
                     .buttonStyle(.plain)
             }
         }
@@ -473,7 +485,7 @@ struct GlassSegmented<T: Hashable>: View {
                         Text(title)
                     }
                     .font(.system(size: 13, weight: on ? .semibold : .medium))
-                    .foregroundStyle(on ? Color.primary : Color.secondary)
+                    .foregroundStyle(on ? Color.primary : DS.ink2)
                     .frame(maxWidth: .infinity).padding(.vertical, 7)
                     .background {
                         if on {
@@ -505,10 +517,10 @@ extension View {
     func glass(radius: CGFloat = DS.radius, highlighted: Bool = false) -> some View {
         background(DS.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(highlighted ? Color.accentColor.opacity(0.8) : Color.primary.opacity(0.07),
+                .strokeBorder(highlighted ? DS.accent.opacity(0.8) : Color.primary.opacity(0.09),
                               lineWidth: highlighted ? 1.5 : 0.5))
             .shadow(color: .black.opacity(0.05), radius: 1, y: 0.5)
-            .shadow(color: .black.opacity(0.05), radius: 10, y: 4)
+            .shadow(color: .black.opacity(0.06), radius: 12, y: 5)
     }
 
     /// Liquid Glass for the control layer (macOS 26+), frosted material before that.
@@ -536,6 +548,7 @@ extension View {
         scrollContentBackground(.hidden)
             .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
             .glass()
+            .entrance(0)
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
     }
 }
@@ -545,7 +558,7 @@ extension View {
 struct FlowMark: View {
     var vertical = true
     var body: some View {
-        Capsule().fill(Color.accentColor.gradient)
+        Capsule().fill(DS.accent.gradient)
             .frame(width: vertical ? 3 : 16, height: vertical ? 14 : 3)
     }
 }
@@ -569,8 +582,8 @@ struct PrimaryCapsuleStyle: ButtonStyle {
             .lineLimit(1).fixedSize()
             .foregroundStyle(.white)
             .padding(.horizontal, 12).padding(.vertical, 4)
-            .background(Color.accentColor.opacity(enabled ? 1 : 0.4), in: Capsule())
-            .shadow(color: Color.accentColor.opacity(0.25), radius: 4, y: 1)
+            .background(DS.accent.opacity(enabled ? 1 : 0.4), in: Capsule())
+            .shadow(color: DS.accent.opacity(0.25), radius: 4, y: 1)
             .opacity(configuration.isPressed ? 0.8 : 1)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(DS.spring, value: configuration.isPressed)
@@ -586,7 +599,7 @@ struct PaneHeader<Trailing: View>: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(DS.title).tracking(-0.3)
-                if let subtitle { Text(subtitle).font(DS.small).foregroundStyle(.secondary) }
+                if let subtitle { Text(subtitle).font(DS.small).foregroundStyle(DS.ink2) }
             }
             Spacer()
             HStack(spacing: 8) { trailing }.glassButton()
@@ -621,6 +634,24 @@ extension View {
     func hoverLift() -> some View { modifier(HoverLift()) }
 }
 
+/// Content rises into place when a pane opens, each piece a beat after the last.
+struct Entrance: ViewModifier {
+    let index: Int
+    @State private var shown = false
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            .offset(y: shown ? 0 : 14)
+            .scaleEffect(shown ? 1 : 0.985, anchor: .top)
+            .blur(radius: shown ? 0 : 4)
+            .onAppear { withAnimation(DS.entrance.delay(Double(min(index, 12)) * 0.045)) { shown = true } }
+    }
+}
+
+extension View {
+    func entrance(_ index: Int) -> some View { modifier(Entrance(index: index)) }
+}
+
 /// Clickable tiles rise slightly under the pointer.
 struct HoverLift: ViewModifier {
     @State private var hovering = false
@@ -639,9 +670,9 @@ struct CardTitle: View {
     let icon: String
     var body: some View {
         Label {
-            Text(text).font(DS.caption).foregroundStyle(.secondary)
+            Text(text).font(DS.caption).foregroundStyle(DS.ink2)
         } icon: {
-            Image(systemName: icon).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+            Image(systemName: icon).font(.system(size: 11, weight: .medium)).foregroundStyle(DS.ink3)
         }
         .labelStyle(BadgeLabelStyle())
     }
@@ -658,7 +689,7 @@ struct SectionTitle: View {
     let text: String
     var color: Color = .secondary
     var body: some View {
-        Text(text).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+        Text(text).font(.system(size: 13, weight: .semibold)).foregroundStyle(DS.ink2)
             .padding(.top, 10).padding(.leading, 2)
     }
 }
@@ -672,7 +703,7 @@ struct BigNumber: View {
                 .fixedSize()
                 .contentTransition(.numericText())
                 .animation(.smooth(duration: 0.4), value: value)
-            if !unit.isEmpty { Text(unit).font(DS.label).foregroundStyle(.secondary).fixedSize() }
+            if !unit.isEmpty { Text(unit).font(DS.label).foregroundStyle(DS.ink2).fixedSize() }
         }
     }
 }
@@ -699,7 +730,7 @@ struct ActivityView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.gap) {
-                hero
+                hero.entrance(0)
                 HStack(alignment: .top, spacing: DS.gap) {
                     TrafficCard(up: core.upRate, down: core.downRate, history: core.rateHistory)
                         .frame(maxWidth: .infinity)
@@ -707,10 +738,12 @@ struct ActivityView: View {
                     connectionsCard.frame(width: 260)
                 }
                 .fixedSize(horizontal: false, vertical: true)
+                .entrance(1)
                 HStack(alignment: .top, spacing: DS.gap) {
                     totalCard.frame(maxWidth: .infinity)
                     topCard.frame(maxWidth: .infinity)
                 }
+                .entrance(2)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -768,7 +801,7 @@ struct ActivityView: View {
         HStack(spacing: 9) {
             IconTile(symbol: icon, on: accent, size: 28)
             VStack(alignment: .leading, spacing: 1) {
-                Text(label).font(DS.caption).foregroundStyle(.secondary)
+                Text(label).font(DS.caption).foregroundStyle(DS.ink2)
                 Text(value).font(DS.heading)
                     .lineLimit(1).truncationMode(.middle)
                     .contentTransition(.opacity).animation(DS.spring, value: value)
@@ -801,7 +834,7 @@ struct ActivityView: View {
             Text(value).font(DS.figure(18))
                 .contentTransition(.numericText())
                 .animation(.smooth, value: value)
-            Text(label).font(DS.small).foregroundStyle(.secondary)
+            Text(label).font(DS.small).foregroundStyle(DS.ink2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -814,12 +847,12 @@ struct ActivityView: View {
             BigNumber(value: n, unit: u)
             HStack {
                 VStack(alignment: .leading) {
-                    Text("上传").font(DS.caption).foregroundStyle(.secondary)
+                    Text("上传").font(DS.caption).foregroundStyle(DS.ink2)
                     Text(formatBytes(up)).font(DS.label.monospacedDigit())
                 }
                 Spacer()
                 VStack(alignment: .trailing) {
-                    Text("下载").font(DS.caption).foregroundStyle(.secondary)
+                    Text("下载").font(DS.caption).foregroundStyle(DS.ink2)
                     Text(formatBytes(down)).font(DS.label.monospacedDigit())
                 }
             }
@@ -827,7 +860,7 @@ struct ActivityView: View {
                 let total = max(up + down, 1)
                 HStack(spacing: 3) {
                     Capsule().fill(Color.primary.opacity(0.15)).frame(width: max(4, (geo.size.width - 3) * up / total))
-                    Capsule().fill(Color.accentColor)
+                    Capsule().fill(DS.accent)
                 }
             }
             .frame(height: 8)
@@ -847,18 +880,18 @@ struct ActivityView: View {
             HStack {
                 CardTitle(text: "请求排行", icon: "list.bullet")
                 Spacer()
-                Button("查看全部") { pane = .requests }.buttonStyle(.link).font(DS.small)
+                Button("查看全部") { pane = .requests }.buttonStyle(.link).font(DS.small.weight(.medium)).tint(DS.accent)
             }
             GlassSegmented(options: [(0, "域名", nil), (1, "策略", nil)], selection: $topBy)
             if top.isEmpty {
-                Text("还没有请求").foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 120)
+                Text("还没有请求").foregroundStyle(DS.ink2).frame(maxWidth: .infinity, minHeight: 120)
             }
             ForEach(Array(top), id: \.key) { name, count in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(name).lineLimit(1).truncationMode(.middle)
                         Spacer()
-                        Text("\(count)").monospacedDigit().foregroundStyle(.secondary)
+                        Text("\(count)").monospacedDigit().foregroundStyle(DS.ink2)
                     }
                     GeometryReader { geo in
                         Capsule().fill(Color.primary.opacity(0.14))
@@ -888,10 +921,10 @@ struct TrafficCard: View {
             HStack {
                 CardTitle(text: "实时流量", icon: "waveform.path")
                 Spacer()
-                Text("峰值 \(formatBytes(peak))/s").font(DS.caption).foregroundStyle(.tertiary)
+                Text("峰值 \(formatBytes(peak))/s").font(DS.caption).foregroundStyle(DS.ink3)
             }
             HStack(alignment: .firstTextBaseline, spacing: 28) {
-                figure("下载", down, color: .accentColor, symbol: "arrow.down")
+                figure("下载", down, color: DS.accent, symbol: "arrow.down")
                 figure("上传", up, color: .secondary, symbol: "arrow.up")
                 Spacer()
             }
@@ -899,10 +932,10 @@ struct TrafficCard: View {
                 ForEach(Array(history.enumerated()), id: \.offset) { n, v in
                     let i = 60 - history.count + n
                     AreaMark(x: .value("t", i), y: .value("rate", v.down), series: .value("s", "down"))
-                        .foregroundStyle(LinearGradient(colors: [Color.accentColor.opacity(0.22), Color.accentColor.opacity(0.0)], startPoint: .top, endPoint: .bottom))
+                        .foregroundStyle(LinearGradient(colors: [DS.accent.opacity(0.22), DS.accent.opacity(0.0)], startPoint: .top, endPoint: .bottom))
                         .interpolationMethod(.monotone)
                     LineMark(x: .value("t", i), y: .value("rate", v.down), series: .value("s", "down"))
-                        .foregroundStyle(Color.accentColor).lineStyle(StrokeStyle(lineWidth: 2))
+                        .foregroundStyle(DS.accent).lineStyle(StrokeStyle(lineWidth: 2))
                         .interpolationMethod(.monotone)
                     LineMark(x: .value("t", i), y: .value("rate", v.up), series: .value("s", "up"))
                         .foregroundStyle(Color.secondary.opacity(0.7)).lineStyle(StrokeStyle(lineWidth: 1.5))
@@ -923,7 +956,7 @@ struct TrafficCard: View {
         let (n, u) = splitRate(rate)
         return VStack(alignment: .leading, spacing: 2) {
             Label {
-                Text(label).font(DS.caption).foregroundStyle(.secondary)
+                Text(label).font(DS.caption).foregroundStyle(DS.ink2)
             } icon: {
                 Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(color)
             }
@@ -968,7 +1001,7 @@ struct OverviewView: View {
                                 status: core.privileged ? "增强模式已激活" : core.summary.enhancedMode ? "已启用，启动后生效" : "已禁用",
                                 statusOn: core.privileged)
                         .disabled(enhancedBusy)
-                }
+                }.entrance(0)
                 SectionTitle(text: "代理服务")
                 LazyVGrid(columns: columns, spacing: DS.gap) {
                     FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
@@ -980,7 +1013,7 @@ struct OverviewView: View {
                                 detail: "本应用通过控制 API 切换策略、读取流量和测试规则。",
                                 status: core.summary.apiPort.map { "127.0.0.1:\($0)" } ?? "未配置（应用需要它）",
                                 statusOn: core.state == .running && core.summary.apiPort != nil)
-                }
+                }.entrance(1)
                 SectionTitle(text: "通用")
                 LazyVGrid(columns: columns, spacing: DS.gap) {
                     FeatureCard(icon: "power", title: "打开应用时启动",
@@ -988,7 +1021,7 @@ struct OverviewView: View {
                                 isOn: $core.autoStart,
                                 status: core.autoStart ? "已启用" : "已禁用", statusOn: core.autoStart)
                     LoginItemCard()
-                }
+                }.entrance(2)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -1010,9 +1043,9 @@ struct FeatureCard: View {
                 IconTile(symbol: icon, on: statusOn, size: 30)
                 Text(title).font(DS.heading)
                 Spacer()
-                if let isOn { Toggle("", isOn: isOn).toggleStyle(.switch).labelsHidden().controlSize(.small) }
+                if let isOn { Toggle("", isOn: isOn).toggleStyle(.switch).labelsHidden().controlSize(.small).tint(DS.accent) }
             }
-            Text(detail).font(DS.small).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(detail).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
             StatusBadge(text: status, tone: statusOn ? .green : .secondary)
         }
@@ -1055,7 +1088,7 @@ struct PolicyView: View {
                 GlassSegmented(options: OutboundMode.allCases.map { ($0, $0.title, $0.icon) },
                                selection: Binding(get: { mode }, set: { core.setMode($0.rawValue) }))
                 .disabled(core.state != .running)
-                Text(mode.explanation).font(DS.small).foregroundStyle(.secondary)
+                Text(mode.explanation).font(DS.small).foregroundStyle(DS.ink2)
 
                 HStack {
                     SectionTitle(text: "策略组")
@@ -1072,7 +1105,7 @@ struct PolicyView: View {
                         .frame(minHeight: 260)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: DS.gap)], spacing: 10) {
-                        ForEach(core.groups) { GroupCard(group: $0) }
+                        ForEach(Array(core.groups.enumerated()), id: \.element.id) { i, g in GroupCard(group: g).entrance(i) }
                     }
                 }
             }
@@ -1116,7 +1149,7 @@ struct GroupCard: View {
                     IconTile(symbol: kindIcon, on: showing, size: 28)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(group.group).font(DS.heading).lineLimit(1)
-                        Text(kindLabel).font(DS.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text(kindLabel).font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 10)
@@ -1149,7 +1182,7 @@ struct GroupOptions: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(g.group).font(DS.heading)
-                Text(g.type).font(DS.small).foregroundStyle(.secondary)
+                Text(g.type).font(DS.small).foregroundStyle(DS.ink2)
                 Spacer()
                 Button("测试") { core.test(group: g.group) }.glassButton().controlSize(.small).disabled(g.isSelectable)
             }
@@ -1178,7 +1211,7 @@ struct OptionRow: View {
         } label: {
             HStack {
                 Image(systemName: "checkmark").opacity(chosen ? 1 : 0).scaleEffect(chosen ? 1 : 0.5)
-                    .foregroundStyle(Color.accentColor).frame(width: 14).animation(DS.spring, value: chosen)
+                    .foregroundStyle(DS.accent).frame(width: 14).animation(DS.spring, value: chosen)
                 Text(option.name)
                 Spacer()
                 LatencyBadge(latency: option.latencyMs)
@@ -1209,7 +1242,7 @@ struct NodesView: View {
             VStack(alignment: .leading, spacing: 10) {
                 SectionTitle(text: "代理 (\(proxies.count))")
                 LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(proxies, id: \.self) { NodeCard(line: $0) }
+                    ForEach(Array(proxies.enumerated()), id: \.element) { i, l in NodeCard(line: l).entrance(i) }
                     AddCard { showAddNode = true }.help("添加节点")
                 }
                 SectionTitle(text: "订阅 (\(subs.count))")
@@ -1249,14 +1282,14 @@ struct NodeCard: View {
                 IconTile(symbol: line.contains("policy-path=") ? "link" : "server.rack", size: 28)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(name).font(DS.heading).lineLimit(1)
-                    Text((parts.first ?? "").uppercased()).font(DS.caption).foregroundStyle(.secondary)
+                    Text((parts.first ?? "").uppercased()).font(DS.caption).foregroundStyle(DS.ink2)
                 }
             }
             Spacer(minLength: 10)
             HStack {
                 // Server and port only; credentials stay out of the list.
                 Text(parts.dropFirst().prefix(2).filter { !$0.contains("=") }.joined(separator: ":"))
-                    .font(.system(size: 11).monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .font(.system(size: 11).monospaced()).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if latency != nil {
                     LatencyBadge(latency: latency)
@@ -1275,7 +1308,7 @@ struct AddCard: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Image(systemName: "plus").font(.system(size: 18, weight: .light)).foregroundStyle(.secondary)
+            Image(systemName: "plus").font(.system(size: 18, weight: .light)).foregroundStyle(DS.ink2)
                 .frame(maxWidth: .infinity, minHeight: 102)
                 .overlay(RoundedRectangle(cornerRadius: DS.smallRadius + 2, style: .continuous).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(.separator))
                 .contentShape(Rectangle())
@@ -1296,7 +1329,7 @@ struct AddNodeSheet: View {
         VStack(alignment: .leading, spacing: DS.gap) {
             Text("添加节点").font(.system(size: 20, weight: .semibold))
             Text("粘贴分享链接（ss://、vmess://、vless://、trojan://、hysteria2://）或代理行，例如 `HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=…`。")
-                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
             TextField("分享链接或代理行", text: $input, axis: .vertical)
                 .lineLimit(3...6).textFieldStyle(.roundedBorder).font(.body.monospaced())
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
@@ -1335,7 +1368,7 @@ struct AddSubscriptionSheet: View {
                 TextField("URL", text: $url, prompt: Text("https://…"))
                 TextField("名称过滤（正则，可选）", text: $filter, prompt: Text("例如 香港|HK"))
             }
-            Text("保存配置前会先下载并检查节点。").font(DS.small).foregroundStyle(.secondary)
+            Text("保存配置前会先下载并检查节点。").font(DS.small).foregroundStyle(DS.ink2)
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
                 Spacer()
@@ -1390,11 +1423,11 @@ struct RequestsView: View {
                     }
                 }
                 .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
-                .glass()
+                .glass().entrance(0)
                 RequestDetail(connection: core.connections.first { $0.id == selection })
                     .frame(width: 280)
                     .frame(maxHeight: .infinity, alignment: .top)
-                    .glass()
+                    .glass().entrance(1)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -1405,7 +1438,7 @@ struct RequestsView: View {
 struct OutboundTag: View {
     let name: String
     var body: some View {
-        let color: Color = name == "REJECT" ? .red : name == "DIRECT" ? .secondary : .accentColor
+        let color: Color = name == "REJECT" ? .red : name == "DIRECT" ? .secondary : DS.accent
         StatusBadge(text: name, tone: color)
     }
 }
@@ -1425,17 +1458,18 @@ struct RequestRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(host).font(DS.label.weight(.medium)).lineLimit(1).truncationMode(.middle)
                     Text("\(connection.proto) · \(connection.policy) · \(connection.rule)")
-                        .font(DS.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                        .font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.tail)
                 }
                 Spacer(minLength: 8)
                 OutboundTag(name: connection.outbound)
-                Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(.tertiary)
-                    .frame(width: 70, alignment: .trailing)
+                Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
+                    .lineLimit(1).fixedSize()
+                    .frame(minWidth: 76, alignment: .trailing)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(selected ? Color.accentColor.opacity(0.09) : hovering ? Color.primary.opacity(0.04) : .clear)
+                    .fill(selected ? DS.accent.opacity(0.09) : hovering ? Color.primary.opacity(0.04) : .clear)
             }
             .overlay(alignment: .leading) { if selected { FlowMark().padding(.leading, 1) } }
             .contentShape(Rectangle())
@@ -1453,7 +1487,7 @@ struct Monogram: View {
         let core = parts.count >= 2 ? parts[parts.count - 2] : Substring(text)
         Text(String(core.prefix(1)).uppercased())
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(DS.ink2)
             .frame(width: 28, height: 28)
             .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
     }
@@ -1467,8 +1501,8 @@ struct EmptyState: View {
     var body: some View {
         VStack(spacing: 8) {
             IconTile(symbol: icon, size: 48).padding(.bottom, 4)
-            Text(title).font(DS.heading).foregroundStyle(.secondary)
-            if !detail.isEmpty { Text(detail).font(DS.small).foregroundStyle(.tertiary) }
+            Text(title).font(DS.heading).foregroundStyle(DS.ink2)
+            if !detail.isEmpty { Text(detail).font(DS.small).foregroundStyle(DS.ink3) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1486,7 +1520,7 @@ struct RequestDetail: View {
                         Monogram(text: host)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(host).font(DS.heading).lineLimit(2).textSelection(.enabled)
-                            Text("\(c.proto) · 端口 \(port)").font(DS.caption).foregroundStyle(.secondary)
+                            Text("\(c.proto) · 端口 \(port)").font(DS.caption).foregroundStyle(DS.ink2)
                         }
                     }
                     detailGroup("路由", [("规则", AnyView(Text(c.rule).textSelection(.enabled))),
@@ -1506,11 +1540,11 @@ struct RequestDetail: View {
 
     private func detailGroup(_ title: String, _ rows: [(String, AnyView)]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(DS.caption).foregroundStyle(.tertiary)
+            Text(title).font(DS.caption).foregroundStyle(DS.ink3)
             VStack(spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
                     HStack(alignment: .firstTextBaseline) {
-                        Text(row.0).font(DS.small).foregroundStyle(.secondary)
+                        Text(row.0).font(DS.small).foregroundStyle(DS.ink2)
                         Spacer(minLength: 12)
                         row.1.font(DS.small).lineLimit(2).multilineTextAlignment(.trailing)
                     }
@@ -1555,10 +1589,10 @@ struct RuleView: View {
                 LazyVStack(spacing: 0) {
                     ForEach(rows) { rule in
                         HStack(spacing: 12) {
-                            Text("\(rule.id)").font(DS.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                            Text("\(rule.id)").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
                                 .frame(width: 24, alignment: .trailing)
                             Text(rule.type.uppercased()).font(.system(size: 10, weight: .semibold).monospaced())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(DS.ink2)
                                 .padding(.horizontal, 7).padding(.vertical, 3)
                                 .background(Color.primary.opacity(0.05), in: Capsule())
                                 .frame(width: 150, alignment: .leading)
@@ -1566,7 +1600,7 @@ struct RuleView: View {
                                 .foregroundStyle(rule.value.isEmpty ? Color.secondary : Color.primary)
                                 .lineLimit(1).truncationMode(.middle)
                             if !rule.options.isEmpty {
-                                Text(rule.options).font(DS.caption).foregroundStyle(.tertiary)
+                                Text(rule.options).font(DS.caption).foregroundStyle(DS.ink3)
                             }
                             Spacer(minLength: 8)
                             OutboundTag(name: rule.policy)
@@ -1604,7 +1638,7 @@ struct RuleView: View {
             } else if let error {
                 Text(error).foregroundStyle(.red).font(DS.label)
             } else {
-                Text("查看目标会匹配哪条规则、使用哪个出站，不会真正建立连接。").font(DS.small).foregroundStyle(.secondary)
+                Text("查看目标会匹配哪条规则、使用哪个出站，不会真正建立连接。").font(DS.small).foregroundStyle(DS.ink2)
             }
         }
         .card()
@@ -1653,7 +1687,7 @@ struct LogsView: View {
             ScrollViewReader { proxy in
                 List(lines) { l in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(l.time).foregroundStyle(.secondary)
+                        Text(l.time).foregroundStyle(DS.ink2)
                         Text(l.level).font(.system(size: 9, weight: .bold)).foregroundStyle(color(l.level))
                             .padding(.horizontal, 5).padding(.vertical, 2)
                             .background(color(l.level).opacity(0.10), in: Capsule())
@@ -1675,7 +1709,7 @@ struct LogsView: View {
         switch level {
         case "ERROR": .red
         case "WARN": .orange
-        case "APP": .accentColor
+        case "APP": DS.accent
         default: .secondary
         }
     }

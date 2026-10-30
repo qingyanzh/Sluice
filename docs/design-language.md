@@ -15,7 +15,8 @@ these tokens and never set their own values.
 2. **Glass is for controls.** Liquid Glass (`glassEffect`, `.glass` buttons) is
    used only on things you operate: search, segmented controls, buttons and the
    floating status card. Content is never on glass.
-3. **One accent means "active".** The system accent colour appears only on
+3. **One accent means "active".** The brand blue-violet (`DS.accent`, taken
+   from the app icon) appears only on
    what is selected, primary or flowing: the selected sidebar item, the
    selected segment, the primary button and download traffic. Everything else
    is grey. Red is used only for rejects and errors. Green is used only for
@@ -38,17 +39,26 @@ these tokens and never set their own values.
    - Numbers roll when they change.
    - Symbols bounce or swap.
    - Panes cross-fade with an 8pt rise.
+   - Cards enter one after another (`entrance`): they rise 14pt, sharpen
+     from a slight blur and settle, each 45ms after the last.
 8. **One type scale.** SF Pro at fixed steps. Figures use medium weight with
    monospaced digits.
 
    | Token     | Size and weight | Used for              |
    |-----------|-----------------|-----------------------|
-   | `title`   | 24 semibold     | pane titles           |
+   | `title`   | 26 bold         | pane titles           |
    | `display` | 22 semibold     | status                |
    | `heading` | 14 semibold     | card and tile names   |
    | `label`   | 13              | body text             |
    | `small`   | 12              | descriptions          |
-   | `caption` | 11 medium       | metadata              |
+   | `caption` | 11 semibold     | metadata              |
+
+## Contrast
+
+Supporting text uses `DS.ink2` (66% of the primary colour) and metadata
+`DS.ink3` (46%), both darker than the system secondary and tertiary styles.
+Pane titles are 26pt bold, figures are semibold, and captions are semibold,
+so the key value in every card reads first.
 
 ## Icon
 
