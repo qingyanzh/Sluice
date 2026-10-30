@@ -50,32 +50,36 @@ func draw(_ s: CGFloat) -> NSImage {
                                start: CGPoint(x: 0, y: tile.minY), end: CGPoint(x: 0, y: tile.maxY), options: [])
         ctx.restoreGState()
 
-        // The mark: five staggered streams, flowing left to right and down, like water
-        // stepping through a sluice. Same length, same vertical gap and the same horizontal step.
-        let count = 5, h: CGFloat = 78, gap: CGFloat = 32, w: CGFloat = 440, step: CGFloat = 40
-        let span = CGFloat(count) * h + CGFloat(count - 1) * gap
-        let width = w + CGFloat(count - 1) * step
+        // The mark: five streams of different lengths, set like water moving at different
+        // speeds. Each row is one or two capsules given as (start x, length) on the 1024 grid.
+        let h: CGFloat = 72, gap: CGFloat = 34
+        let rows: [[(CGFloat, CGFloat)]] = [[(420, 340)], [(300, 420)], [(220, 560)], [(340, 400)], [(460, 260)]]
+        let span = CGFloat(rows.count) * h + CGFloat(rows.count - 1) * gap
         // Colour runs through the set: cyan at the top, through blue, into indigo at the bottom.
         let ramp: [(CGFloat, CGFloat, CGFloat)] = [(0.16, 0.80, 0.92), (0.13, 0.62, 1.0), (0.18, 0.46, 1.0), (0.32, 0.36, 0.98), (0.45, 0.30, 0.92)]
-        for i in 0..<count {
-            let x = 512 - width / 2 + CGFloat(i) * step
+        for (i, row) in rows.enumerated() {
             let y = 512 + span / 2 - h - CGFloat(i) * (h + gap)
-            let rect = CGRect(x: x * u, y: y * u, width: w * u, height: h * u)
-            let path = CGPath(roundedRect: rect, cornerWidth: h / 2 * u, cornerHeight: h / 2 * u, transform: nil)
             let (r, g, b) = ramp[i]
-            ctx.saveGState()
-            ctx.setShadow(offset: CGSize(width: 0, height: -7 * u), blur: 18 * u, color: rgb(r, g, b, 0.38).cgColor)
-            ctx.addPath(path); ctx.setFillColor(rgb(r, g, b).cgColor); ctx.fillPath()
-            ctx.restoreGState()
-            ctx.saveGState()
-            ctx.addPath(path); ctx.clip()
-            // Lighter at the head of the stream, full colour at its tail.
-            ctx.drawLinearGradient(gradient([rgb(min(r + 0.22, 1), min(g + 0.18, 1), b, 1), rgb(r, g, b)], [0, 1]),
-                                   start: CGPoint(x: rect.minX, y: 0), end: CGPoint(x: rect.maxX, y: 0), options: [])
-            // Soft top highlight and a faint lower edge give each stream a little volume.
-            ctx.drawLinearGradient(gradient([rgb(0, 0, 0, 0.08), rgb(1, 1, 1, 0), rgb(1, 1, 1, 0.28)], [0, 0.45, 1]),
-                                   start: CGPoint(x: 0, y: rect.minY), end: CGPoint(x: 0, y: rect.maxY), options: [])
-            ctx.restoreGState()
+            for (k, (x, w)) in row.enumerated() where w > 0 {
+                let rect = CGRect(x: x * u, y: y * u, width: w * u, height: h * u)
+                let path = CGPath(roundedRect: rect, cornerWidth: h / 2 * u, cornerHeight: h / 2 * u, transform: nil)
+                // A trailing droplet is a little lighter than the stream it follows.
+                let a: CGFloat = k == 0 ? 1 : 0.55
+                ctx.saveGState()
+                ctx.setShadow(offset: CGSize(width: 0, height: -7 * u), blur: 18 * u, color: rgb(r, g, b, 0.36 * a).cgColor)
+                ctx.addPath(path); ctx.setFillColor(rgb(r, g, b, a).cgColor); ctx.fillPath()
+                ctx.restoreGState()
+                ctx.saveGState()
+                ctx.addPath(path); ctx.clip()
+                ctx.setAlpha(a)
+                // Lighter at the head of the stream, full colour at its tail.
+                ctx.drawLinearGradient(gradient([rgb(min(r + 0.22, 1), min(g + 0.18, 1), b, 1), rgb(r, g, b)], [0, 1]),
+                                       start: CGPoint(x: rect.minX, y: 0), end: CGPoint(x: rect.maxX, y: 0), options: [])
+                // Soft top highlight and a faint lower edge give each stream a little volume.
+                ctx.drawLinearGradient(gradient([rgb(0, 0, 0, 0.08), rgb(1, 1, 1, 0), rgb(1, 1, 1, 0.28)], [0, 0.45, 1]),
+                                       start: CGPoint(x: 0, y: rect.minY), end: CGPoint(x: 0, y: rect.maxY), options: [])
+                ctx.restoreGState()
+            }
         }
         return true
     }
