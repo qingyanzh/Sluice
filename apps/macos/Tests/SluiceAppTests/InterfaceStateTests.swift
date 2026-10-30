@@ -12,13 +12,13 @@ final class InterfaceStateTests: XCTestCase {
         }
     }
 
-    func testMenuBarSpeedMatchesSurgeUnitsAndPrecision() {
-        XCTAssertEqual(menuBarSpeed(0), "0 KB/s")
-        XCTAssertEqual(menuBarSpeed(999), "1 KB/s")
-        XCTAssertEqual(menuBarSpeed(1_000_000), "1.00 MB/s")
-        XCTAssertEqual(menuBarSpeed(12_340_000), "12.3 MB/s")
-        XCTAssertEqual(menuBarSpeed(123_000_000), "123 MB/s")
-        XCTAssertEqual(menuBarSpeed(1_000_000_000), "1.00 GB/s")
+    func testMenuBarSpeedUsesPaddedFixedDecimalPrecision() {
+        XCTAssertEqual(menuBarSpeed(0), "  0.0 B/s")
+        XCTAssertEqual(menuBarSpeed(999), "999.0 B/s")
+        XCTAssertEqual(menuBarSpeed(1_000_000), "  1.0 MB/s")
+        XCTAssertEqual(menuBarSpeed(12_340_000), " 12.3 MB/s")
+        XCTAssertEqual(menuBarSpeed(123_000_000), "123.0 MB/s")
+        XCTAssertEqual(menuBarSpeed(1_000_000_000), "  1.0 GB/s")
     }
 
     @MainActor

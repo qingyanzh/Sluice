@@ -35,7 +35,7 @@ struct UpdateSettingsCard: View {
     private var lastCheck: some View {
         VStack(alignment: .leading, spacing: 3) {
             if let date = updater.lastCheck {
-                Text("上次检查：\(date.formatted(date: .abbreviated, time: .shortened))")
+                Text("上次检查：\(date.formatted(date: .abbreviated, time: .shortened))").monospacedDigit()
             } else {
                 Text("尚未检查更新")
             }

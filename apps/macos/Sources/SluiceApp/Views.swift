@@ -498,10 +498,14 @@ func latencyStyle(_ latency: Int?) -> (String, Color) {
 
 struct LatencyBadge: View {
     let latency: Int?
+    var testing = false
     var body: some View {
         let (text, color) = latencyStyle(latency)
         StatusBadge(text: text, tone: color)
             .monospacedDigit()
+            .frame(width: 76, alignment: .trailing)
+            .opacity(testing ? 0.5 : 1)
+            .accessibilityLabel(testing ? "\(text)，正在重新测试" : text)
     }
 }
 
@@ -515,6 +519,7 @@ struct TestAllLatencyButton: View {
                 if !core.testingGroups.isEmpty {
                     ProgressView().controlSize(.small)
                     Text("测试中… \(core.testingTotal - core.testingGroups.count)/\(core.testingTotal)")
+                        .monospacedDigit().frame(minWidth: 100, alignment: .trailing)
                         .monospacedDigit()
                 } else {
                     Label("测试全部", systemImage: "speedometer")
@@ -832,7 +837,8 @@ struct PaneHeader<Trailing: View>: View {
         VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(DS.title).tracking(-0.3)
                 if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
+                    Text(subtitle).font(DS.small).monospacedDigit().foregroundStyle(DS.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
         }
     }
@@ -900,7 +906,7 @@ struct SectionTitle: View {
     let text: String
     var color: Color = .secondary
     var body: some View {
-        Text(text).font(DS.label.weight(.semibold)).foregroundStyle(DS.ink2)
+        Text(text).font(DS.label.weight(.semibold)).monospacedDigit().foregroundStyle(DS.ink2)
             .padding(.top, 8).padding(.bottom, 2).padding(.leading, 1)
     }
 }
@@ -908,19 +914,17 @@ struct SectionTitle: View {
 struct BigNumber: View {
     let value: String
     var unit: String = ""
+    var numberWidth: CGFloat = 96
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
-            Text(value).font(DS.figure(28))
-                .fixedSize()
-                .contentTransition(.numericText())
+            Text(value).font(DS.figure(28)).monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.65)
+                .frame(width: numberWidth, alignment: .leading)
             if !unit.isEmpty {
-                Text(unit).font(DS.label).foregroundStyle(DS.ink2).fixedSize()
-                    .contentTransition(.opacity)
+                Text(unit).font(DS.label).foregroundStyle(DS.ink2)
+                    .frame(width: 40, alignment: .leading)
             }
         }
-        // Animate the row, not just the digits, so the unit slides as the number widens.
-        .animation(.smooth(duration: 0.4), value: value)
-        .animation(.smooth(duration: 0.4), value: unit)
     }
 }
 
@@ -1170,7 +1174,9 @@ struct PolicyView: View {
                     Spacer()
                     TestAllLatencyButton().controlSize(.small)
                 }
-                if core.groups.isEmpty {
+                if core.groups.isEmpty && core.state == .running && !core.policiesLoaded {
+                    ProgressView("正在加载策略…").font(DS.small)
+                } else if core.groups.isEmpty {
                     EmptyState(icon: "signpost.right",
                                title: core.state == .running ? "没有策略组" : "Sluice 未运行",
                                detail: core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。",
@@ -1233,7 +1239,7 @@ struct GroupSection: View {
                 Spacer(minLength: 8)
                 if tested > 0 {
                     Text(failed == 0 ? "\(tested) 个可用" : "\(tested - failed) 个可用 · \(failed) 个失败")
-                        .font(DS.caption).foregroundStyle(failed == 0 ? DS.ink2 : failed == tested ? DS.fail : DS.warn)
+                        .font(DS.caption).monospacedDigit().foregroundStyle(failed == 0 ? DS.ink2 : failed == tested ? DS.fail : DS.warn)
                 }
                 if core.testingGroups.contains(group.group) { ProgressView().controlSize(.small).accessibilityLabel("正在测试") }
                 Button(core.testingGroups.contains(group.group) ? "测试中…" : "测试") { core.test(group: group.group) }.glassButton()
@@ -1282,11 +1288,12 @@ struct OptionChip: View {
         let chosen = group.selected == option.name
         return HStack(spacing: 8) {
             if chosen { Image(systemName: "checkmark").font(DS.caption).foregroundStyle(DS.accent) }
-            Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
+            Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular))
+                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            LatencyBadge(latency: option.latencyMs)
+            LatencyBadge(latency: option.latencyMs, testing: core.testingGroups.contains(group.group) || core.testingNodes.contains(option.name))
         }
-        .padding(.horizontal, 12).frame(height: 40)
+        .padding(.horizontal, 12).padding(.vertical, 10).frame(minHeight: 40)
         .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
                     in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
         .overlay {
@@ -1455,7 +1462,7 @@ struct RequestsView: View {
     var body: some View {
         let source = paused ? frozen : core.connections
         let query = filter.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rows = source.reversed().filter {
+        let rows = source.sorted { $0.id > $1.id }.filter {
             kind.admits($0.outbound) && $0.matches(query)
         }
         let showsProcess = source.contains { !($0.process ?? "").isEmpty }
@@ -1513,6 +1520,8 @@ struct RequestsView: View {
                                 if !core.isActive && core.connections.isEmpty {
                                     EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
                                                detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
+                                } else if !core.connectionsLoaded {
+                                    ProgressView("正在加载请求…").font(DS.small)
                                 } else {
                                     EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
                                                detail: filtering ? "试试其他关键词，或清除筛选查看全部请求。" : "经过 Sluice 的连接会实时显示在这里。",
@@ -1533,7 +1542,7 @@ struct RequestsView: View {
                     Circle().fill(paused ? DS.warn : core.state == .running ? DS.ok : DS.off).frame(width: 6, height: 6)
                     Text(paused ? "列表已暂停 · 网络流量继续运行" : "仅记录最近 2000 条连接事件")
                     Spacer()
-                }.font(DS.caption).foregroundStyle(DS.ink2).padding(.horizontal, DS.gutter).padding(.bottom, 12)
+                }.font(DS.caption).monospacedDigit().foregroundStyle(DS.ink2).padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
         }
         .onChange(of: rows.map(\.id)) {
@@ -1695,6 +1704,7 @@ struct EmptyState: View {
             .padding(.bottom, 6)
             .accessibilityHidden(true)
             Text(title).font(DS.heading).foregroundStyle(Color.primary)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             if !detail.isEmpty {
                 Text(detail).font(DS.small).foregroundStyle(DS.ink2).multilineTextAlignment(.center)
                     .frame(maxWidth: 360).fixedSize(horizontal: false, vertical: true)
@@ -1778,6 +1788,8 @@ struct RuleView: View {
     @EnvironmentObject var core: Core
     @Binding var pane: Pane?
     @State private var rules: [RuleRow] = []
+    @State private var rulesLoaded = false
+    @State private var rulesLoadError: String?
     @State private var filter = ""
     @State private var target = "www.google.com"
     @State private var result: RouteResult?
@@ -1793,6 +1805,7 @@ struct RuleView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.gap) {
                 routeTest.entrance(0)
+                if let rulesLoadError { ErrorText(raw: rulesLoadError) }
                 HStack {
                     SectionTitle(text: filter.isEmpty ? "规则 (\(rules.count))" : "规则 (\(rows.count) / \(rules.count))")
                     Spacer()
@@ -1800,7 +1813,9 @@ struct RuleView: View {
                 }
                 // The list is only as tall as its rules: a short list stays short.
                 VStack(spacing: 0) {
-                    if rows.isEmpty {
+                    if !rulesLoaded && rulesLoadError == nil {
+                        ProgressView("正在加载规则…").font(DS.small).frame(height: 180)
+                    } else if rulesLoaded && rows.isEmpty {
                         EmptyState(icon: "line.3.horizontal.decrease.circle", title: rules.isEmpty ? "没有规则" : "没有匹配的规则",
                                    detail: rules.isEmpty ? "在配置的 [Rule] 中添加规则。" : "")
                             .frame(height: 180)
@@ -1822,6 +1837,8 @@ struct RuleView: View {
             }
         }
         .onAppear(perform: load)
+        .onChange(of: core.configPath) { load(); result = nil; error = nil }
+        .onChange(of: core.reloading) { _, busy in if !busy { load() } }
         .onChange(of: core.state) { load(); result = nil; error = nil }
         .onChange(of: target) { result = nil; error = nil; offline = false }
     }
@@ -1896,7 +1913,15 @@ struct RuleView: View {
     }
 
     private func load() {
-        rules = ConfigText.lines(of: "Rule", in: core.readConfig()).enumerated().map { i, line in
+        let text: String
+        do { text = try String(contentsOfFile: core.configPath, encoding: .utf8) }
+        catch {
+            rulesLoadError = "无法读取规则：\(error.localizedDescription)"
+            return
+        }
+        rulesLoaded = true
+        rulesLoadError = nil
+        rules = ConfigText.lines(of: "Rule", in: text).enumerated().map { i, line in
             let parts = line.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             let type = parts.first ?? ""
             if type.uppercased() == "FINAL" {
@@ -2012,7 +2037,8 @@ struct LogsView: View {
             ScrollViewReader { proxy in
                 List(lines) { l in
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(l.time).foregroundStyle(DS.ink3).lineLimit(1).fixedSize()
+                        Text(l.time).monospacedDigit().foregroundStyle(DS.ink3).lineLimit(1)
+                            .frame(width: 60, alignment: .leading)
                         Text(l.level).font(DS.caption.monospaced()).foregroundStyle(color(l.level))
                             .frame(width: 40, alignment: .leading)
                         Text(l.message).textSelection(.enabled)
@@ -2044,7 +2070,7 @@ struct LogsView: View {
                 Text("显示 \(lines.count) / \(core.logs.count) 条 · 最多保留 2000 条")
                 Spacer()
                 Text(follow ? "跟随最新" : "自由浏览")
-            }.font(DS.caption).foregroundStyle(DS.ink2).padding(.horizontal, DS.gutter).padding(.bottom, 12)
+            }.font(DS.caption).monospacedDigit().foregroundStyle(DS.ink2).padding(.horizontal, DS.gutter).padding(.bottom, 12)
         }
     }
 
@@ -2144,7 +2170,10 @@ struct ConfigView: View {
         // Validation feedback belongs to the submitted version of the text.
         .onChange(of: draft.text) { if !draft.busy { draft.message = nil } }
         .confirmationDialog("放弃当前未保存的修改？", isPresented: $confirmRestore) {
-            Button("载入磁盘版本", role: .destructive) { draft.restore(core.readConfig()) }
+            Button("载入磁盘版本", role: .destructive) {
+                do { draft.restore(try String(contentsOfFile: core.configPath, encoding: .utf8)) }
+                catch { draft.message = ("无法读取配置：\(error.localizedDescription)", false) }
+            }
         }
         .confirmationDialog("切换配置会放弃当前未保存的修改", isPresented: Binding(
             get: { pendingSwitch != nil }, set: { if !$0 { pendingSwitch = nil } })) {
@@ -2183,7 +2212,11 @@ struct ConfigView: View {
     }
 
     private func load() {
-        draft.refresh(path: core.configPath, disk: core.readConfig())
+        do {
+            draft.refresh(path: core.configPath, disk: try String(contentsOfFile: core.configPath, encoding: .utf8))
+        } catch {
+            draft.message = ("无法读取配置：\(error.localizedDescription)", false)
+        }
     }
 
     private func run(save: Bool) {

@@ -7,11 +7,12 @@ struct ActiveRequestsView: View {
     @State private var selection: UInt64?
     @State private var paused = false
     @State private var frozen: [ActiveConnection] = []
+    @State private var frozenRates: [UInt64: DisplayedRates] = [:]
     @State private var confirmCloseAll = false
 
     var body: some View {
         let source = paused ? frozen : core.activeConnections
-        let rows = source.filter { kind.admits($0.outbound) && $0.matches(filter.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let rows = source.sorted(by: ActiveConnection.displayOrder).filter { kind.admits($0.outbound) && $0.matches(filter.trimmingCharacters(in: .whitespacesAndNewlines)) }
         VStack(spacing: 12) {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) { filters; actions }
@@ -50,6 +51,12 @@ struct ActiveRequestsView: View {
                         if core.state != .running {
                             EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
                                        detail: "启动后可查看活动 TCP 连接。", action: ("启动 Sluice", { core.start() }))
+                        } else if !core.activeConnectionsLoaded {
+                            if let error = core.activeConnectionsError {
+                                EmptyState(icon: "exclamationmark.triangle", title: "无法读取活动连接", detail: error)
+                            } else {
+                                ProgressView("正在加载活动连接…").font(DS.small)
+                            }
                         } else if !filter.isEmpty || kind != .all {
                             EmptyState(icon: "magnifyingglass", title: "没有匹配的活动连接", detail: "清除筛选查看全部连接。",
                                        action: ("清除筛选", { filter = ""; kind = .all }))
@@ -93,7 +100,10 @@ struct ActiveRequestsView: View {
     private var actions: some View {
         HStack(spacing: 12) {
             Button {
-                if !paused { frozen = core.activeConnections }
+                if !paused {
+                    frozen = core.activeConnections
+                    frozenRates = core.displayedConnectionRates
+                }
                 paused.toggle()
             } label: { Label(paused ? "继续更新" : "暂停更新", systemImage: paused ? "play.fill" : "pause") }
                 .labelStyle(.iconOnly).help("仅暂停列表更新，网络流量继续运行")
@@ -115,12 +125,37 @@ struct ActiveRequestsView: View {
             }
             Text(connection.policyChain).font(DS.small).foregroundStyle(DS.ink2).lineLimit(2)
             if let process = connection.process { Text(process).font(DS.caption).foregroundStyle(DS.ink3) }
-            HStack {
-                Text("↑ \(formatBytes(Double(connection.up))) · \(formatBytes(Double(connection.rateUp)))/s")
-                Spacer(minLength: 8)
-                Text("↓ \(formatBytes(Double(connection.down))) · \(formatBytes(Double(connection.rateDown)))/s").foregroundStyle(DS.accent)
-            }.font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink2)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    connectionRate(connection, upload: true)
+                    Spacer(minLength: 8)
+                    connectionRate(connection, upload: false)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    connectionRate(connection, upload: true)
+                    connectionRate(connection, upload: false)
+                }
+            }
+            .font(DS.caption.monospacedDigit())
+            .foregroundStyle(DS.ink2)
         }
+    }
+
+    private func displayedRates(for id: UInt64) -> DisplayedRates {
+        (paused ? frozenRates[id] : core.displayedConnectionRates[id]) ?? DisplayedRates()
+    }
+
+    private func connectionRate(_ connection: ActiveConnection, upload: Bool) -> some View {
+        let rates = displayedRates(for: connection.id)
+        let bytes = upload ? connection.up : connection.down
+        let rate = upload ? rates.up : rates.down
+        return HStack(spacing: 4) {
+            Text(upload ? "↑" : "↓")
+            Text(formatBytes(Double(bytes))).frame(width: 68, alignment: .trailing)
+            Text(rate.formatted.text).frame(width: 88, alignment: .trailing)
+        }
+        .foregroundStyle(upload ? DS.ink2 : DS.accent)
+        .fixedSize()
     }
 
     @ViewBuilder private func detail(_ connection: ActiveConnection?) -> some View {
@@ -134,8 +169,8 @@ struct ActiveRequestsView: View {
                     field("来源", connection.src ?? "—")
                     field("协议", connection.network.uppercased())
                     field("开始时间", Date(timeIntervalSince1970: Double(connection.startMs) / 1000).formatted(date: .abbreviated, time: .standard))
-                    field("上传", "\(formatBytes(Double(connection.up))) · \(formatBytes(Double(connection.rateUp)))/s")
-                    field("下载", "\(formatBytes(Double(connection.down))) · \(formatBytes(Double(connection.rateDown)))/s")
+                    field("上传", "\(formatBytes(Double(connection.up))) · \(displayedRates(for: connection.id).up.formatted.text)")
+                    field("下载", "\(formatBytes(Double(connection.down))) · \(displayedRates(for: connection.id).down.formatted.text)")
                     Button("断开连接", role: .destructive) { core.closeConnection(connection.id) }
                         .glassButton().disabled(!canClose(connection.id))
                 }.padding(DS.cardPadding)
@@ -148,7 +183,7 @@ struct ActiveRequestsView: View {
     private func field(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).font(DS.caption).foregroundStyle(DS.ink3)
-            Text(value).font(DS.small).foregroundStyle(DS.ink2).textSelection(.enabled)
+            Text(value).font(DS.small).monospacedDigit().foregroundStyle(DS.ink2).textSelection(.enabled)
         }
     }
 }

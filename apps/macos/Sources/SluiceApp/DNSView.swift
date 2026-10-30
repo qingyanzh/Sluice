@@ -63,6 +63,7 @@ struct DNSView: View {
                 .width(min: 160, ideal: 300)
                 TableColumn("剩余 TTL") { entry in
                     Text("\(entry.ttl) 秒").font(DS.small.monospacedDigit()).foregroundStyle(DS.ink2)
+                        .frame(width: 80, alignment: .trailing)
                 }
                 .width(min: 85, ideal: 100)
             }
@@ -76,7 +77,7 @@ struct DNSView: View {
                                    detail: "启动后可查看和清空 DNS 缓存。",
                                    action: ("启动 Sluice", { core.start() }))
                     }
-                } else if !loaded && working {
+                } else if !loaded && loadError == nil {
                     ProgressView("正在加载 DNS 缓存…").font(DS.small)
                 } else if rows.isEmpty {
                     if let loadError {
@@ -104,7 +105,7 @@ struct DNSView: View {
                 Spacer(minLength: 12)
                 Text(core.state == .running ? "每秒自动刷新" : "内核停止时暂停刷新")
             }
-            .font(DS.caption).foregroundStyle(DS.ink2)
+            .font(DS.caption).monospacedDigit().foregroundStyle(DS.ink2)
             .padding(.horizontal, DS.gutter).padding(.vertical, 12)
         }
         .task(id: RefreshContext(running: core.state == .running, port: core.summary.apiPort, requestID: requestID)) {
@@ -130,7 +131,7 @@ struct DNSView: View {
             do {
                 let result = try await api.flushDNS()
                 guard !Task.isCancelled else { return }
-                entries = []
+                // Keep the visible snapshot until the next successful read.
                 feedback = "已清空 \(result.flushed) 条缓存"
                 flushFailed = false
             } catch {

@@ -27,6 +27,26 @@ final class LiveAPITests: XCTestCase {
                              "Active IDs must never be confused with routing-history IDs")
     }
 
+    func testActiveSnapshotKeepsOpensAndClosesReceivedDuringRefresh() throws {
+        let closed = try JSONDecoder().decode(ActiveConnection.self, from: Data(active.utf8))
+        let opened = try JSONDecoder().decode(ActiveConnection.self,
+            from: Data(active.replacingOccurrences(of: "\"id\":71", with: "\"id\":72").utf8))
+        let unchanged = try JSONDecoder().decode(ActiveConnection.self,
+            from: Data(active.replacingOccurrences(of: "\"id\":71", with: "\"id\":73").utf8))
+        let rows = ActiveConnection.reconcile([unchanged, closed], current: [opened, unchanged], changedIDs: [71, 72])
+        XCTAssertEqual(rows.map(\.id), [72, 73], "A stale snapshot must neither resurrect a closed row nor lose a new row")
+    }
+
+    func testActiveOrderDoesNotChangeWithResponseOrderOrRates() throws {
+        let first = try JSONDecoder().decode(ActiveConnection.self, from: Data(active.utf8))
+        let second = try JSONDecoder().decode(ActiveConnection.self,
+            from: Data(active.replacingOccurrences(of: "\"id\":71", with: "\"id\":72")
+                .replacingOccurrences(of: "\"rate_up\":1024", with: "\"rate_up\":999999").utf8))
+        for snapshot in [[first, second], [second, first]] {
+            XCTAssertEqual(ActiveConnection.reconcile(snapshot, current: [], changedIDs: []).map(\.id), [71, 72])
+        }
+    }
+
     func testNodeTestDecodesSuccessAndFailure() throws {
         let success = #"{"node":"HK","outbound":"HK","ok":true,"connect_ms":42,"latency_ms":85,"status":204,"error":null}"#
         let result = try JSONDecoder().decode(NodeTestResult.self, from: Data(success.utf8))

@@ -3,6 +3,18 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var core: Core?
+    private var menuBar: MenuBarStatusItem?
+
+    @MainActor
+    func installMenuBar(core: Core, openWindow: OpenWindowAction) {
+        self.core = core
+        guard menuBar == nil else { return }
+        menuBar = MenuBarStatusItem(core: core) { pane in
+            if let pane { core.requestedPane = pane }
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Running from `swift run` has no bundle; make it a regular app with a Dock icon.
@@ -38,18 +50,23 @@ struct SluiceApp: App {
             MainView()
                 .environmentObject(core)
                 .defaultAppStorage(core.preferences)
-                .onAppear { delegate.core = core }
+                .background(MenuBarInstaller { openWindow in
+                    delegate.installMenuBar(core: core, openWindow: openWindow)
+                })
                 .task { if let launch = E2ELaunch.current { await launch.prepareWindow(core: core) } }
         }
         .defaultSize(width: 1120, height: 860)
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
         }
-
-        MenuBarExtra {
-            MenuBarContent().environmentObject(core).defaultAppStorage(core.preferences)
-        } label: {
-            MenuBarLabel().environmentObject(core).defaultAppStorage(core.preferences)
-        }
     }
+}
+
+/// Capture the scene's window action once; the delegate retains the status item
+/// even after the last app window closes.
+private struct MenuBarInstaller: View {
+    @Environment(\.openWindow) private var openWindow
+    let install: (OpenWindowAction) -> Void
+
+    var body: some View { Color.clear.onAppear { install(openWindow) } }
 }

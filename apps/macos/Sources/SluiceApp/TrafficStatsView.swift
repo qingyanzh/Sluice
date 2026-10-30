@@ -65,7 +65,7 @@ struct TrafficStatsView: View {
                     if let error = core.statsError {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(error).foregroundStyle(DS.fail)
-                            Text("每秒自动重试；已有数据保留至下次刷新成功。")
+                            Text("每 5 秒自动重试；已有数据保留至下次刷新成功。")
                                 .foregroundStyle(DS.ink2)
                         }.font(DS.small)
                     }
@@ -95,11 +95,12 @@ struct TrafficStatsView: View {
 
     private var rateLegend: some View {
         HStack(spacing: 24) {
-            Label("下载 \(formatBytes(samples.last?.down ?? 0))/s", systemImage: "arrow.down")
+            SampleRateLabel(title: "下载", icon: "arrow.down", sample: samples.last, upload: false)
                 .foregroundStyle(DS.accent)
-            Label("上传 \(formatBytes(samples.last?.up ?? 0))/s", systemImage: "arrow.up")
+            SampleRateLabel(title: "上传", icon: "arrow.up", sample: samples.last, upload: true)
                 .foregroundStyle(DS.ink2)
         }.font(DS.small.monospacedDigit())
+            .id(selectedPolicy)
     }
 
     private var rateChart: some View {
@@ -136,7 +137,7 @@ struct TrafficStatsView: View {
                 AxisGridLine()
                 AxisValueLabel {
                     if let bytes = value.as(Double.self) {
-                        Text("\(formatBytes(bytes))/s").font(DS.caption).foregroundStyle(DS.ink3)
+                        Text("\(formatBytes(bytes))/s").font(DS.caption).monospacedDigit().foregroundStyle(DS.ink3)
                     }
                 }
             }
@@ -168,5 +169,27 @@ struct TrafficStatsView: View {
         .frame(height: CGFloat(min(totals.count, 8)) * 30 + 32)
         .scrollContentBackground(.hidden)
         .accessibilityLabel("每个策略的累计上传与下载流量")
+    }
+}
+
+/// Smooth only the numeric legend. The chart consumes the original samples.
+private struct SampleRateLabel: View {
+    let title: String
+    let icon: String
+    let sample: TrafficRatePoint?
+    let upload: Bool
+    @State private var rate = DisplayedRate()
+
+    var body: some View {
+        Label {
+            HStack(spacing: 4) {
+                Text(title)
+                Text(rate.formatted.text).monospacedDigit().frame(width: 100, alignment: .trailing)
+            }
+        } icon: { Image(systemName: icon) }
+        .onChange(of: sample?.id, initial: true) {
+            if let sample { rate.update(upload ? sample.up : sample.down) }
+            else { rate = DisplayedRate() }
+        }
     }
 }

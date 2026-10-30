@@ -60,7 +60,7 @@ struct ActivityView: View {
     }
 
     private var trafficCard: some View {
-        TrafficCard(up: core.upRate, down: core.downRate, history: core.rateHistory, running: core.state == .running)
+        TrafficCard(up: core.displayedRates.up, down: core.displayedRates.down, history: core.rateHistory, running: core.state == .running)
     }
 
     private func port(_ listen: String) -> String { String(listen.split(separator: ":").last ?? "") }
@@ -192,8 +192,9 @@ struct ActivityView: View {
 
     private func statistic(_ value: String, label: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(value).font(DS.figure(20)).contentTransition(.numericText())
-            Text(label).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1)
+            Text(value).font(DS.figure(20)).monospacedDigit()
+                .frame(width: 80, alignment: .leading)
+            Text(label).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -228,6 +229,7 @@ struct ActivityView: View {
                 Text(title).font(DS.small).foregroundStyle(DS.ink2)
             }
             Text(formatBytes(value)).font(DS.label.monospacedDigit())
+                .frame(width: 100, alignment: .leading)
         }
     }
 
@@ -264,6 +266,7 @@ struct ActivityView: View {
                                 Text(name).font(DS.small).lineLimit(1).truncationMode(.middle)
                                 Spacer(minLength: 12)
                                 Text("\(count)").font(DS.small.monospacedDigit()).foregroundStyle(DS.ink2)
+                                    .frame(width: 56, alignment: .trailing)
                             }
                             GeometryReader { geometry in
                                 ZStack(alignment: .leading) {
@@ -306,7 +309,8 @@ struct DashboardCard<Content: View>: View {
             HStack(spacing: 8) {
                 CardTitle(text: title, icon: icon)
                 Spacer(minLength: 8)
-                if !note.isEmpty { Text(note).font(DS.caption).foregroundStyle(DS.ink3).lineLimit(1) }
+                if !note.isEmpty { Text(note).font(DS.caption).monospacedDigit().foregroundStyle(DS.ink3)
+                    .fixedSize(horizontal: false, vertical: true) }
             }
             VStack(alignment: .leading, spacing: 12) { content }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -319,31 +323,33 @@ struct DashboardCard<Content: View>: View {
 }
 
 struct TrafficCard: View {
-    let up: Double
-    let down: Double
-    let history: [(up: Double, down: Double)]
+    let up: DisplayedRate
+    let down: DisplayedRate
+    let history: [TrafficRatePoint]
     var running = true
+    @State private var peakFormatter = RateUnitFormatter()
+    @State private var peakText = "0 B/s"
 
     var body: some View {
         let peak = history.map { max($0.up, $0.down) }.max() ?? 0
-        DashboardCard(title: "实时流量", icon: "waveform.path", note: "峰值 \(formatBytes(peak))/s") {
+        DashboardCard(title: "实时流量", icon: "waveform.path", note: "峰值 \(peakText)") {
             HStack(alignment: .firstTextBaseline, spacing: 24) {
                 rate("下载", value: down, color: DS.accent)
                 rate("上传", value: up, color: DS.ink2)
                 Spacer(minLength: 0)
             }
             Chart {
-                ForEach(Array(history.enumerated()), id: \.offset) { index, value in
-                    let position = 60 - history.count + index
+                ForEach(history) { value in
+                    let position = value.time
                     AreaMark(x: .value("采样", position), y: .value("速率", value.down), series: .value("方向", "下载"))
                         .foregroundStyle(DS.accent.opacity(0.08)).interpolationMethod(.monotone)
                     LineMark(x: .value("采样", position), y: .value("速率", value.down), series: .value("方向", "下载"))
                         .foregroundStyle(DS.accent).lineStyle(StrokeStyle(lineWidth: 1.5)).interpolationMethod(.monotone)
                     LineMark(x: .value("采样", position), y: .value("速率", value.up), series: .value("方向", "上传"))
-                        .foregroundStyle(Color.secondary.opacity(0.55)).lineStyle(StrokeStyle(lineWidth: 1)).interpolationMethod(.monotone)
+                        .foregroundStyle(DS.ink2.opacity(0.8)).lineStyle(StrokeStyle(lineWidth: 1)).interpolationMethod(.monotone)
                 }
             }
-            .chartXScale(domain: 0...59).chartYScale(domain: 0...max(peak * 1.2, 1024))
+            .chartXScale(domain: (history.last?.time ?? Date()).addingTimeInterval(-59)...(history.last?.time ?? Date())).chartYScale(domain: 0...max(peak * 1.2, 1024))
             .chartXAxis(.hidden).chartYAxis(.hidden)
             .chartBackground { _ in
                 VStack(spacing: 0) {
@@ -360,15 +366,16 @@ struct TrafficCard: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("最近 60 次流量采样")
-            .accessibilityValue("下载每秒 \(formatBytes(down))，上传每秒 \(formatBytes(up))")
+            .accessibilityValue("下载每秒 \(down.formatted.text)，上传每秒 \(up.formatted.text)")
             .frame(maxHeight: .infinity)
         }
+        .onChange(of: peak, initial: true) { peakText = peakFormatter.format(peak).text }
     }
 
-    private func rate(_ title: String, value: Double, color: Color) -> some View {
-        let (number, unit) = splitRate(value)
+    private func rate(_ title: String, value: DisplayedRate, color: Color) -> some View {
+        let number = value.formatted.number, unit = value.formatted.unit + "/s"
         return VStack(alignment: .leading, spacing: 6) {
-            BigNumber(value: number, unit: unit)
+            BigNumber(value: number, unit: unit, numberWidth: 72)
             HStack(spacing: 5) {
                 Circle().fill(color).frame(width: 5, height: 5)
                 Text(title).font(DS.small).foregroundStyle(DS.ink2)

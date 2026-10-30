@@ -49,6 +49,8 @@ struct NodesView: View {
     @State private var showAddNode = false
     @State private var showAddSub = false
     @State private var records: [NodeRecord] = []
+    @State private var loaded = false
+    @State private var loadError: String?
     @State private var search = ""
     @State private var category = 0
     @State private var selected: NodeRecord?
@@ -71,11 +73,14 @@ struct NodesView: View {
                 SearchField(prompt: "名称、协议或服务器", text: $search)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, 12)
+            if let loadError {
+                ErrorText(raw: loadError).padding(.horizontal, DS.gutter).padding(.bottom, 12)
+            }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(visible) { node in
                         Button { selected = node } label: {
-                            NodeBrowserRow(node: node, latency: latency(for: node))
+                            NodeBrowserRow(node: node, latency: latency(for: node), testing: core.isTesting(node: node.name))
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
@@ -92,7 +97,9 @@ struct NodesView: View {
                 .padding(.horizontal, DS.gutter)
             }
             .overlay {
-                if records.isEmpty {
+                if !loaded && loadError == nil {
+                    ProgressView("正在加载节点…").font(DS.small)
+                } else if loaded && records.isEmpty {
                     EmptyState(icon: "globe.asia.australia", title: "尚未添加代理节点", detail: "添加订阅批量导入节点，或粘贴单个分享链接。",
                                action: ("添加订阅", { showAddSub = true }), secondary: ("添加节点", { showAddNode = true }))
                 } else if visible.isEmpty {
@@ -118,6 +125,7 @@ struct NodesView: View {
         .onChange(of: core.configPath) { refresh() }
         .onChange(of: core.summary.proxyCount) { refresh() }
         .onChange(of: core.summary.subscriptionCount) { refresh() }
+        .onChange(of: core.reloading) { _, busy in if !busy { refresh() } }
     }
 
     private func latency(for node: NodeRecord) -> Int? {
@@ -125,10 +133,18 @@ struct NodesView: View {
     }
 
     private func refresh() {
-        let text = core.readConfig()
+        let text: String
+        do { text = try String(contentsOfFile: core.configPath, encoding: .utf8) }
+        catch {
+            loadError = "无法读取节点列表：\(error.localizedDescription)"
+            return
+        }
+        loaded = true
+        loadError = nil
         records = ["Proxy Group", "Proxy"].flatMap { section in
-            ConfigText.lines(of: section, in: text).enumerated().compactMap { index, line in
-                let node = NodeRecord(line: line, id: "\(section)-\(index)")
+            ConfigText.lines(of: section, in: text).compactMap { line in
+                let name = line.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? line
+                let node = NodeRecord(line: line, id: "\(section):\(name)")
                 return section == "Proxy" || node.isSubscription ? node : nil
             }
         }
@@ -139,6 +155,7 @@ struct NodesView: View {
 struct NodeBrowserRow: View {
     let node: NodeRecord
     let latency: Int?
+    var testing = false
     @State private var hovering = false
 
     var body: some View {
@@ -151,7 +168,7 @@ struct NodeBrowserRow: View {
             Spacer(minLength: 8)
             Text(node.kind).font(DS.caption).foregroundStyle(DS.ink2)
                 .padding(.horizontal, 8).padding(.vertical, 4).background(Color.primary.opacity(0.045), in: Capsule())
-            if !node.isSubscription { LatencyBadge(latency: latency).frame(width: 72, alignment: .trailing) }
+            if !node.isSubscription { LatencyBadge(latency: latency, testing: testing) }
             Image(systemName: "chevron.right").font(DS.caption).foregroundStyle(DS.ink3)
         }
         .padding(.horizontal, DS.cardPadding).padding(.vertical, 14)
@@ -184,7 +201,7 @@ struct NodeDetailSheet: View {
                     HStack {
                         Text("最近延迟").font(DS.label).foregroundStyle(DS.ink2)
                         Spacer(minLength: 16)
-                        LatencyBadge(latency: core.nodeLatencies[node.name] ?? latency)
+                        LatencyBadge(latency: core.nodeLatencies[node.name] ?? latency, testing: core.isTesting(node: node.name))
                     }
                 }
                 if let result = core.nodeTests[node.name] {
@@ -215,7 +232,7 @@ struct NodeDetailSheet: View {
         HStack(alignment: .firstTextBaseline) {
             Text(title).foregroundStyle(DS.ink2)
             Spacer(minLength: 16)
-            Text(value).multilineTextAlignment(.trailing).textSelection(.enabled)
+            Text(value).monospacedDigit().multilineTextAlignment(.trailing).textSelection(.enabled)
         }.font(DS.label)
     }
 }

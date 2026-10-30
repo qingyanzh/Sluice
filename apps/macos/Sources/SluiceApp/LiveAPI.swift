@@ -28,6 +28,19 @@ struct ActiveConnection: Decodable, Identifiable {
         query.isEmpty || ([target, src ?? "", rule, policy, outbound, process ?? ""] + chain)
             .contains { $0.localizedCaseInsensitiveContains(query) }
     }
+
+    static func displayOrder(_ lhs: Self, _ rhs: Self) -> Bool {
+        (lhs.startMs, lhs.id) < (rhs.startMs, rhs.id)
+    }
+
+    /// Open/close events received during a snapshot request take precedence over
+    /// that response. Merge individual IDs so busy streams cannot starve refreshes.
+    static func reconcile(_ snapshot: [Self], current: [Self], changedIDs: Set<UInt64>) -> [Self] {
+        let currentByID = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        var merged = Dictionary(snapshot.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        for id in changedIDs { merged[id] = currentByID[id] }
+        return merged.values.sorted(by: displayOrder)
+    }
 }
 
 struct NodeTestResult: Decodable {

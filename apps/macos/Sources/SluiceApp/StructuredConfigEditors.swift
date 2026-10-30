@@ -16,7 +16,8 @@ struct StructuredConfigEditors: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text(section == "Rule" ? "规则" : "策略组").font(DS.heading)
-                Text("\(ids.count)").font(DS.small).foregroundStyle(DS.ink3)
+                Text("\(ids.count)").font(DS.small).monospacedDigit().foregroundStyle(DS.ink3)
+                    .frame(width: 48, alignment: .trailing)
                 Spacer()
                 Button("添加", systemImage: "plus") { edit(nil) }
                 Button("编辑", systemImage: "pencil") { edit(selection) }.disabled(selectedIndex == nil)

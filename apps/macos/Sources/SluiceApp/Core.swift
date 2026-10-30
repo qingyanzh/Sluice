@@ -121,6 +121,10 @@ final class Core: ObservableObject {
     @Published private(set) var connections: [Connection] = []
     @Published private(set) var activeConnections: [ActiveConnection] = []
     @Published private(set) var activeConnectionsError: String?
+    @Published private(set) var activeConnectionsLoaded = false
+    @Published private(set) var connectionsLoaded = false
+    @Published private(set) var policiesLoaded = false
+    @Published private(set) var displayedConnectionRates: [UInt64: DisplayedRates] = [:]
     @Published private(set) var eventsConnected = false
     @Published private(set) var testingNodes: Set<String> = []
     @Published private(set) var nodeTests: [String: NodeTestResult] = [:]
@@ -130,12 +134,13 @@ final class Core: ObservableObject {
     @Published private(set) var systemProxyOn = false
     @Published private(set) var otherSystemProxy: String?
     @Published private(set) var privileged = false
-    /// Bytes per second over the last poll interval, and running totals.
-    @Published private(set) var upRate: Double = 0
-    @Published private(set) var downRate: Double = 0
+    /// Smoothed display values. Charts below retain the accepted raw samples.
+    @Published private(set) var displayedRates = DisplayedRates()
+    var upRate: Double { displayedRates.up.value }
+    var downRate: Double { displayedRates.down.value }
     @Published private(set) var traffic: Traffic?
-    /// Last 60 one-second samples of (up, down) bytes per second, oldest first.
-    @Published private(set) var rateHistory: [(up: Double, down: Double)] = []
+    /// Last 60 raw per-second samples, oldest first, with stable timestamp IDs.
+    @Published private(set) var rateHistory: [TrafficRatePoint] = []
     @Published private(set) var stats: TrafficStats?
     @Published private(set) var statsFallback = false
     @Published private(set) var statsHistory: [TrafficRatePoint] = []
@@ -182,8 +187,16 @@ final class Core: ObservableObject {
     // Prefer the API until the core explicitly reports 404.
     private var usesConnectionAPI = true
     private var clearedConnectionIDs: Set<Connection.ID> = []
-    private var trafficHistory = TrafficHistory()
-    private var lastTrafficSampleAt: Date?
+    private var rateSource = LiveRateSource()
+    private var trafficPollTask: Task<Traffic, Error>?
+    private var pollBaseline: (traffic: Traffic, time: Date)?
+    private var lastEventTimeMs: UInt64?
+    private var policyRateHistory: [TrafficStatsSample] = []
+    private var connectionRatesSampleAt: Date?
+    private var activeSnapshotChanges: Set<UInt64> = []
+    private var activeRefreshInFlight = false
+    private var activeRefreshID = UUID()
+    private var connectionsRefreshID = UUID()
 
     static let defaultConfigPath: String = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -247,7 +260,6 @@ final class Core: ObservableObject {
             appendLog(level: "APP", message: "attached to existing core at \(attachment.host):\(attachment.port)")
             // There is no child stdout/log file in attach mode. Subscribe immediately;
             // the shared monitor reconnects this stream and consumes its log events.
-            if let api { eventTask = Task { await self.followEvents(api) } }
             pollTask = Task { await self.poll() }
         }
     }
@@ -480,6 +492,7 @@ final class Core: ObservableObject {
         if let attachment {
             defaults.removePersistentDomain(forName: attachment.preferenceDomain)
             pollTask?.cancel()
+            trafficPollTask?.cancel()
             eventTask?.cancel()
             eventRefreshTask?.cancel()
             return
@@ -511,7 +524,7 @@ final class Core: ObservableObject {
         eventRefreshTask?.cancel()
         eventRefreshTask = nil
         runningSummary = nil
-        eventsConnected = false
+        setEventsConnected(false)
         activeConnections = []
         activeConnectionsError = nil
         nodeTests = [:]
@@ -522,8 +535,7 @@ final class Core: ObservableObject {
         traffic = nil
         rateHistory = []
         mode = "rule"
-        upRate = 0
-        downRate = 0
+        displayedRates = DisplayedRates()
         resetStats()
         groups = []
         appendLog(level: "APP", message: "core exited with status \(code)")
@@ -542,42 +554,103 @@ final class Core: ObservableObject {
     }
 
     private func resetStats() {
+        setEventsConnected(false)
         stats = nil
         statsFallback = false
         statsHistory = []
         statsError = nil
-        trafficHistory = TrafficHistory()
-        lastTrafficSampleAt = nil
+        trafficPollTask?.cancel()
+        trafficPollTask = nil
+        pollBaseline = nil
+        lastEventTimeMs = nil
+        policyRateHistory = []
+        displayedRates = DisplayedRates()
+        displayedConnectionRates = [:]
+        connectionRatesSampleAt = nil
+        activeConnectionsLoaded = false
+        connectionsLoaded = false
+        policiesLoaded = false
+    }
+
+    private func setEventsConnected(_ connected: Bool) {
+        guard rateSource.connected != connected else { return }
+        rateSource.setConnected(connected)
+        eventsConnected = connected
+        // Never derive a rate across a source handoff or a core counter reset.
+        pollBaseline = nil
+        if connected {
+            trafficPollTask?.cancel()
+            trafficPollTask = nil
+        }
     }
 
     private func sampleTraffic(_ api: APIClient) async {
-        guard let now = try? await api.traffic() else { return }
-        guard !Task.isCancelled else { return }
+        guard let lease = rateSource.lease(for: .poll) else { return }
+        let generation = monitoringID
+        let task = Task { try await api.traffic() }
+        trafficPollTask = task
+        defer { if rateSource.accepts(lease) { trafficPollTask = nil } }
+        guard let now = try? await task.value, !Task.isCancelled,
+              monitoringID == generation, rateSource.accepts(lease) else { return }
         let time = Date()
-        let elapsed = lastTrafficSampleAt.map { time.timeIntervalSince($0) } ?? 0
-        if let prev = traffic, elapsed > 0 {
-            upRate = Double(now.up >= prev.up ? now.up - prev.up : 0) / elapsed
-            downRate = Double(now.down >= prev.down ? now.down - prev.down : 0) / elapsed
-            rateHistory.append((upRate, downRate))
-            if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
+        if let previous = pollBaseline {
+            let elapsed = time.timeIntervalSince(previous.time)
+            if elapsed > 0, now.up >= previous.traffic.up, now.down >= previous.traffic.down {
+                recordRates(up: Double(now.up - previous.traffic.up) / elapsed,
+                            down: Double(now.down - previous.traffic.down) / elapsed,
+                            traffic: now, at: time)
+            } else if now.up < previous.traffic.up || now.down < previous.traffic.down {
+                rateHistory = []
+                statsHistory = []
+                policyRateHistory = []
+                displayedRates = DisplayedRates()
+            }
         }
         traffic = now
-        lastTrafficSampleAt = time
-        trafficHistory.record(now, at: time)
-        if statsFallback { statsHistory = trafficHistory.samples }
+        pollBaseline = (now, time)
+    }
+
+    /// All live rates, counts and histories pass through the selected source.
+    private func recordRates(up: Double, down: Double, traffic: Traffic, at time: Date,
+                             statsSample: TrafficStatsSample? = nil) {
+        self.traffic = traffic
+        displayedRates.update(up: up, down: down)
+        rateHistory.append(TrafficRatePoint(time: time, up: up, down: down))
+        rateHistory = Array(rateHistory.suffix(60))
+        statsHistory.append(TrafficRatePoint(time: time, up: up, down: down))
+        statsHistory = Array(statsHistory.filter { time.timeIntervalSince($0.time) < 600 }.suffix(600))
+        if let statsSample {
+            policyRateHistory = Array((policyRateHistory.filter { $0.timeMs < statsSample.timeMs } + [statsSample]).suffix(600))
+        }
+        if let stats {
+            self.stats = TrafficStats(up: traffic.up, down: traffic.down, active: traffic.active,
+                                      policies: stats.policies, nodes: stats.nodes, history: policyRateHistory)
+        }
     }
 
     private func sampleStats(_ api: APIClient) async {
         guard !statsFallback else { return }
+        let generation = monitoringID
+        // Stats polls supply policy/node totals. They must never rewind live
+        // counters or overwrite the history assembled from accepted traffic ticks.
+        let lease = rateSource.lease(for: .poll)
         do {
             let fresh = try await api.stats()
-            guard !Task.isCancelled else { return }
-            stats = fresh
+            guard !Task.isCancelled, monitoringID == generation else { return }
             statsFallback = fresh == nil
-            if statsFallback { statsHistory = trafficHistory.samples }
+            if let fresh {
+                if let lease, rateSource.accepts(lease) {
+                    // The core's raw policy history is authoritative while polling.
+                    // A response crossing either handoff can supply metadata only.
+                    policyRateHistory = Array(fresh.history.suffix(600))
+                }
+                stats = TrafficStats(up: traffic?.up ?? 0, down: traffic?.down ?? 0,
+                                     active: traffic?.active ?? 0,
+                                     policies: fresh.policies, nodes: fresh.nodes, history: policyRateHistory)
+            }
             statsError = nil
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, monitoringID == generation else { return }
             statsError = "统计刷新失败：\(error.localizedDescription)"
         }
     }
@@ -585,52 +658,82 @@ final class Core: ObservableObject {
     private func refreshConnections(_ api: APIClient) async {
         guard usesConnectionAPI else { return }
         let generation = monitoringID
+        let refreshID = UUID()
+        connectionsRefreshID = refreshID
         do {
             let fresh = try await api.connections()
-            guard !Task.isCancelled, state == .running, monitoringID == generation else { return }
+            guard !Task.isCancelled, state == .running, monitoringID == generation,
+                  connectionsRefreshID == refreshID else { return }
             if let fresh {
                 connections = Array(fresh.filter { !clearedConnectionIDs.contains($0.id) }.suffix(maxLines))
             } else {
                 usesConnectionAPI = false
                 connections = logs.compactMap { connection(from: $0) }
             }
+            connectionsLoaded = true
         } catch { /* Preserve the last good snapshot on a transient failure. */ }
     }
 
     private func refreshActiveConnections(_ api: APIClient) async {
         let generation = monitoringID
+        let refreshID = UUID()
+        activeRefreshID = refreshID
+        activeSnapshotChanges = []
+        activeRefreshInFlight = true
+        defer {
+            if activeRefreshID == refreshID {
+                activeRefreshInFlight = false
+                activeSnapshotChanges = []
+            }
+        }
         do {
             let fresh = try await api.activeConnections()
-            guard !Task.isCancelled, state == .running, monitoringID == generation else { return }
-            activeConnections = fresh
+            guard !Task.isCancelled, state == .running, monitoringID == generation,
+                  activeRefreshID == refreshID else { return }
+            let merged = ActiveConnection.reconcile(fresh, current: activeConnections, changedIDs: activeSnapshotChanges)
+            activeConnections = merged
+            activeConnectionsLoaded = true
+            let now = Date()
+            if connectionRatesSampleAt.map({ now.timeIntervalSince($0) >= 0.75 }) ?? true {
+                displayedConnectionRates = Dictionary(uniqueKeysWithValues: merged.map { connection in
+                    var rates = displayedConnectionRates[connection.id] ?? DisplayedRates()
+                    rates.update(up: Double(connection.rateUp), down: Double(connection.rateDown))
+                    return (connection.id, rates)
+                })
+                connectionRatesSampleAt = now
+            }
             activeConnectionsError = nil
         } catch {
             guard !Task.isCancelled, state == .running, monitoringID == generation else { return }
+            guard activeRefreshID == refreshID else { return }
             activeConnectionsError = "活动连接刷新失败：\(error.localizedDescription)"
         }
     }
 
     private func followEvents(_ api: APIClient) async {
         var backoff: Double = 1
-        while !Task.isCancelled {
+        let generation = monitoringID
+        while !Task.isCancelled, monitoringID == generation {
             let started = Date()
             do {
                 try await api.events {
                     try Task.checkCancellation()
-                    self.eventsConnected = true
+                    guard self.monitoringID == generation else { throw CancellationError() }
+                    self.setEventsConnected(true)
                     // Reconcile events missed during a disconnect before consuming new frames.
                     await self.refreshConnections(api)
                     await self.refreshActiveConnections(api)
                 } receive: { frame in
+                    guard self.monitoringID == generation else { throw CancellationError() }
                     try await self.receiveEvent(frame, api: api)
                 }
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, monitoringID == generation else { return }
                 // Resume at the end of the root log: SSE already delivered earlier lines.
                 if rootPID != nil, eventsConnected {
                     logOffset = (try? FileManager.default.attributesOfItem(atPath: rootLog)[.size] as? NSNumber)?.uint64Value ?? logOffset
                 }
-                eventsConnected = false
+                setEventsConnected(false)
                 eventRefreshTask?.cancel()
                 eventRefreshTask = nil
                 requestsDirty = true
@@ -647,31 +750,28 @@ final class Core: ObservableObject {
         let decoder = JSONDecoder()
         switch frame.event {
         case "traffic":
+            guard rateSource.source == .events else { return }
             let event = try decoder.decode(TrafficEvent.self, from: data)
+            guard lastEventTimeMs.map({ event.timeMs > $0 }) ?? true else { return }
+            lastEventTimeMs = event.timeMs
             let time = Date(timeIntervalSince1970: Double(event.timeMs) / 1000)
-            traffic = Traffic(up: event.totalUp, down: event.totalDown, active: event.active)
-            upRate = Double(event.up)
-            downRate = Double(event.down)
-            lastTrafficSampleAt = time
-            rateHistory.append((upRate, downRate))
-            if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
-            if let traffic { trafficHistory.record(traffic, at: time) }
-            if statsFallback { statsHistory = trafficHistory.samples }
-            if let stats {
-                var history = stats.history.filter { $0.timeMs < event.timeMs }
-                history.append(TrafficStatsSample(timeMs: event.timeMs, up: event.up, down: event.down, policies: event.policies))
-                self.stats = TrafficStats(up: event.totalUp, down: event.totalDown, active: event.active,
-                                          policies: stats.policies, nodes: stats.nodes, history: Array(history.suffix(600)))
-            }
+            recordRates(up: Double(event.up), down: Double(event.down),
+                        traffic: Traffic(up: event.totalUp, down: event.totalDown, active: event.active),
+                        at: time, statsSample: TrafficStatsSample(timeMs: event.timeMs, up: event.up,
+                                                                down: event.down, policies: event.policies))
             refreshEventSnapshots(api)
         case "conn_open":
             let connection = try decoder.decode(ActiveConnection.self, from: data)
+            if activeRefreshInFlight { activeSnapshotChanges.insert(connection.id) }
             activeConnections.removeAll { $0.id == connection.id }
             activeConnections.append(connection)
+            activeConnections.sort(by: ActiveConnection.displayOrder)
             requestsDirty = true
         case "conn_close":
             let connection = try decoder.decode(ActiveConnection.self, from: data)
+            if activeRefreshInFlight { activeSnapshotChanges.insert(connection.id) }
             activeConnections.removeAll { $0.id == connection.id }
+            displayedConnectionRates.removeValue(forKey: connection.id)
             requestsDirty = true
         case "log":
             let log = try decoder.decode(LogEvent.self, from: data)
@@ -723,7 +823,7 @@ final class Core: ObservableObject {
                 eventTask = nil
                 eventRefreshTask?.cancel()
                 eventRefreshTask = nil
-                eventsConnected = false
+                setEventsConnected(false)
             }
         }
         while !Task.isCancelled {
@@ -745,11 +845,9 @@ final class Core: ObservableObject {
             guard !Task.isCancelled else { return }
             if let api, state == .running {
                 if eventTask == nil { eventTask = Task { await self.followEvents(api) } }
-                if !eventsConnected {
-                    await sampleTraffic(api)
-                    await refreshConnections(api)
-                    if observingActiveConnections { await refreshActiveConnections(api) }
-                }
+                if !eventsConnected { await sampleTraffic(api) }
+                if !eventsConnected { await refreshConnections(api) }
+                if !eventsConnected, observingActiveConnections { await refreshActiveConnections(api) }
                 if Date().timeIntervalSince(lastStatsPoll) >= 5 {
                     await sampleStats(api)
                     lastStatsPoll = Date()
@@ -776,11 +874,14 @@ final class Core: ObservableObject {
         // explicitly replaces those measurements for its options.
         if !preferTestResults {
             for option in fresh.flatMap(\.options) {
-                if nodeTests[option.name] == nil, let latency = option.latencyMs {
+                if !testingNodes.contains(option.name),
+                   !fresh.contains(where: { testingGroups.contains($0.group) && $0.options.contains(where: { $0.name == option.name }) }),
+                   nodeTests[option.name] == nil, let latency = option.latencyMs {
                     nodeLatencies[option.name] = latency
                 }
             }
         }
+        policiesLoaded = true
         groups = fresh.map { group in
             PolicyGroup(group: group.group, type: group.type, selected: group.selected,
                         options: group.options.map { option in
@@ -838,6 +939,12 @@ final class Core: ObservableObject {
         }
     }
 
+    func isTesting(node: String) -> Bool {
+        testingNodes.contains(node) || groups.contains { group in
+            testingGroups.contains(group.group) && group.options.contains { $0.name == node }
+        }
+    }
+
     func test(node: String) {
         guard state == .running, let api, !testingNodes.contains(node) else { return }
         testingNodes.insert(node)
@@ -859,7 +966,9 @@ final class Core: ObservableObject {
         Task {
             do {
                 try await api.closeConnection(id)
+                if activeRefreshInFlight { activeSnapshotChanges.insert(id) }
                 activeConnections.removeAll { $0.id == id }
+                displayedConnectionRates.removeValue(forKey: id)
                 lastActionError = nil
             } catch { lastActionError = "断开连接失败：\(error.localizedDescription)" }
         }
@@ -1207,6 +1316,7 @@ final class Core: ObservableObject {
     func clearConnections() {
         if usesConnectionAPI { clearedConnectionIDs.formUnion(connections.map(\.id)) }
         connections = []
+        connectionsLoaded = true
     }
 
     // MARK: output parsing
