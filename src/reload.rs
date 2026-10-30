@@ -44,6 +44,7 @@ fn subscription_interval(cfg: &Config) -> Option<Duration> {
 pub async fn build(mut cfg: Config, path: &str, strict: bool) -> Result<(Config, Router)> {
     subscription::expand(&mut cfg, config_dir(path), strict).await?;
     let router = Router::new(&cfg)?;
+    crate::dns::install(crate::dns::Resolver::new(&cfg)?);
     for set in router.rule_sets() {
         if let Err(e) = ruleset::load(&set, config_dir(path), rule_set_interval(&cfg)).await {
             if strict {
@@ -90,8 +91,10 @@ impl Reloader {
     pub fn start(router: Router, cfg: &Config, path: &str) -> Arc<Self> {
         let router = Arc::new(router);
         activate(&router, cfg);
+        let handle = Arc::new(RouterHandle(RwLock::new(router)));
+        crate::dns::set_router(handle.clone());
         Arc::new(Reloader {
-            handle: Arc::new(RouterHandle(RwLock::new(router))),
+            handle,
             path: path.to_string(),
             fixed: Fixed::of(&cfg.general),
             lock: tokio::sync::Mutex::new(()),

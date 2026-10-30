@@ -16,6 +16,12 @@ pub struct General {
     pub tun_mtu: Option<u16>,
     pub fake_ip_range: Option<String>,
     pub dns_server: Vec<String>,
+    /// DoH (`https://`), DoT (`tls://`) or DoQ (`quic://`) servers, used instead of `dns_server`.
+    pub encrypted_dns_server: Vec<String>,
+    /// Send encrypted DNS through the proxy rules instead of straight out.
+    pub encrypted_dns_follow_outbound_mode: bool,
+    /// `ip:port` or `*:port` destinations whose DNS queries the TUN answers itself.
+    pub hijack_dns: Vec<String>,
     pub rule_set_update_interval: Option<u64>,
 }
 
@@ -167,11 +173,17 @@ pub struct Config {
     pub proxies: Vec<(String, ProxyDef)>,
     pub groups: Vec<GroupDef>,
     pub rules: Vec<Rule>,
+    /// `[Host]` lines: name or wildcard pattern, and its value (addresses or `server:...`).
+    pub hosts: Vec<(String, String)>,
 }
 
 fn split_kv(line: &str) -> Result<(&str, &str)> {
     let (k, v) = line.split_once('=').ok_or_else(|| anyhow!("expected `key = value`"))?;
     Ok((k.trim(), v.trim()))
+}
+
+fn list(v: &str) -> Vec<String> {
+    v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
 }
 
 fn unquote(s: &str) -> &str {
@@ -336,11 +348,18 @@ impl Config {
                         "dns-server" => {
                             g.dns_server = v.split(',').map(str::trim).filter(|s| !s.is_empty() && *s != "system").map(String::from).collect()
                         }
+                        "encrypted-dns-server" => g.encrypted_dns_server = list(v),
+                        "encrypted-dns-follow-outbound-mode" => g.encrypted_dns_follow_outbound_mode = matches!(v, "true" | "1"),
+                        "hijack-dns" => g.hijack_dns = list(v),
                         _ => {} // unknown keys are tolerated for compatibility
                     }
                 }
                 "Proxy" => cfg.proxies.push(parse_proxy(line).with_context(ctx)?),
                 "Proxy Group" => cfg.groups.push(parse_group(line).with_context(ctx)?),
+                "Host" => {
+                    let (k, v) = split_kv(line).with_context(ctx)?;
+                    cfg.hosts.push((k.to_string(), v.to_string()));
+                }
                 "Rule" => cfg.rules.push(Rule::parse(line).with_context(ctx)?),
                 _ => {}
             }
@@ -371,6 +390,23 @@ mod tests {
         assert_eq!(cfg.groups[1].kind, GroupKind::UrlTest { tolerance_ms: 50 });
         assert_eq!(cfg.groups[1].interval_secs, 300);
         assert!(cfg.rules.len() >= 5);
+    }
+
+    #[test]
+    fn dns_settings() {
+        let cfg = Config::parse(
+            "[General]\ndns-server = system, 223.5.5.5\nencrypted-dns-server = https://1.1.1.1/dns-query, tls://8.8.8.8\n\
+             encrypted-dns-follow-outbound-mode = true\nhijack-dns = 8.8.8.8:53, *:53\n\
+             [Host]\nexample.com = 1.2.3.4\n*.lan = server:192.168.1.1\n",
+        )
+        .unwrap();
+        let g = &cfg.general;
+        assert_eq!(g.dns_server, vec!["223.5.5.5"]);
+        assert_eq!(g.encrypted_dns_server, vec!["https://1.1.1.1/dns-query", "tls://8.8.8.8"]);
+        assert!(g.encrypted_dns_follow_outbound_mode);
+        assert_eq!(g.hijack_dns, vec!["8.8.8.8:53", "*:53"]);
+        assert_eq!(cfg.hosts[1], ("*.lan".to_string(), "server:192.168.1.1".to_string()));
+        crate::dns::Resolver::new(&cfg).unwrap();
     }
 
     #[test]

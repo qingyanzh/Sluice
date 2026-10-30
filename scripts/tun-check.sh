@@ -78,6 +78,24 @@ else
     echo "SKIP  NTP (SLUICE_CHECK_NTP=0: this network blocks NTP even without Sluice)"
 fi
 
+# DNS extensions (examples/tun-test.conf sets these up).
+static=$(dig +short +time=3 +tries=1 sluice-static.test A | head -1)
+check "[Host] static entry wins over fake IP" "[ '$static' = 10.9.8.7 ]" "got '$static'"
+real() { [[ -n "$1" && "$1" != 198.18.* && "$1" =~ ^[0-9.]+$ ]]; }
+doh=$(dig +short +time=8 +tries=1 example.net A | grep -E '^[0-9.]+$' | head -1)
+check "DoH (https://1.1.1.1/dns-query) answers [Host] server: entry" "real '$doh'" "got '$doh'"
+dot=$(dig +short +time=8 +tries=1 iana.org A | grep -E '^[0-9.]+$' | head -1)
+check "DoT (tls://8.8.8.8) answers [Host] server: entry" "real '$dot'" "got '$dot'"
+doq=$(dig +short +time=8 +tries=1 wikipedia.org A | grep -E '^[0-9.]+$' | head -1)
+if real "$doq"; then pass "DoQ (quic://dns.adguard-dns.com) answers [Host] server: entry"
+else echo "INFO  DoQ (optional) gave '$doq'"; fi
+txt=$(dig +short +time=8 +tries=1 example.com TXT | head -1)
+check "non-A query answered via encrypted-dns-server" "[ -n '$txt' ]"
+cache=$(curl -s -m 3 http://127.0.0.1:6170/v1/dns)
+check "API lists the cached example.net answer" "echo '$cache' | grep -q '\"name\":\"example.net\"'" "$cache"
+flushed=$(curl -s -m 3 -X POST http://127.0.0.1:6170/v1/dns/flush)
+check "API flushes the DNS cache" "echo '$flushed' | grep -qE '\"flushed\":[1-9]'" "$flushed"
+
 route=$(curl -s -m 3 'http://127.0.0.1:6170/v1/route?target=example.org')
 check "API sees the REJECT rule" "echo '$route' | grep -q '\"outbound\":\"REJECT\"'" "$route"
 
