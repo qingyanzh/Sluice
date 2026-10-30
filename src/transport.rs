@@ -126,6 +126,8 @@ pub struct Transport {
     layer: Option<Layer>,
     /// Name for the WebSocket `Host` header / gRPC authority when none is configured.
     default_host: String,
+    #[cfg(test)]
+    test_wire: Option<tokio::sync::mpsc::UnboundedSender<BoxStream>>,
 }
 
 impl Transport {
@@ -154,15 +156,44 @@ impl Transport {
         // gRPC needs HTTP/2, which TLS servers only speak when the client offers ALPN h2.
         let alpn: &[&[u8]] = if matches!(layer, Some(Layer::Grpc { .. } | Layer::Xhttp(_))) { &[b"h2"] } else { &[] };
         let tls = if tls { Some(tls_client_config(&server, sni, skip_cert_verify, alpn)?) } else { None };
-        Ok(Transport { server, port, tls, reality, layer, default_host })
+        Ok(Transport { server, port, tls, reality, layer, default_host, #[cfg(test)] test_wire: None })
+    }
+
+    /// AnyTLS always runs directly over TLS; ALPN is optional.
+    pub fn anytls(server: String, port: u16, sni: Option<String>, skip: bool, alpn: &[String], tfo: bool) -> Result<Self> {
+        let protocols: Vec<&[u8]> = alpn.iter().map(|p| p.as_bytes()).collect();
+        if protocols.iter().any(|p| p.is_empty() || p.len() > 255) {
+            bail!("invalid AnyTLS ALPN protocol length");
+        }
+        if tfo {
+            static NOTICE: std::sync::Once = std::sync::Once::new();
+            NOTICE.call_once(|| log::info!("AnyTLS tfo is accepted for compatibility; outbound TCP uses a normal connect"));
+        }
+        let default_host = sni.clone().unwrap_or_else(|| server.clone());
+        let tls = Some(tls_client_config(&server, sni, skip, &protocols)?);
+        Ok(Transport { server, port, tls, reality: None, layer: None, default_host, #[cfg(test)] test_wire: None })
+    }
+
+    /// TLS/protocol tests can run in sandboxes which forbid loopback socket binds.
+    #[cfg(test)]
+    pub fn with_test_wire(mut self, wire: tokio::sync::mpsc::UnboundedSender<BoxStream>) -> Self {
+        self.test_wire = Some(wire);
+        self
     }
 
     pub async fn connect(&self) -> Result<BoxStream> {
-        let tcp = connect_tcp(&self.server, self.port).await?;
+        #[cfg(test)]
+        let tcp: BoxStream = if let Some(wire) = &self.test_wire {
+            let (local, remote) = tokio::io::duplex(256 * 1024);
+            wire.send(Box::new(remote)).map_err(|_| anyhow::anyhow!("test listener closed"))?;
+            Box::new(local)
+        } else { Box::new(connect_tcp(&self.server, self.port).await?) };
+        #[cfg(not(test))]
+        let tcp: BoxStream = Box::new(connect_tcp(&self.server, self.port).await?);
         let stream: BoxStream = match (&self.reality, &self.tls) {
-            (Some(r), _) => crate::reality::connect(Box::new(tcp), r).await?,
+            (Some(r), _) => crate::reality::connect(tcp, r).await?,
             (None, Some((config, sni))) => Box::new(TlsConnector::from(config.clone()).connect(sni.clone(), tcp).await?),
-            (None, None) => Box::new(tcp),
+            (None, None) => tcp,
         };
         match &self.layer {
             Some(Layer::Ws(ws)) => websocket(stream, ws, ws.host.as_deref().unwrap_or(&self.default_host)).await,

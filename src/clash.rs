@@ -133,6 +133,25 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
                 flow,
             }
         }
+        "anytls" => {
+            if v.get("client-fingerprint").is_some() {
+                static NOTICE: std::sync::Once = std::sync::Once::new();
+                NOTICE.call_once(|| log::info!("AnyTLS client-fingerprint is ignored; TLS uses rustls"));
+            }
+            let alpn = match v.get("alpn") {
+                None => Vec::new(),
+                Some(Value::Sequence(items)) => items.iter().map(|v| {
+                    v.as_str().map(str::to_string).ok_or_else(|| anyhow!("bad anytls alpn"))
+                }).collect::<Result<Vec<_>>>()?,
+                Some(Value::String(s)) => s.split([',', '|']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+                _ => bail!("bad anytls alpn"),
+            };
+            ProxyDef::AnyTls {
+                server, port, password: need(v, "password")?, sni, skip_cert_verify: skip,
+                tfo: flag(v, "tfo"), alpn,
+                udp: v.get("udp").is_none() || flag(v, "udp"),
+            }
+        }
         "trojan" => ProxyDef::Trojan { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, layer: transport(v)? },
         "hysteria2" => {
             let obfs = match s(v, "obfs").as_deref() {
@@ -188,6 +207,20 @@ mod tests {
         let (back_name, back) = crate::config::parse_proxy(&line).unwrap();
         assert_eq!(&back_name, name);
         assert_eq!(format!("{back:?}"), format!("{expected:?}"), "{line}");
+    }
+
+    #[test]
+    fn anytls_yaml_roundtrip() {
+        for port in ["443", "'443'"] {
+            assert_parses_and_roundtrips(&format!("proxies:\n- {{name: Test, type: anytls, server: h, port: {port}, password: secret, sni: tls.example, skip-cert-verify: true, udp: false, tfo: true, alpn: [h2, http/1.1], client-fingerprint: chrome}}"), ProxyDef::AnyTls {
+                server: "h".into(), port: 443, password: "secret".into(), sni: Some("tls.example".into()),
+                skip_cert_verify: true, tfo: true, udp: false, alpn: vec!["h2".into(), "http/1.1".into()],
+            });
+        }
+        assert_parses_and_roundtrips("proxies:\n- {name: Test, type: anytls, server: h, port: 443, password: secret}", ProxyDef::AnyTls {
+            server: "h".into(), port: 443, password: "secret".into(), sni: None,
+            skip_cert_verify: false, tfo: false, udp: true, alpn: vec![],
+        });
     }
 
     #[test]

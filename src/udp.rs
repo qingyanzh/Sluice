@@ -187,6 +187,8 @@ pub fn direct() -> UdpPipe {
 pub enum Framing {
     /// Trojan: `ATYP addr port len(u16) CRLF payload`.
     Trojan,
+    /// sing-box UoT v2 connect mode: length(u16) + payload for a fixed peer.
+    Uot(Target),
     /// Xray XUDP: Mux.Cool frames on session 0 (see [`xudp_frame`]); `Target` stands in
     /// for replies whose frame names no source.
     Xudp(Target),
@@ -220,6 +222,14 @@ impl Framing {
                 out.extend_from_slice(&p.data);
                 Ok(out)
             }
+            Framing::Uot(target) => {
+                if p.data.len() > u16::MAX as usize { bail!("UoT packet too large"); }
+                if p.addr.to_string() != target.to_string() { bail!("UoT connect destination changed"); }
+                let mut out = Vec::with_capacity(p.data.len() + 2);
+                out.extend_from_slice(&(p.data.len() as u16).to_be_bytes());
+                out.extend_from_slice(&p.data);
+                Ok(out)
+            }
             Framing::Xudp(_) => xudp_frame(first, &p.addr, &p.data),
         }
     }
@@ -235,6 +245,11 @@ impl Framing {
                 let mut data = vec![0u8; len];
                 r.read_exact(&mut data).await?;
                 Ok(Some(Packet { addr, data }))
+            }
+            Framing::Uot(target) => {
+                let mut data = vec![0; r.read_u16().await? as usize];
+                r.read_exact(&mut data).await?;
+                Ok(Some(Packet { addr: target.clone(), data }))
             }
             Framing::Xudp(fallback) => loop {
                 let mut meta = vec![0u8; r.read_u16().await? as usize];
