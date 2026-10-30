@@ -60,9 +60,23 @@ Supporting text uses `DS.ink2` (66% of the primary colour) and metadata
 Pane titles are 26pt bold, figures are semibold, and captions are semibold,
 so the key value in every card reads first.
 
+## States and failures
+
+- The core's state reads the same everywhere: the activity hero, the toolbar
+  pills, the policy and requests empty states, and the rule test. While
+  stopped, every place that needs the core says so and offers 启动 Sluice.
+- A setting that is on but not working is a warning, not a success: the system
+  proxy pointing at a stopped core is orange, with 启动 and 关闭系统代理 right
+  there.
+- Missing setup is stated with its effect and its fix ("还没有代理节点 … 所有流量
+  都会直连", with 添加节点 / 添加订阅 opening the sheet directly).
+- Every error has a plain Chinese first line (what happened and what to do);
+  the core's own message folds under 详细信息; format errors show a correct
+  example with a copy button (`ErrorText`).
+
 ## Appearance
 
-The app follows the system appearance by default; 概览 › 外观 can pin it to
+The app follows the system appearance by default; 设置 › 外观 can pin it to
 light or dark. Every colour is dynamic: tokens in `DS` resolve per appearance,
 and the config editor uses the system label colours, never a colour with a
 fixed alpha, so nothing turns grey-on-grey in dark mode.

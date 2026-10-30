@@ -10,7 +10,7 @@ enum Pane: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .activity: "活动"
-        case .overview: "概览"
+        case .overview: "设置"
         case .requests: "请求"
         case .policy: "策略"
         case .nodes: "节点"
@@ -23,7 +23,7 @@ enum Pane: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .activity: "gauge.with.needle"
-        case .overview: "square.grid.2x2"
+        case .overview: "gearshape"
         case .requests: "arrow.up.arrow.down.circle"
         case .policy: "signpost.right"
         case .nodes: "globe.asia.australia"
@@ -37,11 +37,11 @@ enum Pane: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .activity: "运行状态与实时流量"
-        case .overview: "接管方式、代理服务与启动选项"
+        case .overview: "接管方式、代理服务、启动与外观"
         case .requests: ""
         case .policy: "出站模式与策略组"
         case .nodes: "配置中的节点和订阅"
-        case .rule: "规则自上而下匹配，命中即停止"
+        case .rule: "自上而下匹配，命中即停止"
         case .logs: "内核输出"
         case .profile: ""
         }
@@ -49,9 +49,9 @@ enum Pane: String, CaseIterable, Identifiable {
 
     /// Sidebar sections, Surge-style: an untitled top group, then titled groups.
     static let sections: [(String?, [Pane])] = [
-        (nil, [.activity, .overview]),
+        (nil, [.activity]),
         ("代理", [.requests, .policy, .nodes, .rule]),
-        ("工具", [.logs, .profile]),
+        ("工具", [.logs, .profile, .overview]),
     ]
 }
 
@@ -168,9 +168,13 @@ enum Appearance: String, CaseIterable {
     }
 }
 
+/// A sheet another pane asks the nodes pane to open.
+enum NodesIntent { case node, subscription }
+
 struct MainView: View {
     @EnvironmentObject var core: Core
     @State private var pane: Pane? = .activity
+    @State private var nodesIntent: NodesIntent?
     @AppStorage("appearance") private var appearance = Appearance.system
 
     var body: some View {
@@ -190,12 +194,12 @@ struct MainView: View {
                 }
                 Group {
                 switch pane ?? .activity {
-                case .activity: ActivityView(pane: $pane)
+                case .activity: ActivityView(pane: $pane, nodesIntent: $nodesIntent)
                 case .overview: OverviewView()
                 case .requests: RequestsView()
                 case .policy: PolicyView()
-                case .nodes: NodesView()
-                case .rule: RuleView()
+                case .nodes: NodesView(intent: $nodesIntent)
+                case .rule: RuleView(pane: $pane)
                 case .logs: LogsView()
                 case .profile: ConfigView()
                 }
@@ -210,9 +214,10 @@ struct MainView: View {
             .toolbarBackground(.hidden, for: .windowToolbar)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    TogglePill(title: "系统代理", on: core.systemProxyOn) { core.setSystemProxy(!core.systemProxyOn) }
+                    TogglePill(title: "系统代理", on: core.systemProxyOn,
+                               warning: core.systemProxyOn && core.state != .running && core.state != .starting) { core.setSystemProxy(!core.systemProxyOn) }
                         .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
-                        .help("把系统的 HTTP/HTTPS/SOCKS 代理指向 Sluice")
+                        .help(core.systemProxyOn && core.state != .running ? "系统代理已开启，但内核未运行：网络请求会失败" : "把系统的 HTTP/HTTPS/SOCKS 代理指向 Sluice")
                     EnhancedModePill()
                 }
             }
@@ -297,12 +302,14 @@ struct IconTile: View {
     let symbol: String
     var on = false
     var size: CGFloat = 30
+    /// Fill when on; the accent unless the tile marks a warning or an error.
+    var tone: Color = DS.accent
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-            .fill(on ? AnyShapeStyle(DS.accent.gradient) : AnyShapeStyle(Color.primary.opacity(0.075)))
+            .fill(on ? AnyShapeStyle(tone.gradient) : AnyShapeStyle(Color.primary.opacity(0.075)))
             .overlay(RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
                 .strokeBorder(Color.white.opacity(on ? 0.25 : 0), lineWidth: 0.5))
-            .shadow(color: DS.accent.opacity(on ? 0.30 : 0), radius: 3, y: 1)
+            .shadow(color: tone.opacity(on ? 0.30 : 0), radius: 3, y: 1)
             .overlay {
                 Image(systemName: symbol)
                     .symbolVariant(on ? .fill : .none)
@@ -336,12 +343,15 @@ struct StatusBadge: View {
 struct TogglePill: View {
     let title: String
     let on: Bool
+    /// On, but not doing its job (e.g. system proxy set while the core is stopped).
+    var warning = false
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Circle().fill(on ? Color.green : Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
-                    .shadow(color: on ? .green.opacity(0.6) : .clear, radius: 3)
+                let dot: Color = warning ? .orange : on ? .green : Color.secondary.opacity(0.5)
+                Circle().fill(dot).frame(width: 7, height: 7)
+                    .shadow(color: on ? dot.opacity(0.6) : .clear, radius: 3)
                     .scaleEffect(on ? 1 : 0.8)
                     .animation(DS.spring, value: on)
                 Text(title).font(DS.small.weight(on ? .semibold : .medium))
@@ -800,6 +810,7 @@ func splitBytes(_ bytes: Double) -> (String, String) {
 struct ActivityView: View {
     @EnvironmentObject var core: Core
     @Binding var pane: Pane?
+    @Binding var nodesIntent: NodesIntent?
     @State private var topBy = 0
 
     var body: some View {
@@ -807,7 +818,7 @@ struct ActivityView: View {
             VStack(alignment: .leading, spacing: DS.gap) {
                 hero.entrance(0)
                 HStack(alignment: .top, spacing: DS.gap) {
-                    TrafficCard(up: core.upRate, down: core.downRate, history: core.rateHistory)
+                    TrafficCard(up: core.upRate, down: core.downRate, history: core.rateHistory, running: core.state == .running)
                         .frame(maxWidth: .infinity)
                         .layoutPriority(1)
                     connectionsCard.frame(width: 260)
@@ -868,25 +879,57 @@ struct ActivityView: View {
                 }
                 .glassButton()
             }
+            // What needs attention comes before the facts, with its fix right there.
+            if proxyWithoutCore {
+                Notice(tone: .orange, icon: "exclamationmark.triangle.fill", title: "系统代理已开启，但内核未运行",
+                       detail: "此时经过系统代理的网络请求都会失败。启动 Sluice，或关闭系统代理恢复直接上网。") {
+                    Button("关闭系统代理") { core.setSystemProxy(false) }.glassButton()
+                    Button("启动 Sluice") { core.start() }.glassButton(prominent: true)
+                }
+            }
+            if !core.summary.hasNodes {
+                Notice(tone: DS.accent, icon: "globe.asia.australia", title: "还没有代理节点",
+                       detail: "当前配置里没有节点或订阅，所有流量都会直连。添加订阅或节点后即可通过代理访问。") {
+                    Button("添加节点") { nodesIntent = .node; pane = .nodes }.glassButton()
+                    Button("添加订阅") { nodesIntent = .subscription; pane = .nodes }.glassButton(prominent: true)
+                }
+            }
             Divider().opacity(0.6)
             HStack(spacing: 0) {
                 fact("出站模式", OutboundMode(rawValue: core.mode)?.title ?? core.mode,
+                     note: core.summary.hasNodes ? nil : "全部直连",
                      icon: OutboundMode(rawValue: core.mode)?.icon ?? "arrow.triangle.branch", accent: core.state == .running)
                 Divider().frame(height: 28).padding(.horizontal, 12)
-                fact("当前节点", mainGroup?.selected ?? "–", icon: "globe.asia.australia")
+                fact("当前节点", currentNode, icon: "globe.asia.australia")
                 Divider().frame(height: 28).padding(.horizontal, 12)
-                fact("系统代理", core.systemProxyOn ? "已接管" : "未接管", icon: "network", accent: core.systemProxyOn)
+                if proxyWithoutCore {
+                    fact("系统代理", "已开启 · 内核未运行", icon: "network", accent: true, tone: .orange)
+                } else {
+                    fact("系统代理", core.systemProxyOn ? "已接管" : "未接管", icon: "network", accent: core.systemProxyOn)
+                }
             }
         }
         .card()
     }
 
-    private func fact(_ label: String, _ value: String, icon: String, accent: Bool = false) -> some View {
+    /// The system proxy points at Sluice while nothing is listening: the user's network is broken.
+    private var proxyWithoutCore: Bool { core.systemProxyOn && core.state != .running && core.state != .starting }
+
+    private var currentNode: String {
+        if !core.summary.hasNodes { return "无 · 直连" }
+        guard core.state == .running, let selected = mainGroup?.selected else { return "启动后显示" }
+        return selected == "DIRECT" ? "直连" : selected
+    }
+
+    private func fact(_ label: String, _ value: String, note: String? = nil, icon: String, accent: Bool = false, tone: Color = DS.accent) -> some View {
         HStack(spacing: 9) {
-            IconTile(symbol: icon, on: accent, size: 28)
+            IconTile(symbol: icon, on: accent, size: 28, tone: tone)
             VStack(alignment: .leading, spacing: 1) {
-                Text(label).font(DS.caption).foregroundStyle(DS.ink2)
-                Text(value).font(DS.heading)
+                HStack(spacing: 4) {
+                    Text(label).font(DS.caption).foregroundStyle(DS.ink2)
+                    if let note { Text("· \(note)").font(DS.caption).foregroundStyle(.orange) }
+                }
+                Text(value).font(DS.heading).foregroundStyle(tone == DS.accent ? Color.primary : tone)
                     .lineLimit(1).truncationMode(.middle)
                     .contentTransition(.opacity).animation(DS.spring, value: value)
             }
@@ -940,15 +983,18 @@ struct ActivityView: View {
                     Text(formatBytes(down)).font(DS.label.monospacedDigit())
                 }
             }
+            // Up/down share; with no traffic there is nothing to compare, so show an empty track.
             GeometryReader { geo in
-                let total = max(up + down, 1)
-                HStack(spacing: 3) {
-                    Capsule().fill(Color.primary.opacity(0.15)).frame(width: max(4, (geo.size.width - 3) * up / total))
-                    Capsule().fill(DS.accent)
+                if up + down == 0 {
+                    Capsule().fill(Color.primary.opacity(0.06))
+                } else {
+                    HStack(spacing: 3) {
+                        Capsule().fill(Color.primary.opacity(0.15)).frame(width: max(4, (geo.size.width - 3) * up / (up + down)))
+                        Capsule().fill(DS.accent)
+                    }
                 }
             }
             .frame(height: 8)
-            .opacity(up + down == 0 ? 0.3 : 1)
         }
         .card()
     }
@@ -1004,6 +1050,7 @@ struct TrafficCard: View {
     let up: Double
     let down: Double
     let history: [(up: Double, down: Double)]
+    var running = true
 
     var body: some View {
         let peak = history.map { max($0.up, $0.down) }.max() ?? 0
@@ -1042,7 +1089,9 @@ struct TrafficCard: View {
                 }
             }
             .overlay {
-                if peak == 0 {
+                if !running {
+                    Text("内核未启动，暂无流量").font(DS.small).foregroundStyle(DS.ink3)
+                } else if peak == 0 {
                     Text("等待流量…").font(DS.small).foregroundStyle(DS.ink3)
                 }
             }
@@ -1130,7 +1179,7 @@ struct OverviewView: View {
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .paneHeader { PaneHeader(title: "概览", subtitle: Pane.overview.subtitle) }
+        .paneHeader { PaneHeader(title: Pane.overview.title, subtitle: Pane.overview.subtitle) }
     }
 }
 
@@ -1223,7 +1272,8 @@ struct PolicyView: View {
                 if core.groups.isEmpty {
                     EmptyState(icon: "signpost.right",
                                title: core.state == .running ? "没有策略组" : "Sluice 未运行",
-                               detail: core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。")
+                               detail: core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。",
+                               action: core.isActive ? nil : ("启动 Sluice", { core.start() }) as (String, () -> Void)?)
                         .frame(minHeight: 260)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: DS.gap)], spacing: 10) {
@@ -1361,6 +1411,7 @@ struct OptionRow: View {
 
 struct NodesView: View {
     @EnvironmentObject var core: Core
+    @Binding var intent: NodesIntent?
     @State private var showAddNode = false
     @State private var showAddSub = false
     @State private var text = ""
@@ -1393,10 +1444,22 @@ struct NodesView: View {
         }
         .sheet(isPresented: $showAddNode, onDismiss: refresh) { AddNodeSheet() }
         .sheet(isPresented: $showAddSub, onDismiss: refresh) { AddSubscriptionSheet() }
-        .onAppear(perform: refresh)
+        .onAppear {
+            refresh()
+            // Arrived from a "添加…" button elsewhere: open that sheet straight away.
+            switch intent {
+            case .node: showAddNode = true
+            case .subscription: showAddSub = true
+            case nil: break
+            }
+            intent = nil
+        }
     }
 
-    private func refresh() { text = core.readConfig() }
+    private func refresh() {
+        text = core.readConfig()
+        core.refreshSummary()
+    }
 }
 
 struct NodeCard: View {
@@ -1500,16 +1563,14 @@ struct SheetField: View {
 /// Sheet footer: an error line if any, then cancel and the primary action.
 struct SheetFooter: View {
     let error: String?
+    var example: String?
     let primary: String
     let enabled: Bool
     let cancel: () -> Void
     let action: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(DS.small).foregroundStyle(.red).textSelection(.enabled)
-            }
+            if let error { ErrorText(raw: error, example: example) }
             HStack(spacing: 8) {
                 Spacer()
                 Button("取消", action: cancel).keyboardShortcut(.cancelAction).glassButton()
@@ -1532,7 +1593,8 @@ struct AddNodeSheet: View {
                         detail: "粘贴分享链接（ss、vmess、vless、trojan、hysteria2），或一行 Surge 风格的代理配置。")
             SheetField(label: "分享链接或代理行", prompt: "例如 HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=…",
                        text: $input, multiline: true)
-            SheetFooter(error: error, primary: busy ? "检查中…" : "添加", enabled: !busy && !input.isEmpty, cancel: { dismiss() }) {
+            SheetFooter(error: error, example: "HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=你的密码",
+                        primary: busy ? "检查中…" : "添加", enabled: !busy && !input.isEmpty, cancel: { dismiss() }) {
                 busy = true
                 Task {
                     error = await core.addNode(input)
@@ -1605,8 +1667,13 @@ struct RequestsView: View {
                 }
                 .overlay {
                     if rows.isEmpty {
-                        EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
-                                   detail: "经过 Sluice 的连接会实时显示在这里。")
+                        if !core.isActive && core.connections.isEmpty {
+                            EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
+                                       detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
+                        } else {
+                            EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
+                                       detail: "经过 Sluice 的连接会实时显示在这里。")
+                        }
                     }
                 }
                 .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
@@ -1682,16 +1749,83 @@ struct Monogram: View {
     }
 }
 
+/// An inline call-out: what is wrong or missing, why it matters, and the fix.
+struct Notice<Actions: View>: View {
+    let tone: Color
+    let icon: String
+    let title: String
+    let detail: String
+    @ViewBuilder var actions: Actions
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            IconTile(symbol: icon, on: true, size: 30, tone: tone)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(DS.heading)
+                Text(detail).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            HStack(spacing: 8) { actions }
+        }
+        .padding(12)
+        .background(tone.opacity(0.08), in: RoundedRectangle(cornerRadius: DS.smallRadius + 2, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: DS.smallRadius + 2, style: .continuous).strokeBorder(tone.opacity(0.25), lineWidth: 0.5))
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+}
+
+/// A failure told the way people need it: the first line says what went wrong in plain
+/// Chinese; any lines after it are the core's own message, folded under 详细信息.
+/// Format errors also show a correct example to copy.
+struct ErrorText: View {
+    let raw: String
+    var example: String?
+    @State private var open = false
+    var body: some View {
+        let parts = raw.split(separator: "\n", maxSplits: 1).map(String.init)
+        VStack(alignment: .leading, spacing: 6) {
+            Label(parts.first ?? raw, systemImage: "exclamationmark.triangle.fill")
+                .font(DS.small.weight(.medium)).foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+            if let example, raw.contains("格式不正确") {
+                HStack(spacing: 8) {
+                    Text(example).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(example, forType: .string)
+                    } label: { Image(systemName: "doc.on.doc") }
+                        .buttonStyle(RoundIconStyle()).help("复制示例").accessibilityLabel("复制示例")
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            if parts.count > 1 {
+                DisclosureGroup("详细信息", isExpanded: $open) {
+                    Text(parts[1]).font(.system(size: 11, design: .monospaced)).foregroundStyle(DS.ink2)
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(DS.caption).foregroundStyle(DS.ink2)
+            }
+        }
+    }
+}
+
 /// Centered placeholder used by every empty list.
 struct EmptyState: View {
     let icon: String
     let title: String
     var detail: String = ""
+    /// Optional next step, e.g. ("启动 Sluice", core.start).
+    var action: (String, () -> Void)?
     var body: some View {
         VStack(spacing: 8) {
             IconTile(symbol: icon, size: 48).padding(.bottom, 4)
             Text(title).font(DS.heading).foregroundStyle(DS.ink2)
             if !detail.isEmpty { Text(detail).font(DS.small).foregroundStyle(DS.ink3) }
+            if let action {
+                Button(action.0, action: action.1).glassButton(prominent: true).padding(.top, 6)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1753,16 +1887,20 @@ struct RuleRow: Identifiable {
     let id: Int
     let type: String
     let value: String
+    /// How the core names this rule in route results: "TYPE,value", or just "FINAL".
+    var matchKey: String { value.isEmpty ? type.uppercased() : "\(type.uppercased()),\(value)" }
     let policy: String
     let options: String
 }
 
 struct RuleView: View {
     @EnvironmentObject var core: Core
+    @Binding var pane: Pane?
     @State private var rules: [RuleRow] = []
     @State private var filter = ""
     @State private var target = "www.google.com"
     @State private var result: RouteResult?
+    @State private var offline = false
     @State private var error: String?
 
     var body: some View {
@@ -1770,47 +1908,76 @@ struct RuleView: View {
             filter.isEmpty || $0.value.localizedCaseInsensitiveContains(filter) || $0.policy.localizedCaseInsensitiveContains(filter)
                 || $0.type.localizedCaseInsensitiveContains(filter)
         }
-        VStack(spacing: 0) {
-            PaneHeader(title: "规则", subtitle: Pane.rule.subtitle) {
-                SearchField(prompt: "搜索", text: $filter)
-            }
-            ScrollView {
-                LazyVStack(spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: DS.gap) {
+                routeTest.entrance(0)
+                HStack {
+                    SectionTitle(text: "规则 (\(rules.count))")
+                    Spacer()
+                    Text("添加、编辑和排序规则请在配置中修改").font(DS.small).foregroundStyle(DS.ink3)
+                }
+                // The list is only as tall as its rules: a short list stays short.
+                VStack(spacing: 0) {
+                    if rows.isEmpty {
+                        EmptyState(icon: "line.3.horizontal.decrease.circle", title: rules.isEmpty ? "没有规则" : "没有匹配的规则",
+                                   detail: rules.isEmpty ? "在配置的 [Rule] 中添加规则。" : "")
+                            .frame(height: 180)
+                    }
                     ForEach(rows) { rule in
-                        HStack(spacing: 12) {
-                            Text("\(rule.id)").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
-                                .frame(width: 24, alignment: .trailing)
-                            Text(rule.type.uppercased()).font(.system(size: 10, weight: .semibold).monospaced())
-                                .foregroundStyle(DS.ink2)
-                                .padding(.horizontal, 7).padding(.vertical, 3)
-                                .background(Color.primary.opacity(0.05), in: Capsule())
-                                .frame(width: 150, alignment: .leading)
-                            Text(rule.value.ifEmpty("其余所有请求")).font(DS.label)
-                                .foregroundStyle(rule.value.isEmpty ? Color.secondary : Color.primary)
-                                .lineLimit(1).truncationMode(.middle)
-                            if !rule.options.isEmpty {
-                                Text(rule.options).font(DS.caption).foregroundStyle(DS.ink3)
-                            }
-                            Spacer(minLength: 8)
-                            OutboundTag(name: rule.policy)
-                        }
-                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        ruleRow(rule)
                         if rule.id != rows.last?.id { Divider().padding(.leading, 50).opacity(0.5) }
                     }
                 }
                 .padding(.vertical, 4)
+                .glass()
+                .entrance(1)
             }
-            .overlay { if rows.isEmpty { EmptyState(icon: "list.bullet.rectangle", title: "没有规则") } }
-            .glassPanel()
-            routeTest.padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
+        }
+        .paneHeader {
+            PaneHeader(title: "规则", subtitle: Pane.rule.subtitle) {
+                SearchField(prompt: "搜索规则", text: $filter)
+                Button { pane = .profile } label: { Label("在配置中编辑", systemImage: "square.and.pencil") }
+            }
         }
         .onAppear(perform: load)
         .onChange(of: core.state) { load() }
     }
 
+    private func ruleRow(_ rule: RuleRow) -> some View {
+        let hit = result.map { $0.rule.caseInsensitiveCompare(rule.matchKey) == .orderedSame } ?? false
+        return HStack(spacing: 12) {
+            Text("\(rule.id)").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
+                .frame(width: 24, alignment: .trailing)
+            Text(rule.type.uppercased()).font(.system(size: 10, weight: .semibold).monospaced())
+                .foregroundStyle(DS.ink2)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Color.primary.opacity(0.05), in: Capsule())
+                .frame(width: 150, alignment: .leading)
+            Text(rule.value.ifEmpty("其余所有请求")).font(DS.label.weight(hit ? .semibold : .regular))
+                .foregroundStyle(rule.value.isEmpty ? DS.ink2 : Color.primary)
+                .lineLimit(1).truncationMode(.middle)
+            if !rule.options.isEmpty {
+                Text(rule.options).font(DS.caption).foregroundStyle(DS.ink3)
+            }
+            Spacer(minLength: 8)
+            if hit { Text("命中").font(DS.caption).foregroundStyle(DS.accent) }
+            OutboundTag(name: rule.policy)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(hit ? DS.accent.opacity(0.08) : .clear)
+        .overlay(alignment: .leading) { if hit { FlowMark().padding(.leading, 3) } }
+        .animation(DS.spring, value: hit)
+    }
+
     private var routeTest: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("规则测试").font(DS.heading)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("规则测试").font(DS.heading)
+                Spacer()
+                Text(core.state == .running ? "由运行中的内核判定" : "内核未运行 · 按配置离线匹配")
+                    .font(DS.caption).foregroundStyle(core.state == .running ? DS.ink3 : Color.orange)
+            }
             HStack {
                 TextField("主机或 主机:端口", text: $target).textFieldStyle(.plain).font(DS.label).onSubmit(check)
                     .padding(.horizontal, 12).padding(.vertical, 6)
@@ -1822,10 +1989,11 @@ struct RuleView: View {
                     LabeledContent("规则", value: result.rule)
                     LabeledContent("策略", value: result.policy)
                     LabeledContent("出站") { OutboundTag(name: result.outbound) }
+                    if offline { Text("离线结果，策略组的实际选择以运行时为准").font(DS.caption).foregroundStyle(DS.ink3) }
                 }
                 .font(DS.label)
             } else if let error {
-                Text(error).foregroundStyle(.red).font(DS.label)
+                ErrorText(raw: error)
             } else {
                 Text("查看目标会匹配哪条规则、使用哪个出站，不会真正建立连接。").font(DS.small).foregroundStyle(DS.ink2)
             }
@@ -1846,15 +2014,67 @@ struct RuleView: View {
     }
 
     private func check() {
+        if core.state != .running {
+            // No core to ask: match against the config the same way, top to bottom.
+            load()
+            offline = true
+            if let hit = RuleMatcher.match(target, in: rules) {
+                result = RouteResult(target: target, rule: hit.matchKey, policy: hit.policy, outbound: hit.policy)
+                error = nil
+            } else {
+                result = nil
+                error = "没有规则命中这个目标，且配置里没有 FINAL 规则。"
+            }
+            return
+        }
+        offline = false
         Task {
             do {
                 result = try await core.route(target)
                 error = nil
             } catch {
                 result = nil
-                self.error = error.localizedDescription
+                self.error = "规则测试失败。\n\(error.localizedDescription)"
             }
         }
+    }
+}
+
+/// Offline rule matching for the common Surge rule types, used while the core is stopped.
+/// Types it can't judge without the core (GEOIP, PROCESS-NAME, …) are skipped.
+enum RuleMatcher {
+    static func match(_ target: String, in rules: [RuleRow]) -> RuleRow? {
+        let host = hostPart(target).lowercased()
+        for r in rules {
+            let v = r.value.lowercased()
+            switch r.type.uppercased() {
+            case "DOMAIN": if host == v { return r }
+            case "DOMAIN-SUFFIX": if host == v || host.hasSuffix("." + v) { return r }
+            case "DOMAIN-KEYWORD": if host.contains(v) { return r }
+            case "IP-CIDR": if let ip = ipv4(host), let (net, bits) = cidr(v), bits <= 32, bits == 0 || (ip ^ net) >> (32 - bits) == 0 { return r }
+            case "FINAL": return r
+            default: continue
+            }
+        }
+        return nil
+    }
+
+    private static func hostPart(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        if let c = t.lastIndex(of: ":"), Int(t[t.index(after: c)...]) != nil, !t.hasPrefix("[") { return String(t[..<c]) }
+        return t
+    }
+
+    private static func ipv4(_ s: String) -> UInt32? {
+        let p = s.split(separator: ".").compactMap { UInt32($0) }
+        guard p.count == 4, p.allSatisfy({ $0 < 256 }) else { return nil }
+        return p.reduce(0) { $0 << 8 | $1 }
+    }
+
+    private static func cidr(_ s: String) -> (UInt32, UInt32)? {
+        let parts = s.split(separator: "/")
+        guard parts.count == 2, let ip = ipv4(String(parts[0])), let bits = UInt32(parts[1]) else { return nil }
+        return (ip, bits)
     }
 }
 
@@ -1937,8 +2157,11 @@ struct ConfigView: View {
                 .glassPanel()
             HStack {
                 if let (msg, ok) = message {
-                    Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill").foregroundStyle(ok ? .green : .red)
-                    Text(msg).textSelection(.enabled).lineLimit(3)
+                    if ok {
+                        Label(msg, systemImage: "checkmark.circle.fill").font(DS.small.weight(.medium)).foregroundStyle(.green)
+                    } else {
+                        ErrorText(raw: msg)
+                    }
                 }
                 Spacer()
                 Button("还原") { load() }.disabled(text == saved)
