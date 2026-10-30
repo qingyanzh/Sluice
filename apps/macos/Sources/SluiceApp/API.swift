@@ -75,6 +75,15 @@ struct APIClient {
         _ = try await request("POST", "/v1/policies/\(Self.escape(group))/test")
     }
 
+    func mode() async throws -> String {
+        let body = try JSONSerialization.jsonObject(with: await request("GET", "/v1/mode")) as? [String: Any]
+        return body?["mode"] as? String ?? "rule"
+    }
+
+    func setMode(_ mode: String) async throws {
+        _ = try await request("POST", "/v1/mode?set=\(Self.escape(mode))")
+    }
+
     func traffic() async throws -> Traffic {
         try JSONDecoder().decode(Traffic.self, from: await request("GET", "/v1/traffic"))
     }

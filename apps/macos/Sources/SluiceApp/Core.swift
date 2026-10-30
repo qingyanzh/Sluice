@@ -56,10 +56,10 @@ final class Core: ObservableObject {
 
         var label: String {
             switch self {
-            case .stopped: "Stopped"
-            case .starting: "Starting…"
-            case .running: "Running"
-            case .failed: "Error"
+            case .stopped: "已停止"
+            case .starting: "启动中…"
+            case .running: "运行中"
+            case .failed: "出错"
             }
         }
     }
@@ -76,6 +76,10 @@ final class Core: ObservableObject {
     @Published private(set) var upRate: Double = 0
     @Published private(set) var downRate: Double = 0
     @Published private(set) var traffic: Traffic?
+    /// Last 60 one-second samples of (up, down) bytes per second, oldest first.
+    @Published private(set) var rateHistory: [(up: Double, down: Double)] = []
+    /// Outbound mode reported by the core: "rule", "direct" or "global".
+    @Published private(set) var mode = "rule"
     @Published var autoStart: Bool {
         didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
     }
@@ -316,6 +320,8 @@ final class Core: ObservableObject {
         rootPID = nil
         privileged = false
         traffic = nil
+        rateHistory = []
+        mode = "rule"
         upRate = 0
         downRate = 0
         groups = []
@@ -333,6 +339,8 @@ final class Core: ObservableObject {
         if let prev = traffic, elapsed > 0 {
             upRate = Double(now.up &- prev.up) / elapsed
             downRate = Double(now.down &- prev.down) / elapsed
+            rateHistory.append((upRate, downRate))
+            if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
         }
         traffic = now
     }
@@ -352,6 +360,7 @@ final class Core: ObservableObject {
             if let api, state == .starting || tick % 2 == 0, let fresh = try? await api.policies() {
                 groups = fresh
                 if state == .starting { state = .running }
+                if let m = try? await api.mode() { mode = m }
             }
             if let api, state == .running {
                 await sampleTraffic(api, elapsed: Date().timeIntervalSince(last))
@@ -388,6 +397,19 @@ final class Core: ObservableObject {
 
     func testAll() {
         for g in groups where !g.isSelectable { test(group: g.group) }
+    }
+
+    func setMode(_ m: String) {
+        guard let api else { return }
+        Task {
+            do {
+                try await api.setMode(m)
+                mode = m
+                lastActionError = nil
+            } catch {
+                lastActionError = "Outbound mode: \(error.localizedDescription)"
+            }
+        }
     }
 
     func reload() {
@@ -429,6 +451,14 @@ final class Core: ObservableObject {
         }
         refreshSummary()
         if state == .running { reload() }
+        return nil
+    }
+
+    /// Turns enhanced mode on or off in the config and restarts the core so it takes effect.
+    func setEnhancedMode(_ on: Bool) async -> String? {
+        let text = ConfigText.setGeneral("enhanced-mode", on ? "true" : "false", in: readConfig())
+        if let err = await saveConfig(text) { return err }
+        if isActive { restart() }
         return nil
     }
 
