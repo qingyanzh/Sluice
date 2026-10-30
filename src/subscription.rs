@@ -75,6 +75,11 @@ fn layer_from_query(q: &HashMap<String, String>) -> Result<Option<Layer>> {
             host: q.get("host").cloned().filter(|h| !h.is_empty()),
             headers: Vec::new(),
         }))),
+        Some("httpupgrade") => Ok(Some(Layer::HttpUpgrade(WsOpts {
+            path: q.get("path").cloned().unwrap_or_else(|| "/".into()),
+            host: q.get("host").cloned().filter(|h| !h.is_empty()),
+            headers: Vec::new(),
+        }))),
         Some("grpc") => Ok(Some(Layer::Grpc {
             service: q.get("serviceName").or(q.get("servicename")).cloned().unwrap_or_default(),
         })),
@@ -91,10 +96,17 @@ fn parse_ss(body: &str) -> Result<(Option<String>, ProxyDef)> {
     let user = l.user.ok_or_else(|| anyhow!("ss link without credentials"))?;
     let creds = if user.contains(':') { user } else { b64_str(&user).ok_or_else(|| anyhow!("bad ss credentials"))? };
     let (method, password) = creds.split_once(':').ok_or_else(|| anyhow!("bad ss credentials"))?;
-    if body.contains("plugin=") {
-        bail!("ss plugins not supported");
-    }
-    let def = ProxyDef::Shadowsocks { server: l.host, port: l.port, method: method.into(), password: password.into() };
+    // SIP002 `?plugin=name;opt=v;flag` (percent-encoded).
+    let query = body.split('#').next().and_then(|b| b.split_once('?')).map_or("", |(_, q)| q);
+    let plugin = query.split('&').find_map(|kv| kv.strip_prefix("plugin=")).map(percent_decode).filter(|p| !p.is_empty());
+    let plugin = match plugin {
+        Some(p) => {
+            let (name, opts) = p.split_once(';').unwrap_or((&p, ""));
+            Some(crate::obfs::SsPlugin::parse(name, opts)?)
+        }
+        None => None,
+    };
+    let def = ProxyDef::Shadowsocks { server: l.host, port: l.port, method: method.into(), password: password.into(), plugin };
     Ok((name.filter(|n| !n.is_empty()), def))
 }
 
@@ -105,12 +117,12 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
         serde_json::Value::Number(n) => Some(n.to_string()),
         _ => None,
     };
-    if field("aid").is_some_and(|a| a != "0") {
-        bail!("legacy vmess (alterId > 0) not supported");
-    }
     let layer = match field("net").as_deref() {
         None | Some("tcp") => None,
         Some("ws") => Some(Layer::Ws(WsOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), headers: Vec::new() })),
+        Some("httpupgrade") => {
+            Some(Layer::HttpUpgrade(WsOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), headers: Vec::new() }))
+        }
         Some("grpc") => Some(Layer::Grpc { service: field("path").unwrap_or_default() }),
         Some(other) => bail!("transport {other:?} not supported yet"),
     };
@@ -126,6 +138,7 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
             || field("verify_cert").is_some_and(|v| v == "false"),
         layer,
         server,
+        alter_id: field("aid").and_then(|a| a.parse().ok()).unwrap_or(0),
     };
     Ok((field("ps"), def))
 }
@@ -312,11 +325,22 @@ mod tests {
     #[test]
     fn to_line_roundtrips() {
         let text = format!(
-            "ss://{}@1.2.3.4:8388#A\nvmess://{}\ntrojan://pw@t.example:443?sni=t.example&type=ws&path=%2Fws&host=cdn.example#T\n",
+            "ss://{}@1.2.3.4:8388#A\nvmess://{}\ntrojan://pw@t.example:443?sni=t.example&type=ws&path=%2Fws&host=cdn.example#T\n\
+             ss://{ss}@1.2.3.4:8388/?plugin=obfs-local%3Bobfs%3Dtls%3Bobfs-host%3Dbing.com#O\n\
+             ss://{ss}@1.2.3.4:443?plugin=v2ray-plugin%3Btls%3Bhost%3Dv.example%3Bpath%3D%2Fws#P\n\
+             vless://b831381d-6324-4d53-ad4f-8cda48b30811@u.example:80?type=httpupgrade&path=%2Fup&host=h.example#U\n",
             STANDARD.encode("aes-256-gcm:pw"),
-            STANDARD.encode(r#"{"ps":"V","add":"v.example","port":443,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"net":"ws","path":"/r","tls":"tls"}"#)
+            STANDARD.encode(r#"{"ps":"V","add":"v.example","port":443,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":64,"net":"ws","path":"/r","tls":"tls"}"#),
+            ss = STANDARD.encode("aes-256-gcm:pw"),
         );
-        for (name, def) in parse(&text).0 {
+        let (nodes, skipped) = parse(&text);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(nodes.len(), 6);
+        assert!(matches!(&nodes[1].1, ProxyDef::Vmess { alter_id: 64, .. }));
+        assert!(matches!(&nodes[3].1, ProxyDef::Shadowsocks { plugin: Some(crate::obfs::SsPlugin::Obfs { tls: true, .. }), .. }));
+        assert!(matches!(&nodes[4].1, ProxyDef::Shadowsocks { plugin: Some(crate::obfs::SsPlugin::V2ray { tls: true, .. }), .. }));
+        assert!(matches!(&nodes[5].1, ProxyDef::Vless { layer: Some(Layer::HttpUpgrade(w)), .. } if w.path == "/up"));
+        for (name, def) in nodes {
             let line = def.to_line(&name);
             let (back_name, back) = parse_proxy(&line).unwrap();
             assert_eq!((back_name, format!("{back:?}")), (name, format!("{def:?}")), "{line}");

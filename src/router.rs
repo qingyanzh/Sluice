@@ -112,8 +112,8 @@ impl Router {
         let mut outbounds = HashMap::from([("DIRECT".to_string(), Outbound::Direct), ("REJECT".to_string(), Outbound::Reject)]);
         for (name, def) in &cfg.proxies {
             let ob = match def.clone() {
-                ProxyDef::Shadowsocks { server, port, method, password } => {
-                    Outbound::Shadowsocks(SsServer::new(server, port, &method, &password)?)
+                ProxyDef::Shadowsocks { server, port, method, password, plugin } => {
+                    Outbound::Shadowsocks(SsServer::new(server, port, &method, &password, plugin)?)
                 }
                 ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, layer } => {
                     Outbound::Trojan(TrojanServer::new(Transport::new(server, port, true, sni, skip_cert_verify, layer)?, &password))
@@ -136,8 +136,9 @@ impl Router {
                 ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
                     Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs)?)
                 }
-                ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
-                    Outbound::Vmess(VmessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, layer)?, &uuid, &method)?)
+                ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer, alter_id } => {
+                    let transport = Transport::new(server, port, tls, sni, skip_cert_verify, layer)?;
+                    Outbound::Vmess(VmessServer::new(transport, &uuid, &method, alter_id)?)
                 }
             };
             if outbounds.insert(name.clone(), ob).is_some() {

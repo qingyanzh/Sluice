@@ -31,7 +31,7 @@ jobs:
           name: sluice
           path: target/release
       - run: chmod +x target/release/sluice
-      - run: brew install shadowsocks-rust xray hysteria
+      - run: brew install shadowsocks-rust xray hysteria simple-obfs v2ray-plugin v2ray
       - run: bash scripts/ci/interop.sh
       - if: always()
         uses: actions/upload-artifact@v4

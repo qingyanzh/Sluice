@@ -4,6 +4,7 @@ mod config;
 mod dns;
 mod hysteria2;
 mod inbound;
+mod obfs;
 mod reload;
 mod reality;
 mod router;

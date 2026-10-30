@@ -1,4 +1,5 @@
-//! Stream transports under VMess/VLESS/Trojan: TCP, optionally TLS, optionally WebSocket.
+//! Stream transports under VMess/VLESS/Trojan: TCP, optionally TLS, optionally WebSocket,
+//! HTTPUpgrade or gRPC.
 
 use std::sync::Arc;
 
@@ -49,6 +50,8 @@ impl WsOpts {
 #[derive(Debug, Clone)]
 pub enum Layer {
     Ws(WsOpts),
+    /// Xray `httpupgrade`: a WebSocket-style HTTP/1.1 upgrade, then the raw stream (no framing).
+    HttpUpgrade(WsOpts),
     /// Xray/V2Ray "gun": the stream rides one gRPC call `/<service>/Tun` over HTTP/2.
     Grpc { service: String },
 }
@@ -102,6 +105,7 @@ impl Transport {
         };
         match &self.layer {
             Some(Layer::Ws(ws)) => websocket(stream, ws, ws.host.as_deref().unwrap_or(&self.default_host)).await,
+            Some(Layer::HttpUpgrade(o)) => http_upgrade(stream, o, o.host.as_deref().unwrap_or(&self.default_host)).await,
             Some(Layer::Grpc { service }) => grpc(stream, service, &self.default_host, self.tls.is_some()).await,
             None => Ok(stream),
         }
@@ -304,16 +308,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<(u8,
     Ok((b0 & 0x0f, payload))
 }
 
-/// Performs the HTTP upgrade on `stream` and returns a byte stream carried in binary frames.
-async fn websocket(mut stream: BoxStream, ws: &WsOpts, host: &str) -> Result<BoxStream> {
-    let mut nonce = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    let key = base64::engine::general_purpose::STANDARD.encode(nonce);
-    let mut req = format!(
-        "GET {} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n",
-        ws.path
-    );
+/// Sends an upgrade request (`extra` holds additional header lines) and reads the response
+/// head; returns the head and any bytes read past it.
+async fn upgrade(stream: &mut BoxStream, ws: &WsOpts, host: &str, extra: &str) -> Result<(String, Vec<u8>)> {
+    let mut req = format!("GET {} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n{extra}", ws.path);
     for (k, v) in &ws.headers {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -326,21 +324,51 @@ async fn websocket(mut stream: BoxStream, ws: &WsOpts, host: &str) -> Result<Box
         let mut tmp = [0u8; 1024];
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
-            bail!("websocket: server closed during handshake");
+            bail!("upgrade: server closed during handshake");
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break p + 4;
         }
         if buf.len() > MAX_HANDSHAKE {
-            bail!("websocket: handshake response too large");
+            bail!("upgrade: handshake response too large");
         }
     };
-    let head = String::from_utf8_lossy(&buf[..head_end]);
+    let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
     let status = head.lines().next().unwrap_or_default();
     if status.split_whitespace().nth(1) != Some("101") {
-        bail!("websocket upgrade refused: {status} (check ws-path and Host)");
+        bail!("upgrade refused: {status} (check the path and Host)");
     }
+    Ok((head, buf[head_end..].to_vec()))
+}
+
+async fn http_upgrade(mut stream: BoxStream, o: &WsOpts, host: &str) -> Result<BoxStream> {
+    let (_, leftover) = upgrade(&mut stream, o, host, "").await?;
+    if leftover.is_empty() {
+        return Ok(stream);
+    }
+    // Bytes that arrived with the response head go first.
+    let (rd, mut wr) = tokio::io::split(stream);
+    let (app, inner) = tokio::io::duplex(64 * 1024);
+    let (mut ird, mut iwr) = tokio::io::split(inner);
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut ird, &mut wr).await;
+        let _ = wr.shutdown().await;
+    });
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut std::io::Cursor::new(leftover).chain(rd), &mut iwr).await;
+        let _ = iwr.shutdown().await;
+    });
+    Ok(Box::new(app))
+}
+
+/// Performs the HTTP upgrade on `stream` and returns a byte stream carried in binary frames.
+async fn websocket(mut stream: BoxStream, ws: &WsOpts, host: &str) -> Result<BoxStream> {
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let key = base64::engine::general_purpose::STANDARD.encode(nonce);
+    let extra = format!("Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n");
+    let (head, leftover) = upgrade(&mut stream, ws, host, &extra).await?;
     let expected = accept_key(&key);
     let accepted = head.lines().any(|l| {
         l.split_once(':').is_some_and(|(k, v)| k.trim().eq_ignore_ascii_case("sec-websocket-accept") && v.trim() == expected)
@@ -348,7 +376,6 @@ async fn websocket(mut stream: BoxStream, ws: &WsOpts, host: &str) -> Result<Box
     if !accepted {
         bail!("websocket: bad Sec-WebSocket-Accept");
     }
-    let leftover = buf[head_end..].to_vec();
     Ok(frame_stream(stream, leftover))
 }
 
