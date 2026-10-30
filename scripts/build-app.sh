@@ -11,6 +11,7 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$(cd apps/macos && swift build -c release --show-bin-path)/SluiceApp" "$app/Contents/MacOS/Sluice"
 cp target/release/sluice "$app/Contents/Resources/sluice"
+cp apps/macos/Icon/Sluice.icns "$app/Contents/Resources/Sluice.icns"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -21,6 +22,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>Sluice</string>
   <key>CFBundleIdentifier</key><string>dev.sluice.Sluice</string>
   <key>CFBundleExecutable</key><string>Sluice</string>
+  <key>CFBundleIconFile</key><string>Sluice</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>

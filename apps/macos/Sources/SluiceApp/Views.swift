@@ -172,13 +172,20 @@ struct EnhancedModePill: View {
 struct StatusFooter: View {
     @EnvironmentObject var core: Core
     var body: some View {
-        HStack {
-            StatusDot(state: core.state)
-            Text(core.state.label).font(.callout)
-            if core.privileged { Text("root").font(.caption2).padding(.horizontal, 4).background(.orange.opacity(0.25), in: Capsule()) }
+        HStack(spacing: 8) {
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Sluice").font(.callout.weight(.semibold))
+                HStack(spacing: 4) {
+                    StatusDot(state: core.state)
+                    Text(core.privileged ? "\(core.state.label) · root" : core.state.label).font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Spacer()
-            StartStopButton(compact: true)
+            StartStopButton(compact: true).buttonStyle(.borderless).font(.title3)
         }
+        .padding(8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -263,8 +270,17 @@ struct CardModifier: ViewModifier {
         content
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator.opacity(0.5)))
+            .tileBackground(radius: 12)
+    }
+}
+
+extension View {
+    /// The shared surface for cards and tiles: raised, borderless, soft shadow.
+    func tileBackground(radius: CGFloat = 10, highlighted: Bool = false) -> some View {
+        background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(highlighted ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.06)))
+            .shadow(color: .black.opacity(0.06), radius: 4, y: 1)
     }
 }
 
@@ -368,7 +384,7 @@ struct ActivityView: View {
             }
             Spacer(minLength: 0)
             HStack {
-                StartStopButton()
+                StartStopButton().buttonStyle(.borderedProminent)
                 Button("重启") { core.restart() }.disabled(!core.isActive)
                 Button("重载配置") { core.reload() }.disabled(core.state != .running)
             }
@@ -692,7 +708,8 @@ struct GroupCard: View {
                 Text(group.group).font(.headline).lineLimit(1)
                 Spacer(minLength: 8)
                 HStack {
-                    Text(group.selected).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Image(systemName: group.isSelectable ? "hand.point.up.left" : "bolt.horizontal").font(.caption2).foregroundStyle(.tertiary)
+                    Text(group.selected).font(.caption.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     if latency != nil {
                         let (t, c) = latencyStyle(latency)
@@ -702,8 +719,7 @@ struct GroupCard: View {
             }
             .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
             .padding(10)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator.opacity(0.5)))
+            .tileBackground(highlighted: showing)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -833,8 +849,7 @@ struct NodeCard: View {
         }
         .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator.opacity(0.5)))
+        .tileBackground()
         .help(name)
     }
 }
@@ -945,9 +960,7 @@ struct RequestsView: View {
                     TableColumn("", value: \.proto).width(34)
                     TableColumn("目标", value: \.target).width(min: 160, ideal: 240)
                     TableColumn("策略", value: \.policy).width(min: 60, ideal: 90)
-                    TableColumn("出站") { c in
-                        Text(c.outbound).foregroundStyle(c.outbound == "REJECT" ? .red : .primary)
-                    }
+                    TableColumn("出站") { OutboundTag(name: $0.outbound) }
                     .width(min: 60, ideal: 90)
                 }
                 .overlay {
@@ -961,6 +974,18 @@ struct RequestsView: View {
                     .frame(minWidth: 220, idealWidth: 260, maxWidth: 300)
             }
         }
+    }
+}
+
+/// Colour-coded outbound name: direct green, reject red, proxies in the accent colour.
+struct OutboundTag: View {
+    let name: String
+    var body: some View {
+        let color: Color = name == "DIRECT" ? .green : name == "REJECT" ? .red : .accentColor
+        Text(name).font(.caption.weight(.medium)).lineLimit(1)
+            .foregroundStyle(color)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(color.opacity(0.12), in: Capsule())
     }
 }
 
@@ -978,7 +1003,7 @@ struct RequestDetail: View {
                     Section("路由") {
                         LabeledContent("规则") { Text(c.rule).textSelection(.enabled) }
                         LabeledContent("策略", value: c.policy)
-                        LabeledContent("出站") { Text(c.outbound).foregroundStyle(c.outbound == "REJECT" ? .red : .primary).bold() }
+                        LabeledContent("出站") { OutboundTag(name: c.outbound) }
                     }
                 }
                 .formStyle(.grouped)
@@ -1041,7 +1066,7 @@ struct RuleView: View {
                 HStack(spacing: 16) {
                     LabeledContent("规则", value: result.rule)
                     LabeledContent("策略", value: result.policy)
-                    LabeledContent("出站") { Text(result.outbound).foregroundStyle(result.outbound == "REJECT" ? .red : .primary).bold() }
+                    LabeledContent("出站") { OutboundTag(name: result.outbound) }
                 }
                 .font(.callout)
             } else if let error {
