@@ -14,6 +14,7 @@ use crate::udp::{parse_socks_addr, Packet, UdpPipe, MAX_PACKET};
 
 use crate::reload::RouterHandle;
 use crate::router::Router;
+use crate::rule::{ConnInfo, Proto};
 use crate::util::{BoxStream, Target};
 
 const MAX_HEAD: usize = 64 * 1024;
@@ -43,9 +44,15 @@ async fn relay(mut client: TcpStream, mut upstream: BoxStream) {
     }
 }
 
+/// What a TCP inbound knows about its client.
+fn tcp_info(sock: &TcpStream, proto: Proto) -> ConnInfo {
+    let in_port = sock.local_addr().ok().map(|a| a.port());
+    ConnInfo::new(proto, sock.peer_addr().ok(), in_port, in_port.unwrap_or(0))
+}
+
 /// Connects via the router, logging failures; `Ok(None)` is a REJECT.
-async fn open(router: &Router, target: &Target) -> Result<Option<BoxStream>> {
-    let r = router.dispatch(target).await;
+async fn open(router: &Router, target: &Target, ctx: &ConnInfo) -> Result<Option<BoxStream>> {
+    let r = router.dispatch_with(target, ctx).await;
     if let Err(e) = &r {
         warn!("{target}: {e:#}");
     }
@@ -82,7 +89,8 @@ pub async fn http_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let target = Target::parse_authority(uri, 443)?;
-        match open(&router, &target).await {
+        let ctx = tcp_info(&sock, Proto::Https).with_url(format!("https://{}/", target.host_str()));
+        match open(&router, &target, &ctx).await {
             Ok(Some(mut up)) => {
                 sock.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
                 if !body.is_empty() {
@@ -115,7 +123,8 @@ pub async fn http_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
         }
     }
     out.push_str("Connection: close\r\n\r\n");
-    match open(&router, &target).await {
+    let ctx = tcp_info(&sock, Proto::Http).with_url(uri.to_string());
+    match open(&router, &target, &ctx).await {
         Ok(Some(mut up)) => {
             up.write_all(out.as_bytes()).await?;
             up.write_all(&body).await?;
@@ -134,6 +143,7 @@ pub async fn http_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
 async fn socks5_udp_associate(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
     let relay = Arc::new(UdpSocket::bind((sock.local_addr()?.ip(), 0)).await?);
     let bound = relay.local_addr()?;
+    let in_port = sock.local_addr().ok().map(|a| a.port());
     let mut reply = vec![5, 0, 0];
     Target::new(&bound.ip().to_string(), bound.port()).write_socks_addr(&mut reply)?;
     sock.write_all(&reply).await?;
@@ -157,7 +167,9 @@ async fn socks5_udp_associate(mut sock: TcpStream, router: Arc<Router>) -> Resul
             let outbound = match routes.get(&key) {
                 Some(o) => o.clone(),
                 None => {
-                    let o = match router.route_udp(&target).await {
+                    let proto = if target.port == 443 { Proto::Quic } else { Proto::Udp };
+                    let ctx = ConnInfo::new(proto, Some(client), in_port, bound.port());
+                    let o = match router.route_udp_with(&target, &ctx).await {
                         Ok(o) => o,
                         Err(e) => {
                             warn!("UDP {target}: {e:#}");
@@ -257,7 +269,7 @@ pub async fn socks5_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()>
         bail!("unsupported SOCKS command {} (only CONNECT and UDP ASSOCIATE)", req[1]);
     }
     let target = Target::new(&host, port);
-    match open(&router, &target).await {
+    match open(&router, &target, &tcp_info(&sock, Proto::Tcp)).await {
         Ok(Some(up)) => {
             sock.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
             relay(sock, up).await;
