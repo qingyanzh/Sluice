@@ -16,6 +16,26 @@ enum MenuBarDisplayMode: String, CaseIterable, Identifiable {
     var showsSpeed: Bool { self != .iconOnly }
 }
 
+/// Surge's compact status-item rate: decimal units, whole KB/s, then up to
+/// four numeric characters for MB/s and above.
+func menuBarSpeed(_ bytesPerSecond: Double) -> String {
+    let bytes = bytesPerSecond.isFinite ? max(0, bytesPerSecond) : 0
+    if bytes == 0 { return "0 KB/s" }
+    var value = bytes / 1_000
+    if value < 1_000 { return String(format: "%.0f KB/s", value) }
+
+    for unit in ["MB/s", "GB/s", "TB/s"] {
+        value /= 1_000
+        if value < 1_000 || unit == "TB/s" {
+            let number = ["%.2f", "%.1f", "%.0f"]
+                .map { String(format: $0, value) }
+                .first { $0.count <= 4 } ?? String(format: "%.0f", value)
+            return "\(number) \(unit)"
+        }
+    }
+    return "0 KB/s"
+}
+
 /// The status bar menu keeps the frequent controls available without opening a window.
 struct MenuBarContent: View {
     @EnvironmentObject private var core: Core
@@ -157,9 +177,10 @@ struct SluiceMark: Shape {
     }
 }
 
-/// A compact status mark with outbound mode and significant download traffic.
+/// Surge-style status item: icon with an optional mode badge, then two speed rows.
 struct MenuBarLabel: View {
     @EnvironmentObject private var core: Core
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("menuBarDisplayMode") private var displayMode = MenuBarDisplayMode.iconAndSpeed
     @AppStorage("menuBarShowOutboundMode") private var showOutboundMode = true
     @AppStorage("menuBarDimWhenNotProxying") private var dimWhenNotProxying = true
@@ -168,41 +189,51 @@ struct MenuBarLabel: View {
         guard let url = Bundle.main.url(forResource: "SluiceMenuBarIcon", withExtension: "png"),
               let image = NSImage(contentsOf: url) else { return nil }
         image.isTemplate = true
-        image.size = NSSize(width: 14, height: 15)
+        image.size = NSSize(width: 15, height: 15)
         return image
     }()
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 1) {
             if displayMode.showsIcon {
-                if let icon = Self.statusIcon {
-                    Image(nsImage: icon)
-                        .renderingMode(.template)
-                        .frame(width: 14, height: 15)
-                        .foregroundStyle(iconTone)
-                        .accessibilityHidden(true)
-                } else {
-                    SluiceMark()
-                        .fill(iconTone)
-                        .frame(width: 14, height: 15)
-                        .accessibilityHidden(true)
+                ZStack {
+                    if let icon = Self.statusIcon {
+                        Image(nsImage: icon)
+                            .renderingMode(.template)
+                            .frame(width: 15, height: 15)
+                            .foregroundStyle(iconTone)
+                    } else {
+                        SluiceMark()
+                            .fill(iconTone)
+                            .frame(width: 15, height: 15)
+                    }
                 }
-            }
-            if showOutboundMode && core.state == .running {
-                Text(modeMark).font(.system(size: 10, weight: .semibold))
+                .frame(width: 15, height: 15)
+                .overlay(alignment: .bottomTrailing) {
+                    if showOutboundMode {
+                        Text(modeMark)
+                            .font(.system(size: 6))
+                            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                            .frame(width: 8, height: 8)
+                            .background(RoundedRectangle(cornerRadius: 2)
+                                .fill(colorScheme == .dark ? Color.white : Color.black.opacity(0.7)))
+                            .offset(x: 6, y: 1)
+                    }
+                }
+                .accessibilityHidden(true)
             }
             if displayMode.showsSpeed {
-                VStack(alignment: .leading, spacing: -2) {
-                    Text("↓\(formatBytes(core.downRate))/s")
-                    Text("↑\(formatBytes(core.upRate))/s")
+                VStack(alignment: .center, spacing: 0) {
+                    Text(menuBarSpeed(core.upRate)).frame(height: 9)
+                    Text(menuBarSpeed(core.downRate)).frame(height: 9)
                 }
-                .font(.system(size: 9, weight: .medium))
-                .monospacedDigit()
+                .font(.system(size: 9))
                 .lineLimit(1)
+                .foregroundStyle(iconTone)
                 .accessibilityElement(children: .combine)
             }
         }
-        .accessibilityLabel("Sluice，\(core.state.label)\(showOutboundMode && core.state == .running ? "，\(modeName)" : "")\(displayMode.showsSpeed ? "，下载每秒 \(formatBytes(core.downRate))，上传每秒 \(formatBytes(core.upRate))" : "")")
+        .accessibilityLabel("Sluice，\(core.state.label)\(showOutboundMode && displayMode.showsIcon ? "，\(modeName)" : "")\(displayMode.showsSpeed ? "，上传每秒 \(menuBarSpeed(core.upRate))，下载每秒 \(menuBarSpeed(core.downRate))" : "")")
     }
 
     private var iconTone: Color {
@@ -215,9 +246,9 @@ struct MenuBarLabel: View {
 
     private var modeMark: String {
         switch OutboundMode(rawValue: core.mode) ?? .rule {
-        case .direct: "直连"
-        case .global: "全局"
-        case .rule: "规则"
+        case .direct: "D"
+        case .global: "G"
+        case .rule: "R"
         }
     }
 }

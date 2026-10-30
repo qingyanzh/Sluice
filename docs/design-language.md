@@ -71,8 +71,9 @@ controls may fade, while enabled supporting text should remain legible.
 
 - The macOS status item uses a monochrome version of Sluice's five-channel mark,
   with three persistent display modes: icon and live speed, icon only, or
-  live speed only. Live speed always shows download and upload rates, including
-  zero traffic. The current outbound mode can be shown independently.
+  live speed only. Live speed uses Surge's two centred 9 pt rows: upload above
+  download, without arrows, decimal KB/s and higher units. Zero traffic shows
+  `0 KB/s`. The current outbound mode is a small D/G/R badge on the icon.
 - The icon can dim when neither the system proxy nor enhanced mode is enabled.
   These preferences are available in Settings and the status menu.
 - The native menu begins with engine state, profile name, and live traffic.
