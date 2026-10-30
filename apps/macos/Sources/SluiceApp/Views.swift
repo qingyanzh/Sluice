@@ -22,14 +22,28 @@ enum Pane: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .activity: "waveform.path.ecg"
+        case .activity: "gauge.with.needle"
         case .overview: "square.grid.2x2"
-        case .requests: "arrow.left.arrow.right"
-        case .policy: "point.topleft.down.to.point.bottomright.curvepath"
+        case .requests: "arrow.up.arrow.down.circle"
+        case .policy: "signpost.right"
         case .nodes: "globe.asia.australia"
-        case .rule: "list.bullet.rectangle"
-        case .logs: "text.alignleft"
-        case .profile: "slider.horizontal.3"
+        case .rule: "line.3.horizontal.decrease.circle"
+        case .logs: "doc.text"
+        case .profile: "curlybraces.square"
+        }
+    }
+
+    /// One line under the pane title saying what the pane is for.
+    var subtitle: String {
+        switch self {
+        case .activity: "运行状态与实时流量"
+        case .overview: "接管方式、代理服务与启动选项"
+        case .requests: ""
+        case .policy: "出站模式与策略组"
+        case .nodes: "配置中的节点和订阅"
+        case .rule: "规则自上而下匹配，命中即停止"
+        case .logs: "内核输出"
+        case .profile: ""
         }
     }
 
@@ -104,20 +118,17 @@ struct Sidebar: View {
             withAnimation(DS.spring) { pane = p }
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: p.icon).font(.system(size: 13, weight: on ? .semibold : .regular))
-                    .foregroundStyle(on ? Color.accentColor : Color.secondary)
+                IconTile(symbol: p.icon, on: on, size: 22)
                     .symbolEffect(.bounce, value: on)
-                    .frame(width: 18)
-                Text(p.title).font(.system(size: 13, weight: on ? .semibold : .regular))
+                Text(p.title).font(.system(size: 13, weight: on ? .semibold : .medium))
                 Spacer()
             }
             .foregroundStyle(on ? Color.primary : Color.secondary)
-            .padding(.horizontal, 12).frame(height: 32)
+            .padding(.leading, 6).padding(.trailing, 12).frame(height: 32)
             .background {
                 if on {
                     RoundedRectangle(cornerRadius: 9, style: .continuous).fill(DS.surface)
                         .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
-                        .overlay(alignment: .leading) { FlowMark().padding(.leading, 4) }
                         .matchedGeometryEffect(id: "selection", in: ns)
                 } else if hovered == p {
                     RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.045))
@@ -239,6 +250,31 @@ struct StatusOrb: View {
         }
         .frame(width: 44, height: 44)
         .animation(DS.spring, value: symbol)
+    }
+}
+
+/// The one icon container used everywhere (sidebar, cards, rows): an SF Symbol in a
+/// continuous rounded square. At rest it is a quiet grey tile; when on, it fills with
+/// the accent and the glyph turns white and filled.
+struct IconTile: View {
+    let symbol: String
+    var on = false
+    var size: CGFloat = 30
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
+            .fill(on ? AnyShapeStyle(Color.accentColor.gradient) : AnyShapeStyle(Color.primary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
+                .strokeBorder(Color.white.opacity(on ? 0.25 : 0), lineWidth: 0.5))
+            .shadow(color: Color.accentColor.opacity(on ? 0.30 : 0), radius: 3, y: 1)
+            .overlay {
+                Image(systemName: symbol)
+                    .symbolVariant(on ? .fill : .none)
+                    .font(.system(size: size * 0.5, weight: .medium))
+                    .foregroundStyle(on ? Color.white : Color.secondary)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .frame(width: size, height: size)
+            .animation(DS.spring, value: on)
     }
 }
 
@@ -678,7 +714,7 @@ struct ActivityView: View {
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .paneHeader { PaneHeader(title: "活动") }
+        .paneHeader { PaneHeader(title: "活动", subtitle: Pane.activity.subtitle) }
     }
 
     private func port(_ listen: String) -> String { String(listen.split(separator: ":").last ?? "") }
@@ -695,8 +731,9 @@ struct ActivityView: View {
             let profile = URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent
             return [profile, ports, core.privileged ? "增强模式" : nil].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         }()
-        return HStack(alignment: .center, spacing: 20) {
-            HStack(spacing: 14) {
+        // Two tiers: the state and its controls, then the three facts that describe how traffic leaves.
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 14) {
                 StatusOrb(state: core.state)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(core.state.label).font(DS.title).tracking(-0.3)
@@ -704,36 +741,40 @@ struct ActivityView: View {
                     Text(subline).font(DS.small).foregroundStyle(core.state.isFailed ? Color.red : Color.secondary)
                         .lineLimit(2).textSelection(.enabled)
                 }
+                Spacer(minLength: 12)
+                HStack(spacing: 8) {
+                    Button { core.reload() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
+                        .help("重载配置").disabled(core.state != .running)
+                    Button { core.restart() } label: { Image(systemName: "arrow.clockwise") }
+                        .help("重启内核").disabled(!core.isActive)
+                    StartStopButton().glassButton(prominent: true)
+                }
+                .glassButton()
             }
-            .frame(minWidth: 200, alignment: .leading)
-            Spacer(minLength: 8)
-            HStack(spacing: 22) {
-                fact("出站模式", OutboundMode(rawValue: core.mode)?.title ?? core.mode, accent: core.state == .running)
-                fact("当前节点", mainGroup?.selected ?? "–")
-                fact("系统代理", core.systemProxyOn ? "已接管" : "未接管", accent: core.systemProxyOn)
+            Divider().opacity(0.6)
+            HStack(spacing: 0) {
+                fact("出站模式", OutboundMode(rawValue: core.mode)?.title ?? core.mode,
+                     icon: OutboundMode(rawValue: core.mode)?.icon ?? "arrow.triangle.branch", accent: core.state == .running)
+                Divider().frame(height: 28).padding(.horizontal, 12)
+                fact("当前节点", mainGroup?.selected ?? "–", icon: "globe.asia.australia")
+                Divider().frame(height: 28).padding(.horizontal, 12)
+                fact("系统代理", core.systemProxyOn ? "已接管" : "未接管", icon: "network", accent: core.systemProxyOn)
             }
-            Divider().frame(height: 36)
-            HStack(spacing: 8) {
-                StartStopButton().glassButton(prominent: true)
-                Button { core.restart() } label: { Image(systemName: "arrow.clockwise") }
-                    .help("重启内核").disabled(!core.isActive)
-                Button { core.reload() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
-                    .help("重载配置").disabled(core.state != .running)
-            }
-            .glassButton()
         }
-        .padding(.vertical, 6)
         .card()
     }
 
-    private func fact(_ label: String, _ value: String, accent: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(DS.caption).foregroundStyle(.secondary)
-            Text(value).font(DS.heading).foregroundStyle(accent ? Color.accentColor : Color.primary)
-                .lineLimit(1).truncationMode(.middle)
-                .contentTransition(.opacity).animation(DS.spring, value: value)
+    private func fact(_ label: String, _ value: String, icon: String, accent: Bool = false) -> some View {
+        HStack(spacing: 9) {
+            IconTile(symbol: icon, on: accent, size: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label).font(DS.caption).foregroundStyle(.secondary)
+                Text(value).font(DS.heading)
+                    .lineLimit(1).truncationMode(.middle)
+                    .contentTransition(.opacity).animation(DS.spring, value: value)
+            }
         }
-        .frame(maxWidth: 120, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var connectionsCard: some View {
@@ -951,7 +992,7 @@ struct OverviewView: View {
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .paneHeader { PaneHeader(title: "概览") }
+        .paneHeader { PaneHeader(title: "概览", subtitle: Pane.overview.subtitle) }
     }
 }
 
@@ -966,11 +1007,7 @@ struct FeatureCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Image(systemName: icon).font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(statusOn ? Color.accentColor : Color.secondary)
-                    .frame(width: 32, height: 32)
-                    .background((statusOn ? Color.accentColor : Color.primary).opacity(statusOn ? 0.10 : 0.05), in: Circle())
-                    .animation(DS.spring, value: statusOn)
+                IconTile(symbol: icon, on: statusOn, size: 30)
                 Text(title).font(DS.heading)
                 Spacer()
                 if let isOn { Toggle("", isOn: isOn).toggleStyle(.switch).labelsHidden().controlSize(.small) }
@@ -1029,19 +1066,19 @@ struct PolicyView: View {
                         .disabled(core.groups.allSatisfy(\.isSelectable))
                 }
                 if core.groups.isEmpty {
-                    EmptyState(icon: "point.topleft.down.to.point.bottomright.curvepath",
+                    EmptyState(icon: "signpost.right",
                                title: core.state == .running ? "没有策略组" : "Sluice 未运行",
                                detail: core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。")
                         .frame(minHeight: 260)
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: DS.gap)], spacing: 10) {
                         ForEach(core.groups) { GroupCard(group: $0) }
                     }
                 }
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .paneHeader { PaneHeader(title: "策略") }
+        .paneHeader { PaneHeader(title: "策略", subtitle: Pane.policy.subtitle) }
     }
 }
 
@@ -1061,24 +1098,38 @@ struct GroupCard: View {
         }
     }
 
+    private var kindIcon: String {
+        switch group.type {
+        case "select": "hand.tap"
+        case "url-test": "bolt"
+        case "fallback": "arrow.uturn.down"
+        case "load-balance": "scale.3d"
+        default: "square.stack"
+        }
+    }
+
     var body: some View {
         let latency = group.options.first { $0.name == group.selected }?.latencyMs
         Button { showing = true } label: {
             VStack(alignment: .leading, spacing: 3) {
-                Text(kindLabel).font(DS.caption).foregroundStyle(.secondary)
-                Text(group.group).font(DS.heading).lineLimit(1)
-                Spacer(minLength: 8)
+                HStack(spacing: 10) {
+                    IconTile(symbol: kindIcon, on: showing, size: 28)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(group.group).font(DS.heading).lineLimit(1)
+                        Text(kindLabel).font(DS.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 10)
                 HStack {
-                    Image(systemName: group.isSelectable ? "hand.point.up.left" : "bolt.horizontal").font(DS.caption).foregroundStyle(.tertiary)
-                    Text(group.selected).font(DS.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text(group.selected).font(DS.label.weight(.medium)).lineLimit(1)
                     Spacer()
                     if latency != nil {
                         LatencyBadge(latency: latency)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
-            .padding(10)
+            .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+            .padding(12)
             .tileBackground(highlighted: showing)
             .contentShape(Rectangle())
         }
@@ -1149,7 +1200,7 @@ struct NodesView: View {
     @State private var showAddSub = false
     @State private var text = ""
 
-    private let columns = [GridItem(.adaptive(minimum: 170), spacing: 10)]
+    private let columns = [GridItem(.adaptive(minimum: 190), spacing: DS.gap)]
 
     var body: some View {
         let proxies = ConfigText.lines(of: "Proxy", in: text)
@@ -1170,7 +1221,7 @@ struct NodesView: View {
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .paneHeader {
-            PaneHeader(title: "节点", subtitle: "配置中的 [Proxy] 节点和订阅") {
+            PaneHeader(title: "节点", subtitle: Pane.nodes.subtitle) {
                 Button { showAddNode = true } label: { Label("添加节点", systemImage: "plus") }
                 Button { showAddSub = true } label: { Label("添加订阅", systemImage: "link.badge.plus") }
             }
@@ -1194,9 +1245,14 @@ struct NodeCard: View {
         // A node's latency, if any group has tested it.
         let latency = core.groups.lazy.flatMap(\.options).first { $0.name == name && $0.latencyMs != nil }?.latencyMs
         VStack(alignment: .leading, spacing: 3) {
-            Text((parts.first ?? "").uppercased()).font(DS.caption).foregroundStyle(.secondary)
-            Text(name).font(DS.heading).lineLimit(1)
-            Spacer(minLength: 6)
+            HStack(spacing: 10) {
+                IconTile(symbol: line.contains("policy-path=") ? "link" : "server.rack", size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name).font(DS.heading).lineLimit(1)
+                    Text((parts.first ?? "").uppercased()).font(DS.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 10)
             HStack {
                 // Server and port only; credentials stay out of the list.
                 Text(parts.dropFirst().prefix(2).filter { !$0.contains("=") }.joined(separator: ":"))
@@ -1207,8 +1263,8 @@ struct NodeCard: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
-        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+        .padding(12)
         .tileBackground()
         .hoverLift()
         .help(name)
@@ -1220,8 +1276,8 @@ struct AddCard: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "plus").font(.system(size: 18, weight: .light)).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 84)
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(.separator))
+                .frame(maxWidth: .infinity, minHeight: 102)
+                .overlay(RoundedRectangle(cornerRadius: DS.smallRadius + 2, style: .continuous).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(.separator))
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
@@ -1329,7 +1385,7 @@ struct RequestsView: View {
                 }
                 .overlay {
                     if rows.isEmpty {
-                        EmptyState(icon: "arrow.left.arrow.right", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
+                        EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
                                    detail: "经过 Sluice 的连接会实时显示在这里。")
                     }
                 }
@@ -1389,7 +1445,7 @@ struct RequestRow: View {
     }
 }
 
-/// A quiet round initial standing in for a site's icon.
+/// A quiet initial in a grey tile standing in for a site's icon.
 struct Monogram: View {
     let text: String
     var body: some View {
@@ -1399,7 +1455,7 @@ struct Monogram: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
             .frame(width: 28, height: 28)
-            .background(Color.primary.opacity(0.06), in: Circle())
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
     }
 }
 
@@ -1410,8 +1466,7 @@ struct EmptyState: View {
     var detail: String = ""
     var body: some View {
         VStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 22, weight: .light)).foregroundStyle(.tertiary)
-                .frame(width: 52, height: 52).background(Color.primary.opacity(0.04), in: Circle())
+            IconTile(symbol: icon, size: 48).padding(.bottom, 4)
             Text(title).font(DS.heading).foregroundStyle(.secondary)
             if !detail.isEmpty { Text(detail).font(DS.small).foregroundStyle(.tertiary) }
         }
@@ -1428,7 +1483,7 @@ struct RequestDetail: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 12) {
-                        Monogram(text: host).scaleEffect(1.3).frame(width: 36, height: 36)
+                        Monogram(text: host)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(host).font(DS.heading).lineLimit(2).textSelection(.enabled)
                             Text("\(c.proto) · 端口 \(port)").font(DS.caption).foregroundStyle(.secondary)
@@ -1493,7 +1548,7 @@ struct RuleView: View {
                 || $0.type.localizedCaseInsensitiveContains(filter)
         }
         VStack(spacing: 0) {
-            PaneHeader(title: "规则", subtitle: "规则将按照从上至下的顺序进行测试。") {
+            PaneHeader(title: "规则", subtitle: Pane.rule.subtitle) {
                 SearchField(prompt: "搜索", text: $filter)
             }
             ScrollView {
@@ -1590,7 +1645,7 @@ struct LogsView: View {
     var body: some View {
         let lines = core.logs.filter { filter.isEmpty || $0.message.localizedCaseInsensitiveContains(filter) || $0.level.localizedCaseInsensitiveContains(filter) }
         VStack(spacing: 0) {
-            PaneHeader(title: "日志") {
+            PaneHeader(title: "日志", subtitle: Pane.logs.subtitle) {
                 SearchField(prompt: "搜索", text: $filter)
                 Toggle(isOn: $follow) { Label("跟随", systemImage: "arrow.down.to.line") }.toggleStyle(.button)
                 Button { core.clearLogs() } label: { Label("清除", systemImage: "trash") }

@@ -21,20 +21,24 @@ these tokens and never set their own values.
    is grey. Red is used only for rejects and errors. Green is used only for
    status dots.
 4. **The flow mark.** This is the signature element: a short accent capsule
-   that marks whatever is active. It sits vertically on the selected sidebar
-   item and horizontally under the selected segment. When the selection moves,
-   the mark slides with it.
-5. **Capsule geometry.** Everything interactive is a capsule: buttons, fields,
+   that marks whatever is active. It sits under the selected segment and beside
+   the selected request. When the selection moves, the mark slides with it.
+5. **Icon tiles.** Every symbol that names a thing (sidebar items, feature
+   cards, policy groups, nodes, facts, empty states) sits in an `IconTile`: a
+   continuous rounded square at 30% corner radius. At rest it is a quiet grey
+   tile with an outline glyph. When on, it fills with the accent and the glyph
+   turns white and filled. Site initials (`Monogram`) use the same tile.
+6. **Capsule geometry.** Everything interactive is a capsule: buttons, fields,
    segments and progress bars. Cards use a 14pt continuous corner and tiles use
    12pt. Nothing has a square corner.
-6. **One spring.** All motion uses `DS.spring` (response 0.32, damping 0.82):
+7. **One spring.** All motion uses `DS.spring` (response 0.32, damping 0.82):
    - Pressed surfaces sink to 97%.
    - Tiles lift on hover.
    - Selections slide between items.
    - Numbers roll when they change.
    - Symbols bounce or swap.
    - Panes cross-fade with an 8pt rise.
-7. **One type scale.** SF Pro at fixed steps. Figures use medium weight with
+8. **One type scale.** SF Pro at fixed steps. Figures use medium weight with
    monospaced digits.
 
    | Token     | Size and weight | Used for              |
@@ -48,7 +52,8 @@ these tokens and never set their own values.
 
 ## Icon
 
-The app icon is three capsule streams on an off-white squircle. They have the
+The app icon is three capsule streams on an off-white superellipse tile with a
+hairline rim and a faint pool of light behind the mark. They have the
 same length and are staggered at equal steps, flowing left to right. Their
 colour deepens from graphite through slate into the accent blue, the stream
 in motion. It uses the same vocabulary as the interface:
