@@ -128,7 +128,7 @@ done
 
 if [ $fails != 0 ]; then
     echo; echo "== sluice log (warnings)"; grep -E "WARN|ERROR" "$work/sluice.log" | tail -30
-    echo; echo "== xray log"; tail -30 "$work/xray.log"
+    echo; echo "== xray log"; grep REALITY "$work/xray.log" | head -60
 fi
 mkdir -p ci-logs && cp "$work"/*.log ci-logs/ 2>/dev/null
 echo; [ $fails = 0 ] && echo "All interop checks passed." || echo "$fails node(s) failed."
