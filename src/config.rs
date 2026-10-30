@@ -208,12 +208,39 @@ pub struct GroupDef {
     pub interval_secs: u64,
     /// Subscription URL or file whose nodes are appended to `options`.
     pub policy_path: Option<String>,
+    pub user_agent: Option<String>,
     /// Only subscription nodes whose name matches this regex are kept.
     pub policy_filter: Option<String>,
     pub update_interval_secs: u64,
 }
 
 pub const DEFAULT_TEST_URL: &str = "http://www.gstatic.com/generate_204";
+
+impl GroupDef {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn to_line(&self) -> String {
+        let kind = match self.kind {
+            GroupKind::Select => "select",
+            GroupKind::UrlTest { .. } => "url-test",
+            GroupKind::Fallback => "fallback",
+            GroupKind::LoadBalance => "load-balance",
+        };
+        let mut parts = vec![kind.to_string()];
+        parts.extend(self.options.iter().cloned());
+        parts.push(format!("url=\"{}\"", self.url));
+        parts.push(format!("interval={}", self.interval_secs));
+        if let GroupKind::UrlTest { tolerance_ms } = self.kind {
+            parts.push(format!("tolerance={tolerance_ms}"));
+        }
+        for (key, value) in [("policy-path", &self.policy_path), ("user-agent", &self.user_agent), ("policy-regex-filter", &self.policy_filter)] {
+            if let Some(value) = value {
+                parts.push(format!("{key}=\"{value}\""));
+            }
+        }
+        parts.push(format!("update-interval={}", self.update_interval_secs));
+        format!("{} = {}", self.name, parts.join(", "))
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Config {
@@ -225,6 +252,7 @@ pub struct Config {
     pub hosts: Vec<(String, String)>,
     pub mitm: crate::mitm::MitmConfig,
     pub rewrites: crate::rewrite::Rewrites,
+    pub subscriptions: Vec<crate::subscription::SubscriptionInfo>,
 }
 
 fn split_kv(line: &str) -> Result<(&str, &str)> {
@@ -356,7 +384,11 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
 
 fn parse_group(line: &str) -> Result<GroupDef> {
     let (name, rest) = split_kv(line)?;
-    let mut parts = rest.split(',').map(str::trim).filter(|p| !p.is_empty());
+    let mut quoted = false;
+    let mut parts = rest.split(|c| {
+        if c == '"' { quoted = !quoted; }
+        c == ',' && !quoted
+    }).map(str::trim).filter(|p| !p.is_empty());
     let kind = parts.next().ok_or_else(|| anyhow!("empty group"))?.to_ascii_lowercase();
     let (mut options, mut params) = (Vec::new(), HashMap::new());
     for p in parts {
@@ -378,6 +410,10 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         other => bail!("unsupported group type {other:?} (supported: select, url-test, fallback, load-balance)"),
     };
     let policy_path = params.get("policy-path").cloned();
+    let user_agent = params.get("user-agent").cloned();
+    if let Some(value) = &user_agent {
+        http::HeaderValue::from_str(value).context("bad user-agent")?;
+    }
     if options.is_empty() && policy_path.is_none() {
         bail!("group {name:?} has no options");
     }
@@ -391,6 +427,7 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         url: params.get("url").cloned().unwrap_or_else(|| DEFAULT_TEST_URL.to_string()),
         interval_secs: num("interval", 600)?.max(10),
         policy_path,
+        user_agent,
         policy_filter: params.get("policy-regex-filter").cloned(),
         update_interval_secs: num("update-interval", 86400)?.max(60),
     })
@@ -701,6 +738,19 @@ mod tests {
             assert!(message.contains("line 3"), "{message}");
             assert!(message.contains(reason), "{body}: {message}");
         }
+    }
+
+    #[test]
+    fn subscription_user_agent_roundtrip() {
+        for agent in [None, Some("Surge/5.0"), Some("Custom agent/1.0 (a, b) token=123")] {
+            let mut line = "Sub = url-test, DIRECT, policy-path=https://example.invalid/sub, policy-regex-filter=HK|JP, tolerance=50".to_string();
+            if let Some(agent) = agent { line.push_str(&format!(", user-agent=\"{agent}\"")); }
+            let original = parse_group(&line).unwrap();
+            assert_eq!(original.user_agent.as_deref(), agent);
+            let back = parse_group(&original.to_line()).unwrap();
+            assert_eq!(format!("{original:?}"), format!("{back:?}"));
+        }
+        assert!(parse_group("Sub = select, policy-path=nodes.txt, user-agent=bad\rvalue").is_err());
     }
 
     #[test]

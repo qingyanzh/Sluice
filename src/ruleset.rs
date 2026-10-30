@@ -3,6 +3,7 @@
 //! Lists are loaded from a file or URL, cached on disk and refreshed periodically.
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -10,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -151,8 +153,52 @@ fn cache_dir() -> PathBuf {
     home.join("Library/Caches/Sluice")
 }
 
-fn cache_path(source: &str) -> PathBuf {
-    cache_dir().join(format!("{}.txt", &hex::encode(Sha256::digest(source.as_bytes()))[..24]))
+/// Response metadata is cached alongside the subscription body. Times are Unix seconds.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FetchMetadata {
+    pub upload: Option<u64>,
+    pub download: Option<u64>,
+    pub total: Option<u64>,
+    pub expire: Option<u64>,
+    pub update_interval_hours: Option<u64>,
+    pub last_fetch: Option<u64>,
+}
+
+impl FetchMetadata {
+    fn from_headers(userinfo: Option<&str>, interval: Option<&str>) -> Self {
+        let mut meta = Self::default();
+        for field in userinfo.unwrap_or_default().split(';') {
+            let Some((key, value)) = field.split_once('=') else { continue };
+            let value = value.trim().parse().ok();
+            match key.trim().to_ascii_lowercase().as_str() {
+                "upload" => meta.upload = value,
+                "download" => meta.download = value,
+                "total" => meta.total = value,
+                "expire" => meta.expire = value,
+                _ => {}
+            }
+        }
+        meta.update_interval_hours = interval.and_then(|v| v.trim().parse().ok());
+        meta
+    }
+}
+
+pub struct FetchResult {
+    pub text: String,
+    pub from: &'static str,
+    pub metadata: FetchMetadata,
+    /// A failed download may still return a usable stale body.
+    pub last_error: Option<String>,
+}
+
+fn cache_path(source: &str, user_agent: Option<&str>) -> PathBuf {
+    let mut hash = Sha256::new();
+    hash.update(source.as_bytes());
+    if let Some(ua) = user_agent {
+        hash.update([0]);
+        hash.update(ua.as_bytes());
+    }
+    cache_dir().join(format!("{}.txt", &hex::encode(hash.finalize())[..24]))
 }
 
 fn age(path: &Path) -> Option<Duration> {
@@ -160,32 +206,43 @@ fn age(path: &Path) -> Option<Duration> {
     SystemTime::now().duration_since(modified).ok()
 }
 
-/// Reads `source` (a path relative to `base`, or an http(s) URL). URLs come from the disk
-/// cache while younger than `max_age`, else from the network, falling back to a stale
-/// cache if the download fails. Returns the text and where it came from.
-pub async fn fetch(source: &str, base: &Path, max_age: Duration) -> Result<(String, &'static str)> {
+/// Reads a file or HTTP(S) source, with a disk cache and stale fallback on errors.
+pub async fn fetch(source: &str, base: &Path, max_age: Duration, user_agent: Option<&str>) -> Result<FetchResult> {
     if !(source.starts_with("http://") || source.starts_with("https://")) {
         let path = base.join(source);
         let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        return Ok((text, "file"));
+        return Ok(FetchResult { text, from: "file", metadata: FetchMetadata::default(), last_error: None });
     }
-    let cache = cache_path(source);
-    if age(&cache).is_some_and(|a| a < max_age) {
-        if let Ok(text) = std::fs::read_to_string(&cache) {
-            return Ok((text, "cache"));
+    fetch_cached(source, max_age, user_agent, &cache_path(source, user_agent)).await
+}
+
+async fn fetch_cached(source: &str, max_age: Duration, user_agent: Option<&str>, cache: &Path) -> Result<FetchResult> {
+    let sidecar = cache.with_extension("meta.json");
+    let cached_metadata = || {
+        std::fs::read(&sidecar).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+    };
+    if age(cache).is_some_and(|a| a < max_age) {
+        if let Ok(text) = std::fs::read_to_string(cache) {
+            return Ok(FetchResult { text, from: "cache", metadata: cached_metadata(), last_error: None });
         }
     }
-    match http_get(source).await {
-        Ok(text) => {
-            if let Err(e) = std::fs::create_dir_all(cache_dir()).and_then(|_| std::fs::write(&cache, &text)) {
-                warn!("{source}: cannot write cache: {e}");
+    match http_get(source, user_agent).await {
+        Ok(result) => {
+            let write_cache = || -> Result<()> {
+                if let Some(parent) = cache.parent() { std::fs::create_dir_all(parent)?; }
+                std::fs::write(cache, &result.text)?;
+                std::fs::write(&sidecar, serde_json::to_vec(&result.metadata)?)?;
+                Ok(())
+            };
+            if let Err(e) = write_cache() {
+                warn!("{source}: cannot write cache: {e:#}");
             }
-            Ok((text, "network"))
+            Ok(result)
         }
-        Err(e) => match std::fs::read_to_string(&cache) {
+        Err(e) => match std::fs::read_to_string(cache) {
             Ok(text) => {
                 warn!("{source}: download failed ({e:#}); using stale cache");
-                Ok((text, "stale cache"))
+                Ok(FetchResult { text, from: "stale cache", metadata: cached_metadata(), last_error: Some(format!("{e:#}")) })
             }
             Err(_) => Err(e.context(format!("download {source}"))),
         },
@@ -193,8 +250,8 @@ pub async fn fetch(source: &str, base: &Path, max_age: Duration) -> Result<(Stri
 }
 
 pub async fn load(set: &RuleSet, base: &Path, max_age: Duration) -> Result<usize> {
-    let (text, from) = fetch(&set.source, base, max_age).await.with_context(|| format!("rule set {}", set.source))?;
-    Ok(set.install(&text, from))
+    let result = fetch(&set.source, base, max_age, None).await.with_context(|| format!("rule set {}", set.source))?;
+    Ok(set.install(&result.text, result.from))
 }
 
 /// Re-downloads remote sets every `interval`.
@@ -221,27 +278,6 @@ pub fn spawn_refresh(sets: Vec<Arc<RuleSet>>, interval: Duration) {
     });
 }
 
-struct Url<'a> {
-    https: bool,
-    host: &'a str,
-    port: u16,
-    path: &'a str,
-}
-
-fn parse_url(url: &str) -> Result<Url<'_>> {
-    let (https, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
-        (Some(r), _) => (true, r),
-        (_, Some(r)) => (false, r),
-        _ => bail!("unsupported URL {url:?}"),
-    };
-    let (authority, path) = rest.find('/').map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) if !h.contains(']') || h.ends_with(']') => (h, p.parse().map_err(|_| anyhow!("bad port in {url}"))?),
-        _ => (authority, if https { 443 } else { 80 }),
-    };
-    Ok(Url { https, host: host.trim_matches(['[', ']']), port, path })
-}
-
 fn dechunk(mut body: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len());
     loop {
@@ -252,7 +288,7 @@ fn dechunk(mut body: &[u8]) -> Result<Vec<u8>> {
         if size == 0 {
             return Ok(out);
         }
-        if body.len() < size + 2 {
+        if size > MAX_BODY - out.len() || body.len() < size || body.get(size..size.saturating_add(2)) != Some(b"\r\n") {
             bail!("truncated chunked body");
         }
         out.extend_from_slice(&body[..size]);
@@ -260,64 +296,247 @@ fn dechunk(mut body: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// Minimal HTTP/1.1 GET over the egress path, following up to 5 redirects.
-pub async fn http_get(url: &str) -> Result<String> {
-    let mut url = url.to_string();
-    for _ in 0..5 {
-        let u = parse_url(&url)?;
-        let tcp = connect_tcp(u.host, u.port).await?;
-        let mut s: BoxStream = if u.https {
-            let (connector, sni) = tls_client(u.host, None, false)?;
-            Box::new(connector.connect(sni, tcp).await?)
-        } else {
-            Box::new(tcp)
+pub const DEFAULT_USER_AGENT: &str = concat!("clash.meta mihomo/1.18.10 Sluice/", env!("CARGO_PKG_VERSION"));
+
+fn decode_body(body: Vec<u8>, encoding: Option<&str>) -> Result<Vec<u8>> {
+    fn bounded(reader: impl Read) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        reader.take(MAX_BODY as u64 + 1).read_to_end(&mut out)?;
+        if out.len() > MAX_BODY { bail!("decoded body too large"); }
+        Ok(out)
+    }
+    let mut body = body;
+    for encoding in encoding.unwrap_or_default().split(',').rev().map(str::trim) {
+        body = match encoding.to_ascii_lowercase().as_str() {
+            "" | "identity" => body,
+            "gzip" | "x-gzip" => bounded(flate2::read::MultiGzDecoder::new(body.as_slice()))?,
+            "deflate" => bounded(flate2::read::ZlibDecoder::new(body.as_slice()))
+                .or_else(|_| bounded(flate2::read::DeflateDecoder::new(body.as_slice())))?,
+            other => bail!("unsupported Content-Encoding {other:?}"),
         };
-        let req = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Sluice/{}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-            u.path,
-            u.host,
-            env!("CARGO_PKG_VERSION")
-        );
-        s.write_all(req.as_bytes()).await?;
-        let mut raw = Vec::new();
-        tokio::time::timeout(Duration::from_secs(30), (&mut s).take(MAX_BODY as u64).read_to_end(&mut raw))
-            .await
-            .map_err(|_| anyhow!("download timed out"))??;
+    }
+    Ok(body)
+}
+
+/// HTTP/1.1 GET over the egress path, following at most five redirects.
+pub async fn http_get(source: &str, user_agent: Option<&str>) -> Result<FetchResult> {
+    let user_agent = user_agent.unwrap_or(DEFAULT_USER_AGENT);
+    http::HeaderValue::from_str(user_agent).context("bad user-agent")?;
+    let mut url = url::Url::parse(source)?;
+    for redirects in 0..=5 {
+        if !matches!(url.scheme(), "http" | "https") { bail!("unsupported URL scheme"); }
+        let host = url.host_str().ok_or_else(|| anyhow!("URL without host"))?.trim_matches(['[', ']']);
+        let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL without port"))?;
+        let raw = tokio::time::timeout(Duration::from_secs(30), async {
+            let tcp = connect_tcp(host, port).await?;
+            let mut stream: BoxStream = if url.scheme() == "https" {
+                let (connector, sni) = tls_client(host, None, false)?;
+                Box::new(connector.connect(sni, tcp).await?)
+            } else { Box::new(tcp) };
+            let path = &url[url::Position::BeforePath..url::Position::AfterQuery];
+            let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
+            let req = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: {user_agent}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n");
+            stream.write_all(req.as_bytes()).await?;
+            let mut raw = Vec::new();
+            (&mut stream).take((MAX_BODY + 65537) as u64).read_to_end(&mut raw).await?;
+            if raw.len() > MAX_BODY + 65536 { bail!("HTTP response too large"); }
+            Ok::<_, anyhow::Error>(raw)
+        }).await.map_err(|_| anyhow!("download timed out"))??;
         let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow!("malformed HTTP response"))?;
-        let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
-        let status: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        if head_end > 65536 { bail!("HTTP headers too large"); }
+        let head = String::from_utf8_lossy(&raw[..head_end]);
+        let status: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| anyhow!("malformed HTTP status"))?;
         let header = |name: &str| {
             head.lines().skip(1).find_map(|l| {
                 let (k, v) = l.split_once(':')?;
-                k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+                k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
             })
         };
-        if (300..400).contains(&status) {
-            let loc = header("location").ok_or_else(|| anyhow!("redirect without Location"))?;
-            url = if loc.starts_with("http") {
-                loc
-            } else {
-                format!("{}://{}:{}{loc}", if u.https { "https" } else { "http" }, u.host, u.port)
-            };
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            if redirects == 5 { bail!("too many redirects (limit 5)"); }
+            let location = header("location").ok_or_else(|| anyhow!("HTTP {status}: redirect without Location"))?;
+            url = url.join(location)?;
             continue;
         }
-        if status != 200 {
-            bail!("HTTP {status}");
-        }
         let body = &raw[head_end + 4..];
-        let body = if header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+        let body = if header("transfer-encoding").is_some_and(|v| v.split(',').any(|e| e.trim().eq_ignore_ascii_case("chunked"))) {
             dechunk(body)?
-        } else {
-            body.to_vec()
-        };
-        return Ok(String::from_utf8_lossy(&body).into_owned());
+        } else if let Some(length) = header("content-length") {
+            let length: usize = length.parse().context("bad Content-Length")?;
+            if length > MAX_BODY { bail!("HTTP body too large"); }
+            body.get(..length).ok_or_else(|| anyhow!("truncated HTTP body"))?.to_vec()
+        } else { body.to_vec() };
+        if body.len() > MAX_BODY { bail!("HTTP body too large"); }
+        let body = decode_body(body, header("content-encoding"))?;
+        if !(200..300).contains(&status) {
+            bail!("HTTP {status}: {}", String::from_utf8_lossy(&body[..body.len().min(200)]));
+        }
+        let mut metadata = FetchMetadata::from_headers(header("subscription-userinfo"), header("profile-update-interval"));
+        metadata.last_fetch = Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs());
+        return Ok(FetchResult { text: String::from_utf8_lossy(&body).into_owned(), from: "network", metadata, last_error: None });
     }
-    bail!("too many redirects")
+    unreachable!()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tokio::net::TcpListener;
+
+    /// Each fixture runs exclusively on loopback, with no DNS or external requests.
+    async fn mock_http(responses: Vec<Vec<u8>>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let byte = socket.read_u8().await.unwrap();
+                    request.push(byte);
+                    if request.ends_with(b"\r\n\r\n") { break; }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                socket.write_all(&response).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            requests
+        });
+        (url, task)
+    }
+
+    fn response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut result = format!("HTTP/1.1 {status}\r\n{headers}Connection: close\r\n\r\n").into_bytes();
+        result.extend_from_slice(body);
+        result
+    }
+
+    #[test]
+    fn subscription_userinfo_headers() {
+        let meta = FetchMetadata::from_headers(Some(" upload = 12 ; download=34; total = 1000 ; expire=1800000000; unknown=1"), Some(" 24 "));
+        assert_eq!((meta.upload, meta.download, meta.total, meta.expire, meta.update_interval_hours), (Some(12), Some(34), Some(1000), Some(1800000000), Some(24)));
+        let partial = FetchMetadata::from_headers(Some("download=0; upload=invalid; total=-1; broken"), Some("invalid"));
+        assert_eq!(partial, FetchMetadata { download: Some(0), ..Default::default() });
+        assert_eq!(FetchMetadata::from_headers(None, None), FetchMetadata::default());
+    }
+
+    #[test]
+    fn compressed_chunked_bodies_decode_offline() {
+        let original = "HK = trojan, h, 443, password=p\n禁止访问".as_bytes();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(original).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut wire = format!("{:x}\r\n", gzip.len()).into_bytes();
+        wire.extend_from_slice(&gzip);
+        wire.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(decode_body(dechunk(&wire).unwrap(), Some("gzip")).unwrap(), original);
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib.write_all(original).unwrap();
+        assert_eq!(decode_body(zlib.finish().unwrap(), Some("deflate")).unwrap(), original);
+        let mut raw = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        raw.write_all(original).unwrap();
+        assert_eq!(decode_body(raw.finish().unwrap(), Some("deflate")).unwrap(), original);
+        assert!(decode_body(b"truncated".to_vec(), Some("gzip")).is_err());
+        assert!(dechunk(b"ffffffffffffffff\r\n").is_err());
+    }
+
+    #[tokio::test]
+    async fn http_redirects_gzip_chunked_and_default_agent() {
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all("HK = trojan, localhost, 443, password=p\n".as_bytes()).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut chunked = Vec::new();
+        for chunk in gzip.chunks(7) {
+            chunked.extend_from_slice(format!("{:x};extension=yes\r\n", chunk.len()).as_bytes());
+            chunked.extend_from_slice(chunk);
+            chunked.extend_from_slice(b"\r\n");
+        }
+        chunked.extend_from_slice(b"0\r\nX-Trailer: yes\r\n\r\n");
+        let (destination, final_server) = mock_http(vec![response("200 OK", "Transfer-Encoding: chunked\r\nContent-Encoding: gzip\r\nSubscription-Userinfo: upload=1; download=2; total=3; expire=4\r\nProfile-Update-Interval: 12\r\n", &chunked)]).await;
+        let (origin, redirects) = mock_http(vec![
+            response("302 Found", "Location: ../next?token=1\r\n", b""),
+            response("307 Temporary Redirect", &format!("Location: {destination}/final\r\n"), b""),
+        ]).await;
+        let result = http_get(&format!("{origin}/dir/start"), None).await.unwrap();
+        assert!(result.text.starts_with("HK = trojan"));
+        assert_eq!(result.metadata.total, Some(3));
+        assert_eq!(result.metadata.update_interval_hours, Some(12));
+        assert!(result.metadata.last_fetch.is_some());
+        let requests = redirects.await.unwrap();
+        assert!(requests[0].starts_with("GET /dir/start HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /next?token=1 HTTP/1.1"));
+        for request in requests.into_iter().chain(final_server.await.unwrap()) {
+            assert!(request.contains(&format!("User-Agent: {DEFAULT_USER_AGENT}\r\n")));
+            assert!(request.contains("Accept-Encoding: gzip\r\n"));
+        }
+    }
+
+    #[tokio::test]
+    async fn http_deflate_custom_agent_and_2xx() {
+        for raw in [false, true] {
+            let body = if raw {
+                let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(b"nodes").unwrap();
+                encoder.finish().unwrap()
+            } else {
+                let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(b"nodes").unwrap();
+                encoder.finish().unwrap()
+            };
+            let (url, server) = mock_http(vec![response("201 Created", &format!("Content-Encoding: deflate\r\nContent-Length: {}\r\n", body.len()), &body)]).await;
+            assert_eq!(http_get(&url, Some("Surge/5.0")).await.unwrap().text, "nodes");
+            assert!(server.await.unwrap()[0].contains("User-Agent: Surge/5.0\r\n"));
+        }
+    }
+
+    #[tokio::test]
+    async fn http_errors_include_status_and_bounded_lossy_body() {
+        let mut body = "禁止访问".as_bytes().to_vec();
+        body.push(0xff);
+        body.extend_from_slice(&[b'x'; 300]);
+        let (url, server) = mock_http(vec![response("403 Forbidden", "", &body)]).await;
+        let error = http_get(&url, None).await.err().unwrap().to_string();
+        assert!(error.starts_with("HTTP 403: 禁止访问�"));
+        assert!(error.len() < 230);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_redirect_limit_allows_five_hops() {
+        let redirect = response("302 Found", "Location: /again\r\n", b"");
+        let mut responses = vec![redirect.clone(); 5];
+        responses.push(response("200 OK", "", b"ok"));
+        let (url, server) = mock_http(responses).await;
+        assert_eq!(http_get(&url, None).await.unwrap().text, "ok");
+        assert_eq!(server.await.unwrap().len(), 6);
+        let (url, server) = mock_http(vec![redirect; 6]).await;
+        assert!(http_get(&url, None).await.err().unwrap().to_string().contains("too many redirects"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_metadata_survives_reload_and_stale_fallback() {
+        let (url, server) = mock_http(vec![
+            response("200 OK", "Subscription-Userinfo: download=8; total=100\r\nProfile-Update-Interval: 6\r\n", b"nodes"),
+            response("403 Forbidden", "", "禁止访问".as_bytes()),
+        ]).await;
+        let dir = std::env::temp_dir().join(format!("sluice-sub-cache-{}-{}", std::process::id(), url.rsplit(':').next().unwrap()));
+        let cache = dir.join("body.txt");
+        let first = fetch_cached(&url, Duration::ZERO, None, &cache).await.unwrap();
+        let cached = fetch_cached(&url, Duration::from_secs(3600), None, &cache).await.unwrap();
+        assert_eq!(cached.from, "cache");
+        assert_eq!(cached.metadata, first.metadata);
+        let stale = fetch_cached(&url, Duration::ZERO, None, &cache).await.unwrap();
+        assert_eq!(stale.from, "stale cache");
+        assert_eq!(stale.text, "nodes");
+        assert_eq!(stale.metadata, first.metadata);
+        assert!(stale.last_error.unwrap().contains("HTTP 403: 禁止访问"));
+        server.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_ne!(cache_path(&url, None), cache_path(&url, Some("custom")));
+    }
 
     #[test]
     fn rule_list() {
@@ -350,10 +569,6 @@ mod tests {
 
     #[test]
     fn urls_and_chunked() {
-        let u = parse_url("https://raw.example.com/a/b.txt").unwrap();
-        assert_eq!((u.https, u.host, u.port, u.path), (true, "raw.example.com", 443, "/a/b.txt"));
-        let u = parse_url("http://127.0.0.1:8080").unwrap();
-        assert_eq!((u.host, u.port, u.path), ("127.0.0.1", 8080, "/"));
         assert_eq!(dechunk(b"5\r\nhello\r\n6;x=y\r\n world\r\n0\r\n\r\n").unwrap(), b"hello world");
     }
 }

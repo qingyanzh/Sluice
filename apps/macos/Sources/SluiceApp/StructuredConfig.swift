@@ -70,7 +70,11 @@ struct StructuredConfig {
         init?(line: String) {
             guard let eq = line.firstIndex(of: "=") else { return nil }
             name = StructuredConfig.trim(String(line[..<eq]))
-            let parts = line[line.index(after: eq)...].components(separatedBy: ",").map(StructuredConfig.trim).filter { !$0.isEmpty }
+            var quoted = false
+            let parts = line[line.index(after: eq)...].split(omittingEmptySubsequences: false) {
+                if $0 == "\"" { quoted.toggle() }
+                return $0 == "," && !quoted
+            }.map { StructuredConfig.trim(String($0)) }.filter { !$0.isEmpty }
             guard !name.isEmpty, let kind = parts.first, Self.types.contains(kind.lowercased()) else { return nil }
             type = kind
             members = parts.dropFirst().filter { !$0.contains("=") }

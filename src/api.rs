@@ -1,5 +1,6 @@
 //! Minimal control API.
 //!
+//!   GET  /v1/subscriptions                  subscription usage, expiry and fetch status
 //!   GET  /v1/policies                       groups, current selection and options
 //!   POST /v1/policies/<group>?select=<opt>  switch a select group
 //!   POST /v1/policies/<group>/test          run an automatic group's health check now
@@ -163,6 +164,9 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
     }
 
     let (status, body) = match (method, path) {
+        ("GET", "/v1/subscriptions") => {
+            ("200 OK", serde_json::to_string(&*reloader.subscriptions.read().unwrap())?)
+        }
         ("GET", "/v1/policies") => {
             let items: Vec<String> = router
                 .groups()
@@ -405,6 +409,37 @@ pub async fn serve(addr: String, reloader: Arc<Reloader>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn subscriptions_endpoint_exposes_metadata_additively() {
+        let cfg = crate::config::Config {
+            subscriptions: vec![crate::subscription::SubscriptionInfo {
+                group: "Airport".into(), url: "http://127.0.0.1/sub".into(),
+                metadata: crate::ruleset::FetchMetadata { upload: Some(10), download: Some(20), total: Some(100), expire: Some(1800000000), update_interval_hours: Some(6), last_fetch: Some(1700000000) },
+                last_error: Some("HTTP 403: 禁止访问".into()), node_count: 2,
+            }], ..crate::config::Config::parse("[Rule]\nFINAL,DIRECT\n").unwrap()
+        };
+        let reloader = Reloader::start(crate::router::Router::new(&cfg).unwrap(), &cfg, "unused.conf");
+        for path in ["/v1/subscriptions", "/v1/policies"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let reloader = reloader.clone();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                handle(socket, reloader).await.unwrap();
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+            let mut raw = String::new();
+            client.read_to_string(&mut raw).await.unwrap();
+            server.await.unwrap();
+            assert!(raw.starts_with("HTTP/1.1 200 OK"));
+            let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            if path == "/v1/subscriptions" {
+                assert_eq!(body, serde_json::json!([{"group":"Airport", "url":"http://127.0.0.1/sub", "upload":10, "download":20, "total":100, "expire":1800000000, "update_interval_hours":6, "last_fetch":1700000000, "last_error":"HTTP 403: 禁止访问", "node_count":2}]));
+            } else { assert_eq!(body, serde_json::json!([])); }
+        }
+    }
 
     #[test]
     fn decode() {
