@@ -975,6 +975,7 @@ struct OverviewView: View {
                     LoginItemCard()
                 }.entrance(2)
                 AppearanceCard().entrance(3)
+                MenuBarSettingsCard().entrance(4)
                 HStack(spacing: 12) {
                     IconTile(symbol: "doc.text", size: 30)
                     VStack(alignment: .leading, spacing: 3) {
@@ -983,7 +984,7 @@ struct OverviewView: View {
                     }
                     Spacer(minLength: 8)
                     Button("显示文件") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
-                }.card().entrance(4)
+                }.card().entrance(5)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -1030,6 +1031,40 @@ struct AppearanceCard: View {
             GlassSegmented(options: Appearance.allCases.map { ($0, $0.title, $0.icon) }, selection: $appearance)
                 .frame(width: 320)
         }
+        .card()
+    }
+}
+
+struct MenuBarSettingsCard: View {
+    @AppStorage("menuBarDisplayMode") private var displayMode = MenuBarDisplayMode.iconAndSpeed
+    @AppStorage("menuBarShowOutboundMode") private var showOutboundMode = true
+    @AppStorage("menuBarDimWhenNotProxying") private var dimWhenNotProxying = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                IconTile(symbol: "menubar.rectangle", size: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("菜单栏").font(DS.heading)
+                    Text("选择顶部状态栏显示的内容").font(DS.small).foregroundStyle(DS.ink2)
+                }
+                Spacer(minLength: 16)
+                Picker("菜单栏显示", selection: $displayMode) {
+                    ForEach(MenuBarDisplayMode.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            Divider()
+            Toggle("显示当前的出站模式", isOn: $showOutboundMode)
+            Toggle("未启用系统代理和增强模式时，将图标显示为灰色", isOn: $dimWhenNotProxying)
+                .disabled(!displayMode.showsIcon)
+        }
+        .font(DS.label)
+        .toggleStyle(.checkbox)
+        .tint(DS.accent)
         .card()
     }
 }

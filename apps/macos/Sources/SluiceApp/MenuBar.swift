@@ -1,10 +1,27 @@
 import AppKit
 import SwiftUI
 
+enum MenuBarDisplayMode: String, CaseIterable, Identifiable {
+    case iconAndSpeed, iconOnly, speedOnly
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .iconAndSpeed: "显示图标和实时速度"
+        case .iconOnly: "仅显示图标"
+        case .speedOnly: "仅显示实时速度"
+        }
+    }
+    var showsIcon: Bool { self != .speedOnly }
+    var showsSpeed: Bool { self != .iconOnly }
+}
+
 /// The status bar menu keeps the frequent controls available without opening a window.
 struct MenuBarContent: View {
     @EnvironmentObject private var core: Core
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("menuBarDisplayMode") private var displayMode = MenuBarDisplayMode.iconAndSpeed
+    @AppStorage("menuBarShowOutboundMode") private var showOutboundMode = true
 
     private var profileName: String {
         URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent
@@ -84,6 +101,18 @@ struct MenuBarContent: View {
             .disabled(!core.isActive)
 
         Divider()
+        Menu("菜单栏显示") {
+            ForEach(MenuBarDisplayMode.allCases) { option in
+                Toggle(option.title, isOn: Binding(
+                    get: { displayMode == option },
+                    set: { if $0 { displayMode = option } }
+                ))
+            }
+            Divider()
+            Toggle("显示当前的出站模式", isOn: $showOutboundMode)
+        }
+
+        Divider()
         Button("显示主窗口", systemImage: "macwindow") { showWindow() }
             .keyboardShortcut("0")
         Button("查看请求", systemImage: "arrow.up.arrow.down.circle") { showWindow(.requests) }
@@ -131,6 +160,9 @@ struct SluiceMark: Shape {
 /// A compact status mark with outbound mode and significant download traffic.
 struct MenuBarLabel: View {
     @EnvironmentObject private var core: Core
+    @AppStorage("menuBarDisplayMode") private var displayMode = MenuBarDisplayMode.iconAndSpeed
+    @AppStorage("menuBarShowOutboundMode") private var showOutboundMode = true
+    @AppStorage("menuBarDimWhenNotProxying") private var dimWhenNotProxying = true
 
     private static let statusIcon: NSImage? = {
         guard let url = Bundle.main.url(forResource: "SluiceMenuBarIcon", withExtension: "png"),
@@ -141,27 +173,42 @@ struct MenuBarLabel: View {
     }()
 
     var body: some View {
-        HStack(spacing: 3) {
-            if let icon = Self.statusIcon {
-                Image(nsImage: icon)
-                    .renderingMode(.template)
-                    .frame(width: 14, height: 15)
-                    .foregroundStyle(core.state.isFailed ? DS.fail : core.state == .running ? Color.primary : Color.secondary)
-                    .accessibilityHidden(true)
-            } else {
-                SluiceMark()
-                    .fill(core.state.isFailed ? DS.fail : core.state == .running ? Color.primary : Color.secondary)
-                    .frame(width: 14, height: 15)
-                    .accessibilityHidden(true)
-            }
-            if core.state == .running {
-                Text(modeMark).font(.system(size: 10, weight: .semibold))
-                if core.downRate + core.upRate >= 1024 {
-                    Text("↓\(formatBytes(core.downRate))/s").monospacedDigit()
+        HStack(spacing: 4) {
+            if displayMode.showsIcon {
+                if let icon = Self.statusIcon {
+                    Image(nsImage: icon)
+                        .renderingMode(.template)
+                        .frame(width: 14, height: 15)
+                        .foregroundStyle(iconTone)
+                        .accessibilityHidden(true)
+                } else {
+                    SluiceMark()
+                        .fill(iconTone)
+                        .frame(width: 14, height: 15)
+                        .accessibilityHidden(true)
                 }
             }
+            if showOutboundMode && core.state == .running {
+                Text(modeMark).font(.system(size: 10, weight: .semibold))
+            }
+            if displayMode.showsSpeed {
+                VStack(alignment: .leading, spacing: -2) {
+                    Text("↓\(formatBytes(core.downRate))/s")
+                    Text("↑\(formatBytes(core.upRate))/s")
+                }
+                .font(.system(size: 9, weight: .medium))
+                .monospacedDigit()
+                .lineLimit(1)
+                .accessibilityElement(children: .combine)
+            }
         }
-        .accessibilityLabel("Sluice，\(core.state.label)\(core.state == .running ? "，\(modeName)" : "")")
+        .accessibilityLabel("Sluice，\(core.state.label)\(showOutboundMode && core.state == .running ? "，\(modeName)" : "")\(displayMode.showsSpeed ? "，下载每秒 \(formatBytes(core.downRate))，上传每秒 \(formatBytes(core.upRate))" : "")")
+    }
+
+    private var iconTone: Color {
+        if core.state.isFailed { return DS.fail }
+        if dimWhenNotProxying && !core.systemProxyOn && !core.summary.enhancedMode { return .secondary }
+        return .primary
     }
 
     private var modeName: String { (OutboundMode(rawValue: core.mode) ?? .rule).title }

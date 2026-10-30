@@ -70,8 +70,11 @@ controls may fade, while enabled supporting text should remain legible.
 ## Menu bar
 
 - The macOS status item uses a monochrome version of Sluice's five-channel mark,
-  followed by the active outbound
-  mode while running. Significant download traffic appears after the mode.
+  with three persistent display modes: icon and live speed, icon only, or
+  live speed only. Live speed always shows download and upload rates, including
+  zero traffic. The current outbound mode can be shown independently.
+- The icon can dim when neither the system proxy nor enhanced mode is enabled.
+  These preferences are available in Settings and the status menu.
 - The native menu begins with engine state, profile name, and live traffic.
   Start or stop is the first action. Outbound mode and selectable policy
   groups use submenus with checkmarks, followed by system proxy and enhanced
