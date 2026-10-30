@@ -108,7 +108,8 @@ struct MainView: View {
             }
             .animation(.smooth(duration: 0.25), value: pane)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Backdrop())
+            .toolbarBackground(.hidden, for: .windowToolbar)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     TogglePill(title: "系统代理", on: core.systemProxyOn) { core.setSystemProxy(!core.systemProxyOn) }
@@ -201,7 +202,7 @@ struct StatusFooter: View {
             StartStopButton(compact: true).buttonStyle(.borderless).font(.title3)
         }
         .padding(8)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .glass(radius: DS.smallRadius + 2)
     }
 }
 
@@ -258,6 +259,112 @@ struct LatencyBadge: View {
     }
 }
 
+/// Design tokens: one gutter, one gap, two radii, shared everywhere.
+enum DS {
+    static let gutter: CGFloat = 24
+    static let gap: CGFloat = 12
+    static let radius: CGFloat = 14
+    static let smallRadius: CGFloat = 10
+    static let spring = Animation.spring(response: 0.32, dampingFraction: 0.82)
+}
+
+/// Soft, tinted backdrop behind the glass surfaces; it is what makes them read as translucent.
+struct Backdrop: View {
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let a = scheme == .dark ? 0.22 : 0.16
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            Circle().fill(Color.cyan.opacity(a)).frame(width: 520, height: 520).blur(radius: 120)
+                .offset(x: 260, y: -220)
+            Circle().fill(Color.indigo.opacity(a)).frame(width: 560, height: 560).blur(radius: 140)
+                .offset(x: -240, y: 260)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+/// A search field shaped like the other glass controls.
+struct SearchField: View {
+    let prompt: String
+    @Binding var text: String
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField(prompt, text: $text).textFieldStyle(.plain)
+            if !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
+                    .buttonStyle(.plain)
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .frame(width: 220)
+        .glass(radius: 8)
+    }
+}
+
+/// Segmented control with a sliding glass thumb.
+struct GlassSegmented<T: Hashable>: View {
+    let options: [(T, String, String?)]
+    @Binding var selection: T
+    @Namespace private var ns
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.0) { value, title, icon in
+                let on = value == selection
+                Button { withAnimation(DS.spring) { selection = value } } label: {
+                    HStack(spacing: 5) {
+                        if let icon { Image(systemName: icon) }
+                        Text(title)
+                    }
+                    .font(.callout.weight(on ? .semibold : .regular))
+                    .foregroundStyle(on ? Color.primary : Color.secondary)
+                    .frame(maxWidth: .infinity).padding(.vertical, 6)
+                    .background {
+                        if on {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                                .matchedGeometryEffect(id: "thumb", in: ns)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+}
+
+extension View {
+    /// Header above the pane's content; content scrolls under nothing, so headers stay crisp on glass.
+    func paneHeader<H: View>(@ViewBuilder _ header: () -> H) -> some View {
+        VStack(spacing: 0) { header(); self }
+    }
+
+    /// Frosted surface: material, hairline highlight, faint shadow.
+    func glass(radius: CGFloat = DS.radius, highlighted: Bool = false) -> some View {
+        background(.regularMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(highlighted
+                    ? AnyShapeStyle(Color.accentColor.opacity(0.7))
+                    : AnyShapeStyle(LinearGradient(colors: [.white.opacity(0.45), .white.opacity(0.08)], startPoint: .top, endPoint: .bottom)),
+                    lineWidth: highlighted ? 1.5 : 1))
+            .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
+    }
+
+    /// A glass container for tables, lists and editors, inset by the gutter.
+    func glassPanel() -> some View {
+        scrollContentBackground(.hidden)
+            .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+            .glass()
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
+    }
+}
+
 /// Big pane title with optional trailing controls, as at the top of every Surge pane.
 struct PaneHeader<Trailing: View>: View {
     let title: String
@@ -266,13 +373,13 @@ struct PaneHeader<Trailing: View>: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 26, weight: .bold))
+                Text(title).font(.system(size: 28, weight: .bold, design: .rounded))
                 if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
             trailing
         }
-        .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
+        .padding(.horizontal, DS.gutter).padding(.top, 14).padding(.bottom, 14)
     }
 }
 
@@ -284,19 +391,16 @@ extension PaneHeader where Trailing == EmptyView {
 struct CardModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .padding(14)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            .tileBackground(radius: 12)
+            .glass()
     }
 }
 
 extension View {
     /// The shared surface for cards and tiles: raised, borderless, soft shadow.
-    func tileBackground(radius: CGFloat = 10, highlighted: Bool = false) -> some View {
-        background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(highlighted ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.06)))
-            .shadow(color: .black.opacity(0.06), radius: 4, y: 1)
+    func tileBackground(radius: CGFloat = DS.smallRadius + 2, highlighted: Bool = false) -> some View {
+        glass(radius: radius, highlighted: highlighted)
     }
 }
 
@@ -371,9 +475,9 @@ struct ActivityView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: DS.gap) {
                 infoRow
-                HStack(alignment: .top, spacing: 12) {
+                HStack(alignment: .top, spacing: DS.gap) {
                     statusCard.frame(maxWidth: .infinity)
                     RateCard(title: "上传", rate: core.upRate, series: core.rateHistory.map(\.up), color: .purple)
                         .frame(maxWidth: .infinity)
@@ -381,8 +485,8 @@ struct ActivityView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .fixedSize(horizontal: false, vertical: true)
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(spacing: 12) {
+                HStack(alignment: .top, spacing: DS.gap) {
+                    VStack(spacing: DS.gap) {
                         connectionsCard
                         totalCard
                     }
@@ -390,9 +494,9 @@ struct ActivityView: View {
                     topCard.frame(maxWidth: .infinity)
                 }
             }
-            .padding(.horizontal, 20).padding(.bottom, 20)
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .safeAreaInset(edge: .top, spacing: 0) { PaneHeader(title: "活动").background(Color(nsColor: .windowBackgroundColor)) }
+        .paneHeader { PaneHeader(title: "活动") }
     }
 
     private var infoRow: some View {
@@ -512,11 +616,7 @@ struct ActivityView: View {
                 Spacer()
                 Button("查看全部") { pane = .requests }.buttonStyle(.link).font(.caption)
             }
-            Picker("", selection: $topBy) {
-                Text("域名").tag(0)
-                Text("策略").tag(1)
-            }
-            .pickerStyle(.segmented).labelsHidden()
+            GlassSegmented(options: [(0, "域名", nil), (1, "策略", nil)], selection: $topBy)
             if top.isEmpty {
                 Text("还没有请求").foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 120)
             }
@@ -599,7 +699,7 @@ struct OverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 SectionTitle(text: "网络接管")
-                LazyVGrid(columns: columns, spacing: 12) {
+                LazyVGrid(columns: columns, spacing: DS.gap) {
                     FeatureCard(title: "系统代理",
                                 detail: "大多数应用的流量可以通过将 Sluice 设置为系统代理接管。具有最佳的兼容性和性能。",
                                 isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }),
@@ -620,7 +720,7 @@ struct OverviewView: View {
                         .disabled(enhancedBusy)
                 }
                 SectionTitle(text: "代理服务")
-                LazyVGrid(columns: columns, spacing: 12) {
+                LazyVGrid(columns: columns, spacing: DS.gap) {
                     FeatureCard(title: "HTTP & SOCKS5 代理",
                                 detail: "Sluice 在本机提供 HTTP 和 SOCKS5 代理服务，可以手动配置给其他应用使用。",
                                 status: [core.summary.httpListen.map { "HTTP \($0)" }, core.summary.socksListen.map { "SOCKS5 \($0)" }]
@@ -632,7 +732,7 @@ struct OverviewView: View {
                                 statusOn: core.state == .running && core.summary.apiPort != nil)
                 }
                 SectionTitle(text: "通用")
-                LazyVGrid(columns: columns, spacing: 12) {
+                LazyVGrid(columns: columns, spacing: DS.gap) {
                     FeatureCard(title: "打开应用时启动",
                                 detail: "打开 Sluice 时自动启动代理内核。",
                                 isOn: $core.autoStart,
@@ -640,9 +740,9 @@ struct OverviewView: View {
                     LoginItemCard()
                 }
             }
-            .padding(.horizontal, 20).padding(.bottom, 20)
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .safeAreaInset(edge: .top, spacing: 0) { PaneHeader(title: "概览").background(Color(nsColor: .windowBackgroundColor)) }
+        .paneHeader { PaneHeader(title: "概览") }
     }
 }
 
@@ -703,10 +803,8 @@ struct PolicyView: View {
         let mode = OutboundMode(rawValue: core.mode) ?? .rule
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Picker("出站模式", selection: Binding(get: { mode }, set: { core.setMode($0.rawValue) })) {
-                    ForEach(OutboundMode.allCases) { m in Label(m.title, systemImage: m.icon).tag(m) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
+                GlassSegmented(options: OutboundMode.allCases.map { ($0, $0.title, $0.icon) },
+                               selection: Binding(get: { mode }, set: { core.setMode($0.rawValue) }))
                 .disabled(core.state != .running)
                 Text(mode.explanation).font(.caption).foregroundStyle(.secondary)
 
@@ -728,9 +826,9 @@ struct PolicyView: View {
                     }
                 }
             }
-            .padding(.horizontal, 20).padding(.bottom, 20)
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .safeAreaInset(edge: .top, spacing: 0) { PaneHeader(title: "策略").background(Color(nsColor: .windowBackgroundColor)) }
+        .paneHeader { PaneHeader(title: "策略") }
     }
 }
 
@@ -856,14 +954,13 @@ struct NodesView: View {
                     AddCard { showAddSub = true }.help("添加订阅")
                 }
             }
-            .padding(.horizontal, 20).padding(.bottom, 20)
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
+        .paneHeader {
             PaneHeader(title: "节点", subtitle: "配置中的 [Proxy] 节点和订阅") {
                 Button { showAddNode = true } label: { Label("添加节点", systemImage: "plus") }
                 Button { showAddSub = true } label: { Label("添加订阅", systemImage: "link.badge.plus") }
             }
-            .background(Color(nsColor: .windowBackgroundColor))
         }
         .sheet(isPresented: $showAddNode, onDismiss: refresh) { AddNodeSheet() }
         .sheet(isPresented: $showAddSub, onDismiss: refresh) { AddSubscriptionSheet() }
@@ -928,7 +1025,7 @@ struct AddNodeSheet: View {
     @State private var busy = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: DS.gap) {
             Text("添加节点").font(.title2.bold())
             Text("粘贴分享链接（ss://、vmess://、vless://、trojan://、hysteria2://）或代理行，例如 `HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=…`。")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -963,7 +1060,7 @@ struct AddSubscriptionSheet: View {
     @State private var busy = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: DS.gap) {
             Text("添加订阅").font(.title2.bold())
             Form {
                 TextField("名称", text: $name, prompt: Text("Subscription"))
@@ -1004,10 +1101,10 @@ struct RequestsView: View {
         }
         VStack(spacing: 0) {
             PaneHeader(title: "请求", subtitle: "\(core.connections.count) 个请求") {
-                TextField("搜索", text: $filter).textFieldStyle(.roundedBorder).frame(width: 200)
+                SearchField(prompt: "搜索", text: $filter)
                 Button { core.clearConnections() } label: { Label("清除", systemImage: "trash") }
             }
-            HSplitView {
+            HStack(spacing: DS.gap) {
                 Table(rows, selection: $selection) {
                     TableColumn("时间", value: \.time).width(min: 60, ideal: 70)
                     TableColumn("", value: \.proto).width(34)
@@ -1023,9 +1120,16 @@ struct RequestsView: View {
                     }
                 }
                 .frame(minWidth: 420)
+                .scrollContentBackground(.hidden)
+                .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+                .glass()
                 RequestDetail(connection: core.connections.first { $0.id == selection })
-                    .frame(minWidth: 220, idealWidth: 260, maxWidth: 300)
+                    .scrollContentBackground(.hidden)
+                    .frame(width: 280)
+                    .glass()
+                    .animation(DS.spring, value: selection)
             }
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
     }
 }
@@ -1092,7 +1196,7 @@ struct RuleView: View {
         }
         VStack(spacing: 0) {
             PaneHeader(title: "规则", subtitle: "规则将按照从上至下的顺序进行测试。") {
-                TextField("搜索", text: $filter).textFieldStyle(.roundedBorder).frame(width: 200)
+                SearchField(prompt: "搜索", text: $filter)
             }
             Table(rows) {
                 TableColumn("ID") { Text("\($0.id)").monospacedDigit().foregroundStyle(.secondary) }.width(36)
@@ -1101,8 +1205,8 @@ struct RuleView: View {
                 TableColumn("策略", value: \.policy).width(min: 70, ideal: 110)
                 TableColumn("选项", value: \.options).width(min: 60, ideal: 90)
             }
-            .padding(.horizontal, 20)
-            routeTest.padding(20)
+            .glassPanel()
+            routeTest.padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .onAppear(perform: load)
         .onChange(of: core.state) { load() }
@@ -1167,7 +1271,7 @@ struct LogsView: View {
         let lines = core.logs.filter { filter.isEmpty || $0.message.localizedCaseInsensitiveContains(filter) || $0.level.localizedCaseInsensitiveContains(filter) }
         VStack(spacing: 0) {
             PaneHeader(title: "日志") {
-                TextField("搜索", text: $filter).textFieldStyle(.roundedBorder).frame(width: 200)
+                SearchField(prompt: "搜索", text: $filter)
                 Toggle(isOn: $follow) { Label("跟随", systemImage: "arrow.down.to.line") }.toggleStyle(.button)
                 Button { core.clearLogs() } label: { Label("清除", systemImage: "trash") }
             }
@@ -1184,6 +1288,7 @@ struct LogsView: View {
                 .onChange(of: core.logs.count) {
                     if follow, let last = lines.last { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
+                .glassPanel()
             }
         }
     }
@@ -1216,9 +1321,8 @@ struct ConfigView: View {
             TextEditor(text: $text)
                 .font(.system(.body, design: .monospaced))
                 .autocorrectionDisabled()
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
-                .padding(.horizontal, 20)
+                .padding(8)
+                .glassPanel()
             HStack {
                 if let (msg, ok) = message {
                     Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill").foregroundStyle(ok ? .green : .red)
@@ -1229,7 +1333,7 @@ struct ConfigView: View {
                 Button(busy ? "检查中…" : "检查") { run(save: false) }.disabled(busy)
                 Button("保存并应用") { run(save: true) }.keyboardShortcut("s").disabled(busy || text == saved)
             }
-            .padding(.horizontal, 20).padding(.vertical, 12)
+            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .onAppear(perform: load)
     }
