@@ -7,6 +7,7 @@ mod hysteria2;
 mod inbound;
 mod mitm;
 mod process;
+mod obfs;
 mod reload;
 mod reality;
 mod rewrite;

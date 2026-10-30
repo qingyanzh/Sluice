@@ -37,7 +37,12 @@ fn transport(v: &Value) -> Result<Option<Layer>> {
             let opts = v.get("ws-opts");
             let path = opts.and_then(|o| s(o, "path")).unwrap_or_else(|| "/".into());
             let host = opts.and_then(|o| o.get("headers")).and_then(|h| s(h, "Host").or_else(|| s(h, "host")));
-            Ok(Some(Layer::Ws(WsOpts { path, host, headers: Vec::new() })))
+            let opts_ws = WsOpts { path, host, headers: Vec::new() };
+            // Mihomo marks Xray's httpupgrade as a ws variant.
+            if opts.is_some_and(|o| flag(o, "v2ray-http-upgrade")) {
+                return Ok(Some(Layer::HttpUpgrade(opts_ws)));
+            }
+            Ok(Some(Layer::Ws(opts_ws)))
         }
         Some("grpc") => Ok(Some(Layer::Grpc {
             service: v.get("grpc-opts").and_then(|o| s(o, "grpc-service-name")).unwrap_or_default(),
@@ -56,6 +61,22 @@ fn transport(v: &Value) -> Result<Option<Layer>> {
     }
 }
 
+/// `plugin-opts: {mode: tls, host: x, tls: true}` as SIP003 `mode=tls;host=x;tls`.
+fn plugin_opts(v: &Value) -> String {
+    let Some(map) = v.get("plugin-opts").and_then(Value::as_mapping) else { return String::new() };
+    let opts = map.iter().filter_map(|(k, val)| {
+        let k = k.as_str()?;
+        match val {
+            Value::Bool(true) => Some(k.to_string()),
+            Value::Bool(false) => None,
+            Value::String(x) => Some(format!("{k}={x}")),
+            Value::Number(n) => Some(format!("{k}={n}")),
+            _ => None,
+        }
+    });
+    opts.collect::<Vec<_>>().join(";")
+}
+
 fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
     let name = need(v, "name")?;
     let server = need(v, "server")?;
@@ -64,15 +85,13 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
     let skip = flag(v, "skip-cert-verify");
     let def = match need(v, "type")?.as_str() {
         "ss" => {
-            if v.get("plugin").is_some() {
-                bail!("ss plugins not supported");
-            }
-            ProxyDef::Shadowsocks { server, port, method: need(v, "cipher")?, password: need(v, "password")? }
+            let plugin = match s(v, "plugin") {
+                Some(name) => Some(crate::obfs::SsPlugin::parse(&name, &plugin_opts(v))?),
+                None => None,
+            };
+            ProxyDef::Shadowsocks { server, port, method: need(v, "cipher")?, password: need(v, "password")?, plugin }
         }
         "vmess" => {
-            if s(v, "alterId").is_some_and(|a| a != "0") {
-                bail!("legacy vmess (alterId > 0) not supported");
-            }
             ProxyDef::Vmess {
                 server,
                 port,
@@ -82,6 +101,7 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
                 sni,
                 skip_cert_verify: skip,
                 layer: transport(v)?,
+                alter_id: s(v, "alterId").and_then(|a| a.parse().ok()).unwrap_or(0),
             }
         }
         "vless" => {
@@ -178,7 +198,9 @@ proxies:
   - {name: KR HY2, type: hysteria2, server: kr.example.com, port: 8443, password: pw, ports: "443,20000-20010", hop-interval: 15}
   - {name: Reality, type: vless, server: r.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: www.microsoft.com, flow: xtls-rprx-vision, reality-opts: {public-key: 9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4, short-id: ab}}
   - {name: Splice, type: vless, server: s.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, flow: xtls-rprx-splice}
-  - {name: Plugin SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: obfs}
+  - {name: Plugin SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: obfs, plugin-opts: {mode: tls, host: bing.com}}
+  - {name: V2 SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: v2ray-plugin, plugin-opts: {mode: websocket, tls: true, host: a.com, path: /ws, mux: false}}
+  - {name: KCP SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: kcptun}
 proxy-groups:
   - {name: Proxy, type: select, proxies: [HK 01]}
 "#;
@@ -188,8 +210,11 @@ proxy-groups:
         assert!(looks_like(SAMPLE));
         let (nodes, skipped) = parse(SAMPLE).unwrap();
         let names: Vec<&str> = nodes.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["HK 01", "JP WS", "US VLESS", "SG Trojan", "KR HY2", "Reality"]);
-        assert_eq!(skipped, ["VLESS flow \"xtls-rprx-splice\" not supported", "ss plugins not supported"]);
+        assert_eq!(names, ["HK 01", "JP WS", "US VLESS", "SG Trojan", "KR HY2", "Reality", "Plugin SS", "V2 SS"]);
+        assert_eq!(skipped, ["VLESS flow \"xtls-rprx-splice\" not supported", "ss plugin \"kcptun\" not supported"]);
+        use crate::obfs::SsPlugin;
+        assert!(matches!(&nodes[6].1, ProxyDef::Shadowsocks { plugin: Some(SsPlugin::Obfs { tls: true, host, .. }), .. } if host == "bing.com"));
+        assert!(matches!(&nodes[7].1, ProxyDef::Shadowsocks { plugin: Some(SsPlugin::V2ray { tls: true, path, .. }), .. } if path == "/ws"));
         assert!(matches!(&nodes[5].1, ProxyDef::Vless { flow: Some(f), reality: Some(_), .. } if f == "xtls-rprx-vision"));
         assert!(matches!(&nodes[0].1, ProxyDef::Shadowsocks { password, .. } if password == "p@ss"));
         match &nodes[1].1 {

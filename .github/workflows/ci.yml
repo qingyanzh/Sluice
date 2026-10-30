@@ -31,7 +31,13 @@ jobs:
           name: sluice
           path: target/release
       - run: chmod +x target/release/sluice
-      - run: brew install shadowsocks-rust xray hysteria
+      - run: brew install shadowsocks-rust xray hysteria simple-obfs v2ray
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      # v2ray-plugin is not in Homebrew; build the upstream server from source.
+      - run: go install github.com/shadowsocks/v2ray-plugin@latest && echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: bash scripts/ci/interop.sh
       - if: always()
         uses: actions/upload-artifact@v4

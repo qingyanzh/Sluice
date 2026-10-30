@@ -1,4 +1,5 @@
-//! VMess client with AEAD headers (alterId 0), chunk stream + length masking,
+//! VMess client with AEAD headers (alterId 0) or legacy MD5/AES-CFB headers (alterId > 0),
+//! chunk stream + length masking,
 //! body security aes-128-gcm or chacha20-poly1305, over any stream transport (TCP, TLS, WebSocket).
 
 use std::sync::Arc;
@@ -126,6 +127,50 @@ fn seal_header(cmd_key: &[u8; 16], header: &[u8]) -> Vec<u8> {
     out
 }
 
+/// AES-128-CFB (full-block feedback), used by the legacy header.
+struct Cfb {
+    cipher: Aes128,
+    reg: [u8; 16],
+    ks: [u8; 16],
+    pos: usize,
+}
+
+impl Cfb {
+    fn new(key: &[u8; 16], iv: &[u8; 16]) -> Self {
+        Cfb { cipher: Aes128::new(key.into()), reg: *iv, ks: [0; 16], pos: 0 }
+    }
+
+    fn apply(&mut self, data: &mut [u8], decrypt: bool) {
+        use aes::cipher::BlockEncrypt;
+        for b in data {
+            if self.pos == 0 {
+                let mut block = GenericArray::clone_from_slice(&self.reg);
+                self.cipher.encrypt_block(&mut block);
+                self.ks.copy_from_slice(&block);
+            }
+            let c = if decrypt { *b } else { *b ^ self.ks[self.pos] };
+            *b ^= self.ks[self.pos];
+            self.reg[self.pos] = c;
+            self.pos = (self.pos + 1) % 16;
+        }
+    }
+}
+
+/// Legacy (alterId > 0): `HMAC-MD5(uuid, t) | AES-CFB(cmd_key, MD5(t x4), header)`.
+fn seal_header_legacy(uuid: &[u8; 16], cmd_key: &[u8; 16], header: &[u8]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let t = (now + (rand::thread_rng().next_u32() % 61) as u64).saturating_sub(30).to_be_bytes();
+    let mut mac = <Hmac<Md5> as Mac>::new_from_slice(uuid).expect("any key length");
+    Mac::update(&mut mac, &t);
+    let mut out = mac.finalize().into_bytes().to_vec();
+    let iv: [u8; 16] = Md5::digest([t, t, t, t].concat()).into();
+    let mut enc = header.to_vec();
+    Cfb::new(cmd_key, &iv).apply(&mut enc, false);
+    out.extend(enc);
+    out
+}
+
 fn fnv1a32(data: &[u8]) -> u32 {
     data.iter().fold(0x811c9dc5u32, |h, b| (h ^ *b as u32).wrapping_mul(0x01000193))
 }
@@ -230,22 +275,18 @@ struct Session {
     resp_key: [u8; 16],
     resp_iv: [u8; 16],
     resp_v: u8,
+    legacy: bool,
 }
 
 impl Session {
-    fn new(sec: Security) -> Self {
+    fn new(sec: Security, legacy: bool) -> Self {
         let mut rng = rand::thread_rng();
         let (mut key, mut iv) = ([0u8; 16], [0u8; 16]);
         rng.fill_bytes(&mut key);
         rng.fill_bytes(&mut iv);
-        Session {
-            sec,
-            key,
-            iv,
-            resp_key: sha256(&[&key])[..16].try_into().unwrap(),
-            resp_iv: sha256(&[&iv])[..16].try_into().unwrap(),
-            resp_v: (rng.next_u32() & 0xff) as u8,
-        }
+        // Legacy derives the response key/IV with MD5, AEAD with SHA-256.
+        let derive = |x: &[u8; 16]| -> [u8; 16] { if legacy { Md5::digest(x).into() } else { sha256(&[x])[..16].try_into().unwrap() } };
+        Session { sec, key, iv, resp_key: derive(&key), resp_iv: derive(&iv), resp_v: (rng.next_u32() & 0xff) as u8, legacy }
     }
 }
 
@@ -272,6 +313,19 @@ where
 }
 
 async fn read_response_header<R: AsyncRead + Unpin>(sess: &Session, src: &mut R) -> Result<()> {
+    if sess.legacy {
+        // `resp_v | opt | cmd | cmd_len | cmd...` under AES-CFB.
+        let mut cfb = Cfb::new(&sess.resp_key, &sess.resp_iv);
+        let mut head = [0u8; 4];
+        src.read_exact(&mut head).await?;
+        cfb.apply(&mut head, true);
+        if head[0] != sess.resp_v {
+            bail!("vmess: response auth mismatch (wrong uuid or alterId?)");
+        }
+        let mut cmd = vec![0u8; head[3] as usize];
+        src.read_exact(&mut cmd).await?;
+        return Ok(());
+    }
     let len_key = kdf16(&sess.resp_key, &[b"AEAD Resp Header Len Key"]);
     let len_iv = kdf(&sess.resp_iv, &[b"AEAD Resp Header Len IV"]);
     let mut enc_len = [0u8; 2 + TAG];
@@ -322,38 +376,59 @@ where
 }
 
 pub struct VmessServer {
+    /// Set for legacy (alterId > 0) servers.
+    legacy_uuid: Option<[u8; 16]>,
     cmd_key: [u8; 16],
     sec: Security,
     transport: Arc<Transport>,
 }
 
 impl VmessServer {
-    pub fn new(transport: Transport, uuid: &str, method: &str) -> Result<Self> {
+    /// With `alter_id > 0` the legacy header is used, authenticated with the primary id (which
+    /// servers accept alongside the derived alter ids).
+    pub fn new(transport: Transport, uuid: &str, method: &str, alter_id: u16) -> Result<Self> {
+        let id = parse_uuid(uuid)?;
         let mut h = Md5::new();
-        Digest::update(&mut h, parse_uuid(uuid)?);
+        Digest::update(&mut h, id);
         Digest::update(&mut h, b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
-        Ok(VmessServer { cmd_key: h.finalize().into(), sec: Security::parse(method)?, transport: Arc::new(transport) })
+        Ok(VmessServer {
+            legacy_uuid: (alter_id > 0).then_some(id),
+            cmd_key: h.finalize().into(),
+            sec: Security::parse(method)?,
+            transport: Arc::new(transport),
+        })
     }
 
     /// UDP is XUDP over a Mux (cmd 3) request, so one connection reaches any number of remotes.
     pub fn open_udp(&self, target: &Target) -> UdpPipe {
-        let (cmd_key, sec, transport) = (self.cmd_key, self.sec, self.transport.clone());
+        let (legacy, cmd_key, sec, transport) = (self.legacy_uuid, self.cmd_key, self.sec, self.transport.clone());
         crate::udp::xudp(target, move |first| async move {
-            let mut s = connect_cmd(&cmd_key, sec, &transport, 3, None).await?;
+            let mut s = connect_cmd(legacy, &cmd_key, sec, &transport, 3, None).await?;
             s.write_all(&first).await?;
             Ok(s)
         })
     }
 
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
-        connect_cmd(&self.cmd_key, self.sec, &self.transport, 1, Some(target)).await
+        connect_cmd(self.legacy_uuid, &self.cmd_key, self.sec, &self.transport, 1, Some(target)).await
     }
 }
 
-async fn connect_cmd(cmd_key: &[u8; 16], sec: Security, transport: &Transport, cmd: u8, target: Option<&Target>) -> Result<BoxStream> {
+async fn connect_cmd(
+    legacy: Option<[u8; 16]>,
+    cmd_key: &[u8; 16],
+    sec: Security,
+    transport: &Transport,
+    cmd: u8,
+    target: Option<&Target>,
+) -> Result<BoxStream> {
     let stream = transport.connect().await?;
-    let sess = Session::new(sec);
-    let head = seal_header(cmd_key, &request_header(sess.sec, &sess.key, &sess.iv, sess.resp_v, cmd, target)?);
+    let sess = Session::new(sec, legacy.is_some());
+    let header = request_header(sess.sec, &sess.key, &sess.iv, sess.resp_v, cmd, target)?;
+    let head = match &legacy {
+        Some(uuid) => seal_header_legacy(uuid, cmd_key, &header),
+        None => seal_header(cmd_key, &header),
+    };
     let (rd, wr) = tokio::io::split(stream);
     let (app, inner) = tokio::io::duplex(64 * 1024);
     let (ird, iwr) = tokio::io::split(inner);
@@ -380,6 +455,21 @@ mod tests {
         // One layer over SHA-256 is plain HMAC-SHA256 (RFC 4231 test case 2).
         let mac = nested_hmac(&[b"Jefe"], &[b"what do ya want ", b"for nothing?"]);
         assert_eq!(hex::encode(mac), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    }
+
+    #[test]
+    fn cfb_matches_nist() {
+        // NIST SP 800-38A F.3.13, CFB128-AES128.Encrypt, first two blocks.
+        let key: [u8; 16] = hex::decode("2b7e151628aed2a6abf7158809cf4f3c").unwrap().try_into().unwrap();
+        let iv: [u8; 16] = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap().try_into().unwrap();
+        let plain = hex::decode("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51").unwrap();
+        let mut data = plain.clone();
+        let mut enc = Cfb::new(&key, &iv);
+        enc.apply(&mut data[..5], false);
+        enc.apply(&mut data[5..], false);
+        assert_eq!(hex::encode(&data), "3b3fd92eb72dad20333449f8e83cfb4ac8a64537a0b3a93fcde3cdad9f1ce58b");
+        Cfb::new(&key, &iv).apply(&mut data, true);
+        assert_eq!(data, plain);
     }
 
     #[test]

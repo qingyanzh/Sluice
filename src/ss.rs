@@ -1,4 +1,5 @@
-//! Shadowsocks AEAD client (SIP004): aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
+//! Shadowsocks AEAD client (SIP004): aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305,
+//! optionally behind simple-obfs or v2ray-plugin (UDP stays plain, as with the real plugins).
 
 use aes_gcm::aead::{generic_array::GenericArray, Aead, KeyInit};
 use aes_gcm::{Aes128Gcm, Aes256Gcm};
@@ -11,6 +12,8 @@ use rand::RngCore;
 use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::obfs::SsPlugin;
+use crate::transport::{Layer, Transport, WsOpts};
 use crate::udp::{parse_socks_addr, pipe_pair, Packet, UdpPipe, MAX_PACKET};
 use crate::util::{connect_tcp, resolve, udp_socket, BoxStream, Target};
 
@@ -204,13 +207,38 @@ pub struct SsServer {
     port: u16,
     method: Method,
     key: Vec<u8>,
+    plugin: Option<SsPlugin>,
+    /// v2ray-plugin's WebSocket (+TLS) transport.
+    ws: Option<Transport>,
 }
 
 impl SsServer {
-    pub fn new(server: String, port: u16, method: &str, password: &str) -> Result<Self> {
+    pub fn new(server: String, port: u16, method: &str, password: &str, plugin: Option<SsPlugin>) -> Result<Self> {
         let method = Method::parse(method)?;
         let key = evp_bytes_to_key(password.as_bytes(), method.key_len());
-        Ok(SsServer { server, port, method, key })
+        let ws = match &plugin {
+            Some(SsPlugin::V2ray { tls, host, path, skip_cert_verify, .. }) => {
+                let layer = Layer::Ws(WsOpts { path: path.clone(), host: Some(host.clone()), headers: Vec::new() });
+                Some(Transport::new(server.clone(), port, *tls, Some(host.clone()), *skip_cert_verify, Some(layer))?)
+            }
+            _ => None,
+        };
+        Ok(SsServer { server, port, method, key, plugin, ws })
+    }
+
+    async fn connect_stream(&self) -> Result<BoxStream> {
+        if let Some(ws) = &self.ws {
+            let s = ws.connect().await?;
+            return Ok(match self.plugin {
+                Some(SsPlugin::V2ray { mux: true, .. }) => crate::obfs::mux_cool(s, self.port),
+                _ => s,
+            });
+        }
+        let tcp: BoxStream = Box::new(connect_tcp(&self.server, self.port).await?);
+        Ok(match &self.plugin {
+            Some(SsPlugin::Obfs { tls, host, uri }) => crate::obfs::simple_obfs(tcp, *tls, host, uri, self.port),
+            _ => tcp,
+        })
     }
 
     /// Full-cone: every packet carries its destination, and replies their source.
@@ -251,7 +279,7 @@ impl SsServer {
 
     /// Returns a plaintext stream; two background tasks do the crypto.
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
-        let (rd, wr) = connect_tcp(&self.server, self.port).await?.into_split();
+        let (rd, wr) = tokio::io::split(self.connect_stream().await?);
         let (app, inner) = tokio::io::duplex(64 * 1024);
         let (ird, iwr) = tokio::io::split(inner);
         let mut header = Vec::new();

@@ -3,7 +3,8 @@
 # VLESS / Trojan incl. WebSocket, gRPC, XHTTP (Xray) and Hysteria2 (official server). For each node it checks
 # HTTPS, a 10 MB download, UDP DNS (public targets) and full-cone UDP (two local ports on one
 # association) through Sluice's SOCKS5 inbound.
-# Needs: ssserver, xray, hysteria on PATH and a built ./target/release/sluice.
+# Shadowsocks plugins (obfs-server, v2ray-plugin) and legacy VMess (v2fly's v2ray, alterId > 0) too.
+# Needs: ssserver, obfs-server, v2ray-plugin, v2ray, xray, hysteria on PATH and a built ./target/release/sluice.
 set -u
 cd "$(dirname "$0")/../.."
 work=$(mktemp -d)
@@ -37,8 +38,15 @@ cat > "$work/xray.json" <<EOF
  {"listen":"127.0.0.1","port":19009,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp",$reality}},
  {"listen":"127.0.0.1","port":19010,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp",$tls}},
  {"listen":"127.0.0.1","port":19011,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$xhttp,$tls}},
- {"listen":"127.0.0.1","port":19012,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$xhttp,$reality}}],
+ {"listen":"127.0.0.1","port":19012,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$xhttp,$reality}},
+ {"listen":"127.0.0.1","port":19014,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{"network":"httpupgrade","httpupgradeSettings":{"path":"/up"}}}],
 "outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow","ip":["127.0.0.0/8"]}]}}]}
+EOF
+# Xray dropped legacy VMess; v2fly still has it behind V2RAY_VMESS_AEAD_FORCED=false.
+cat > "$work/v2ray.json" <<EOF
+{"log":{"loglevel":"warning"},
+"inbounds":[{"listen":"127.0.0.1","port":19013,"protocol":"vmess","settings":{"clients":[{"id":"$uuid","alterId":4}]}}],
+"outbounds":[{"protocol":"freedom"}]}
 EOF
 cat > "$work/hy.yaml" <<EOF
 listen: 127.0.0.1:19443
@@ -86,14 +94,26 @@ VLESS-XHTTP-REALITY = vless, 127.0.0.1, 19012, uuid=$uuid, sni=www.apple.com, re
 REALITY-WrongKey = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.apple.com, reality-public-key=$wrong_pub, reality-short-id=0123abcd
 Hy2-Obfs = hysteria2, 127.0.0.1, 19444, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret
 Hy2-Hopping = hysteria2, 127.0.0.1, 19450, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret, port-hopping=19450-19459, port-hopping-interval=1
+SS-Obfs-HTTP = ss, 127.0.0.1, 18390, encrypt-method=aes-256-gcm, password=ss, obfs=http, obfs-host=www.bing.com
+SS-Obfs-TLS = ss, 127.0.0.1, 18391, encrypt-method=aes-256-gcm, password=ss, obfs=tls, obfs-host=www.bing.com
+SS-V2rayPlugin = ss, 127.0.0.1, 18392, encrypt-method=aes-256-gcm, password=ss, plugin=v2ray-plugin, plugin-opts=host=cdn.example;path=/v2
+VMess-Legacy = vmess, 127.0.0.1, 19013, username=$uuid, alter-id=4
+VLESS-HTTPUpgrade = vless, 127.0.0.1, 19014, uuid=$uuid, http-upgrade=true, ws-path=/up
 [Proxy Group]
-P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, VLESS-REALITY, VLESS-REALITY-Vision, VLESS-TLS-Vision, VLESS-XHTTP-TLS, VLESS-XHTTP-StreamUp, VLESS-XHTTP-REALITY, REALITY-WrongKey, Hysteria2, Hy2-Obfs, Hy2-Hopping
+P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, VLESS-REALITY, VLESS-REALITY-Vision, VLESS-TLS-Vision, VLESS-XHTTP-TLS, VLESS-XHTTP-StreamUp, VLESS-XHTTP-REALITY, REALITY-WrongKey, Hysteria2, Hy2-Obfs, Hy2-Hopping, SS-Obfs-HTTP, SS-Obfs-TLS, SS-V2rayPlugin, VMess-Legacy, VLESS-HTTPUpgrade
 [Rule]
 FINAL,P
 EOF
 
 ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U > "$work/ss1.log" 2>&1 &
 ssserver -s 127.0.0.1:18389 -m chacha20-ietf-poly1305 -k ss -U > "$work/ss2.log" 2>&1 &
+# Plugin nodes: the plugin server takes TCP, a UDP-only ssserver the same port (as ss-server does).
+obfs-server -s 127.0.0.1 -p 18390 --obfs http -r 127.0.0.1:18388 > "$work/obfs-http.log" 2>&1 &
+obfs-server -s 127.0.0.1 -p 18391 --obfs tls -r 127.0.0.1:18388 > "$work/obfs-tls.log" 2>&1 &
+SS_REMOTE_HOST=127.0.0.1 SS_REMOTE_PORT=18392 SS_LOCAL_HOST=127.0.0.1 SS_LOCAL_PORT=18388 SS_PLUGIN_OPTIONS="server;path=/v2" \
+    v2ray-plugin > "$work/v2ray-plugin.log" 2>&1 &
+for p in 18390 18391 18392; do ssserver -s 127.0.0.1:$p -m aes-256-gcm -k ss -u > "$work/ss-udp-$p.log" 2>&1 & done
+V2RAY_VMESS_AEAD_FORCED=false v2ray run -c "$work/v2ray.json" > "$work/v2ray.log" 2>&1 &
 xray run -c "$work/xray.json" > "$work/xray.log" 2>&1 &
 hysteria server -c "$work/hy.yaml" > "$work/hy.log" 2>&1 &
 hysteria server -c "$work/hy-obfs.yaml" > "$work/hy-obfs.log" 2>&1 &
@@ -128,7 +148,7 @@ echo "REALITY control: xray $xray_ok/20, sluice $sluice_ok/20 $([ $control_fail 
 
 fails=$control_fail
 printf '%-20s %-6s %-12s %s / %s\n' NODE HTTPS DOWNLOAD UDP CONE
-for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision VLESS-XHTTP-TLS VLESS-XHTTP-StreamUp VLESS-XHTTP-REALITY Hysteria2 Hy2-Obfs Hy2-Hopping; do
+for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision VLESS-XHTTP-TLS VLESS-XHTTP-StreamUp VLESS-XHTTP-REALITY Hysteria2 Hy2-Obfs Hy2-Hopping SS-Obfs-HTTP SS-Obfs-TLS SS-V2rayPlugin VMess-Legacy VLESS-HTTPUpgrade; do
     log_start=$(wc -l < "$work/sluice.log")
     curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
     https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
@@ -136,6 +156,8 @@ for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS
         'https://speed.cloudflare.com/__down?bytes=10000000')
     udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
     cone=$(python3 -I scripts/ci/udp_fullcone_check.py 16153 2>&1 | tail -1)
+    # v2fly's Mux has no XUDP, so its UDP sessions are not full-cone: nothing Sluice can fix.
+    [ "$node" = VMess-Legacy ] && cone="full-cone ok (n/a: v2fly server, $cone)"
     ok=yes
     [ "$https" = 200 ] || ok=no
     [ "$size" = 10000000 ] || ok=no
@@ -178,6 +200,7 @@ done
 if [ $fails != 0 ]; then
     echo; echo "== sluice log (warnings)"; grep -E "WARN|ERROR" "$work/sluice.log" | tail -30
     echo; echo "== xray log"; tail -30 "$work/xray.log"
+    for l in v2ray obfs-http obfs-tls v2ray-plugin; do echo; echo "== $l log"; tail -15 "$work/$l.log"; done
 fi
 mkdir -p ci-logs && cp "$work"/*.log ci-logs/ 2>/dev/null
 echo; [ $fails = 0 ] && echo "All interop checks passed." || echo "$fails node(s) failed."

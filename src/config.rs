@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::obfs::SsPlugin;
 use crate::rule::Rule;
 use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
@@ -29,7 +30,7 @@ pub struct General {
 
 #[derive(Debug, Clone)]
 pub enum ProxyDef {
-    Shadowsocks { server: String, port: u16, method: String, password: String },
+    Shadowsocks { server: String, port: u16, method: String, password: String, plugin: Option<SsPlugin> },
     Trojan { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, layer: Option<Layer> },
     Vless {
         server: String,
@@ -65,6 +66,8 @@ pub enum ProxyDef {
         sni: Option<String>,
         skip_cert_verify: bool,
         layer: Option<Layer>,
+        /// Above 0: legacy (non-AEAD) header.
+        alter_id: u16,
     },
 }
 
@@ -96,8 +99,8 @@ impl ProxyDef {
                     parts.push(format!("xhttp-padding-bytes={}-{}", x.padding.0, x.padding.1));
                 }
             }
-            if let Some(Layer::Ws(w)) = layer {
-                parts.push("ws=true".into());
+            if let Some(Layer::Ws(w) | Layer::HttpUpgrade(w)) = layer {
+                parts.push(if matches!(layer, Some(Layer::Ws(_))) { "ws=true" } else { "http-upgrade=true" }.into());
                 parts.push(format!("ws-path={}", w.path));
                 let mut headers: Vec<String> = w.host.iter().map(|h| format!("Host:{h}")).collect();
                 headers.extend(w.headers.iter().map(|(k, v)| format!("{k}:{v}")));
@@ -107,10 +110,23 @@ impl ProxyDef {
             }
         };
         match self {
-            ProxyDef::Shadowsocks { server, port, method, password } => {
+            ProxyDef::Shadowsocks { server, port, method, password, plugin } => {
                 parts.extend(["ss".into(), server.clone(), port.to_string()]);
                 parts.push(format!("encrypt-method={method}"));
                 parts.push(format!("password={password}"));
+                match plugin {
+                    Some(SsPlugin::Obfs { tls, host, uri }) => {
+                        parts.push(format!("obfs={}", if *tls { "tls" } else { "http" }));
+                        parts.push(format!("obfs-host={host}"));
+                        parts.push(format!("obfs-uri={uri}"));
+                    }
+                    Some(p) => {
+                        let (name, opts) = p.to_sip003();
+                        parts.push(format!("plugin={name}"));
+                        parts.push(format!("plugin-opts={opts}"));
+                    }
+                    None => {}
+                }
             }
             ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, layer } => {
                 parts.extend(["trojan".into(), server.clone(), port.to_string(), format!("password={password}")]);
@@ -148,9 +164,12 @@ impl ProxyDef {
                     parts.push(format!("port-hopping-interval={i}"));
                 }
             }
-            ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
+            ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer, alter_id } => {
                 parts.extend(["vmess".into(), server.clone(), port.to_string(), format!("username={uuid}")]);
                 parts.push(format!("encrypt-method={method}"));
+                if *alter_id > 0 {
+                    parts.push(format!("alter-id={alter_id}"));
+                }
                 if *tls {
                     parts.push("tls=true".into());
                 }
@@ -253,6 +272,8 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             x.padding = XhttpOpts::parse_padding(&p)?;
         }
         Some(Layer::Xhttp(x))
+    } else if matches!(take("http-upgrade").as_deref(), Some("true" | "1")) {
+        Some(Layer::HttpUpgrade(WsOpts::from_params(take("ws-path"), take("ws-headers"))))
     } else {
         matches!(take("ws").as_deref(), Some("true" | "1"))
             .then(|| Layer::Ws(WsOpts::from_params(take("ws-path"), take("ws-headers"))))
@@ -263,6 +284,16 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             port,
             method: take("encrypt-method").ok_or_else(|| anyhow!("ss needs encrypt-method"))?,
             password: take("password").ok_or_else(|| anyhow!("ss needs password"))?,
+            // Surge's `obfs=http|tls, obfs-host, obfs-uri`, or SIP003 `plugin` + `plugin-opts`.
+            plugin: match (take("obfs"), take("plugin")) {
+                (Some(mode), _) => {
+                    let opts = [("obfs", Some(mode)), ("obfs-host", take("obfs-host")), ("obfs-uri", take("obfs-uri"))];
+                    let opts: Vec<String> = opts.iter().filter_map(|(k, v)| Some(format!("{k}={}", v.as_ref()?))).collect();
+                    Some(SsPlugin::parse("obfs-local", &opts.join(";"))?)
+                }
+                (None, Some(name)) => Some(SsPlugin::parse(&name, &take("plugin-opts").unwrap_or_default())?),
+                (None, None) => None,
+            },
         },
         "trojan" => ProxyDef::Trojan {
             server,
@@ -289,6 +320,7 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             port,
             uuid: take("username").or_else(|| take("uuid")).ok_or_else(|| anyhow!("vmess needs username (the uuid)"))?,
             method: take("encrypt-method").unwrap_or_else(|| "auto".to_string()),
+            alter_id: take("alter-id").map_or(Ok(0), |a| a.parse().map_err(|_| anyhow!("bad alter-id {a:?}")))?,
             tls: matches!(take("tls").as_deref(), Some("true" | "1")),
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
