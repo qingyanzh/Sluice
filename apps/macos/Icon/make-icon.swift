@@ -1,4 +1,4 @@
-// Draws the Sluice app icon (a glass orb holding water at a calm, held level) and writes an .iconset.
+// Draws the Sluice app icon (three staggered streams on an off-white tile) and writes an .iconset.
 // Usage: swift make-icon.swift <out.iconset>
 import AppKit
 
@@ -26,61 +26,30 @@ func draw(_ s: CGFloat) -> NSImage {
                                start: CGPoint(x: 0, y: tile.minY), end: CGPoint(x: 0, y: tile.maxY), options: [])
         ctx.restoreGState()
 
-        // The mark: a glass orb holding water, its surface one calm wave — a level, held.
-        let c = CGPoint(x: 512 * u, y: 512 * u), radius = 300 * u
-        let orb = CGPath(ellipseIn: CGRect(x: c.x - radius, y: c.y - radius, width: 2 * radius, height: 2 * radius), transform: nil)
-
-        // Orb shadow on the tile.
-        ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: -22 * u), blur: 48 * u, color: rgb(0.05, 0.25, 0.65, 0.30).cgColor)
-        ctx.addPath(orb); ctx.setFillColor(NSColor.white.cgColor); ctx.fillPath()
-        ctx.restoreGState()
-
-        ctx.saveGState()
-        ctx.addPath(orb); ctx.clip()
-        // Empty glass: very pale, cool.
-        ctx.drawLinearGradient(gradient([rgb(0.86, 0.91, 0.98), rgb(0.97, 0.985, 1)], [0, 1]),
-                               start: CGPoint(x: 0, y: c.y - radius), end: CGPoint(x: 0, y: c.y + radius), options: [])
-        // Water: below a single wave slightly under the centre.
-        let level = c.y - 30 * u
-        let water = CGMutablePath()
-        water.move(to: CGPoint(x: c.x - radius - 10 * u, y: level))
-        water.addCurve(to: CGPoint(x: c.x, y: level),
-                       control1: CGPoint(x: c.x - radius * 0.62, y: level + 78 * u),
-                       control2: CGPoint(x: c.x - radius * 0.32, y: level + 78 * u))
-        water.addCurve(to: CGPoint(x: c.x + radius + 10 * u, y: level),
-                       control1: CGPoint(x: c.x + radius * 0.32, y: level - 78 * u),
-                       control2: CGPoint(x: c.x + radius * 0.62, y: level - 78 * u))
-        water.addLine(to: CGPoint(x: c.x + radius + 10 * u, y: c.y - radius - 10 * u))
-        water.addLine(to: CGPoint(x: c.x - radius - 10 * u, y: c.y - radius - 10 * u))
-        water.closeSubpath()
-        ctx.saveGState()
-        ctx.addPath(water); ctx.clip()
-        ctx.drawLinearGradient(gradient([rgb(0.04, 0.28, 0.86), rgb(0.16, 0.50, 1.0), rgb(0.42, 0.74, 1.0)], [0, 0.6, 1]),
-                               start: CGPoint(x: 0, y: c.y - radius), end: CGPoint(x: 0, y: level + 80 * u), options: [])
-        ctx.restoreGState()
-        // Crest highlight: a thin bright line along the wave.
-        let crest = CGMutablePath()
-        crest.move(to: CGPoint(x: c.x - radius, y: level))
-        crest.addCurve(to: CGPoint(x: c.x, y: level),
-                       control1: CGPoint(x: c.x - radius * 0.62, y: level + 78 * u),
-                       control2: CGPoint(x: c.x - radius * 0.32, y: level + 78 * u))
-        crest.addCurve(to: CGPoint(x: c.x + radius, y: level),
-                       control1: CGPoint(x: c.x + radius * 0.32, y: level - 78 * u),
-                       control2: CGPoint(x: c.x + radius * 0.62, y: level - 78 * u))
-        ctx.addPath(crest); ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.85).cgColor)
-        ctx.setLineWidth(10 * u); ctx.setLineCap(.round); ctx.strokePath()
-        // Glass sheen: a soft highlight at the top-left of the orb.
-        ctx.drawRadialGradient(gradient([NSColor.white.withAlphaComponent(0.75), NSColor.white.withAlphaComponent(0)], [0, 1]),
-                               startCenter: CGPoint(x: c.x - 110 * u, y: c.y + 170 * u), startRadius: 0,
-                               endCenter: CGPoint(x: c.x - 110 * u, y: c.y + 170 * u), endRadius: 170 * u, options: [])
-        ctx.restoreGState()
-        // Rim: a hairline that catches light at the top.
-        ctx.saveGState()
-        ctx.addPath(orb); ctx.setLineWidth(6 * u); ctx.replacePathWithStrokedPath(); ctx.clip()
-        ctx.drawLinearGradient(gradient([rgb(0.10, 0.35, 0.85, 0.6), NSColor.white.withAlphaComponent(0.95)], [0, 1]),
-                               start: CGPoint(x: 0, y: c.y - radius), end: CGPoint(x: 0, y: c.y + radius), options: [])
-        ctx.restoreGState()
+        // The mark: three staggered streams, flowing left to right. Two are graphite;
+        // the lowest, the one in motion, is the accent.
+        func capsule(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat) -> CGPath {
+            CGPath(roundedRect: CGRect(x: x * u, y: y * u, width: w * u, height: 104 * u),
+                   cornerWidth: 52 * u, cornerHeight: 52 * u, transform: nil)
+        }
+        let streams = [(capsule(240, 600, 430), false), (capsule(290, 460, 494), false), (capsule(354, 320, 430), true)]
+        for (path, accent) in streams {
+            ctx.saveGState()
+            ctx.setShadow(offset: CGSize(width: 0, height: -8 * u), blur: 20 * u,
+                          color: accent ? rgb(0.10, 0.40, 1, 0.35).cgColor : NSColor.black.withAlphaComponent(0.14).cgColor)
+            ctx.addPath(path); ctx.setFillColor(NSColor.white.cgColor); ctx.fillPath()
+            ctx.restoreGState()
+            ctx.saveGState()
+            ctx.addPath(path); ctx.clip()
+            let colors = accent ? [rgb(0.10, 0.40, 1.0), rgb(0.33, 0.68, 1.0)] : [rgb(0.11, 0.12, 0.14), rgb(0.26, 0.27, 0.30)]
+            let box = path.boundingBox
+            ctx.drawLinearGradient(gradient(colors, [0, 1]), start: CGPoint(x: box.minX, y: box.minY),
+                                   end: CGPoint(x: box.maxX, y: box.maxY), options: [])
+            // Soft top highlight on each stream.
+            ctx.drawLinearGradient(gradient([NSColor.white.withAlphaComponent(0), NSColor.white.withAlphaComponent(0.18)], [0, 1]),
+                                   start: CGPoint(x: 0, y: box.midY), end: CGPoint(x: 0, y: box.maxY), options: [])
+            ctx.restoreGState()
+        }
         return true
     }
 }
