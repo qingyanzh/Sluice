@@ -213,10 +213,14 @@ impl Hy2Server {
         } else {
             use quinn::Runtime;
             // Salamander sits above the hop socket, so obfuscation is independent of the port.
-            let mut sock: Arc<dyn quinn::AsyncUdpSocket> = quinn::TokioRuntime.wrap_udp_socket(socket)?;
-            if let Some((ports, interval)) = &self.hop {
-                sock = Arc::new(crate::udphop::UdpHop::new(sock, addr, ports.clone(), *interval));
-            }
+            let mut sock: Arc<dyn quinn::AsyncUdpSocket> = match &self.hop {
+                None => quinn::TokioRuntime.wrap_udp_socket(socket)?,
+                Some((ports, interval)) => {
+                    drop(socket);
+                    let make = Box::new(move || quinn::TokioRuntime.wrap_udp_socket(udp_socket_std(&addr)?));
+                    Arc::new(crate::udphop::UdpHop::new(make, addr, ports.clone(), *interval)?)
+                }
+            };
             if let Some(pw) = &self.obfs {
                 sock = Arc::new(crate::salamander::Salamander::new(sock, pw));
             }

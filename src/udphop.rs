@@ -16,7 +16,7 @@ use anyhow::{anyhow, bail, Result};
 use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use rand::Rng;
-use log::debug;
+use log::{debug, warn};
 
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
 const MIN_INTERVAL: Duration = Duration::from_secs(1);
@@ -46,38 +46,71 @@ pub fn parse_ports(spec: &str) -> Result<Vec<u16>> {
     Ok(ports)
 }
 
+pub type MakeSocket = Box<dyn Fn() -> io::Result<Arc<dyn AsyncUdpSocket>> + Send + Sync>;
+
 struct State {
-    current: SocketAddr,
+    /// Bumped on every hop, so pollers know to follow the new socket.
+    generation: u64,
+    current: Arc<dyn AsyncUdpSocket>,
+    /// The socket before the last hop, still read until the next one for in-flight replies.
+    prev: Option<Arc<dyn AsyncUdpSocket>>,
+    port: u16,
     next_hop: Instant,
+    /// The last receiver, woken on a hop so it starts polling the new socket.
+    recv_waker: Option<std::task::Waker>,
 }
 
+/// Each hop also moves to a fresh local socket, like upstream: a new 5-tuple both ways, so
+/// NATs and the server-side redirect (iptables/pf) see a new flow instead of a clashing one.
 pub struct UdpHop {
-    inner: Arc<dyn AsyncUdpSocket>,
+    make: MakeSocket,
     /// The address quinn connects to; every server reply is rewritten to come from it.
     virtual_addr: SocketAddr,
     ports: Vec<u16>,
     interval: Duration,
+    segments: (usize, usize),
     state: Mutex<State>,
 }
 
 impl UdpHop {
     /// `virtual_addr` carries the server IP; its port is irrelevant on the wire.
-    pub fn new(inner: Arc<dyn AsyncUdpSocket>, virtual_addr: SocketAddr, ports: Vec<u16>, interval: Duration) -> Self {
+    pub fn new(make: MakeSocket, virtual_addr: SocketAddr, ports: Vec<u16>, interval: Duration) -> io::Result<Self> {
+        let current = make()?;
+        let segments = (current.max_transmit_segments(), current.max_receive_segments());
         let interval = interval.max(MIN_INTERVAL);
-        let current = SocketAddr::new(virtual_addr.ip(), pick(&ports, None));
-        UdpHop { inner, virtual_addr, ports, interval, state: Mutex::new(State { current, next_hop: Instant::now() + interval }) }
+        let state = State { generation: 0, current, prev: None, port: pick(&ports, None), next_hop: Instant::now() + interval, recv_waker: None };
+        Ok(UdpHop { make, virtual_addr, ports, interval, segments, state: Mutex::new(state) })
     }
 
-    fn destination(&self) -> SocketAddr {
+    /// The socket and server address to send to now, hopping first if it is time.
+    fn sender(&self) -> (Arc<dyn AsyncUdpSocket>, SocketAddr) {
         let mut st = self.state.lock().unwrap();
         let now = Instant::now();
         if now >= st.next_hop {
-            let port = pick(&self.ports, Some(st.current.port()));
-            debug!("hysteria2 port hop {} -> {}", st.current.port(), port);
-            st.current.set_port(port);
             st.next_hop = now + self.interval;
+            match (self.make)() {
+                Ok(sock) => {
+                    let port = pick(&self.ports, Some(st.port));
+                    debug!("hysteria2 port hop {} -> {}", st.port, port);
+                    st.prev = Some(std::mem::replace(&mut st.current, sock));
+                    st.port = port;
+                    st.generation += 1;
+                    if let Some(w) = st.recv_waker.take() {
+                        w.wake();
+                    }
+                }
+                Err(e) => warn!("hysteria2 port hop: new socket failed: {e}"),
+            }
         }
-        st.current
+        (st.current.clone(), SocketAddr::new(self.virtual_addr.ip(), st.port))
+    }
+
+    fn rewrite(&self, meta: &mut [RecvMeta], n: usize) {
+        for m in meta.iter_mut().take(n) {
+            if m.addr.ip() == self.virtual_addr.ip() && self.ports.binary_search(&m.addr.port()).is_ok() {
+                m.addr = self.virtual_addr;
+            }
+        }
     }
 }
 
@@ -98,45 +131,76 @@ impl fmt::Debug for UdpHop {
     }
 }
 
+/// Writability of whichever socket is current, re-created after each hop.
+struct HopPoller {
+    hop: Arc<UdpHop>,
+    inner: Option<(u64, Pin<Box<dyn UdpPoller>>)>,
+}
+
+impl fmt::Debug for HopPoller {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HopPoller")
+    }
+}
+
+impl UdpPoller for HopPoller {
+    fn poll_writable(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        let (generation, current) = {
+            let st = self.hop.state.lock().unwrap();
+            (st.generation, st.current.clone())
+        };
+        if self.inner.as_ref().is_none_or(|(g, _)| *g != generation) {
+            self.inner = Some((generation, current.create_io_poller()));
+        }
+        self.inner.as_mut().unwrap().1.as_mut().poll_writable(cx)
+    }
+}
+
 impl AsyncUdpSocket for UdpHop {
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        self.inner.clone().create_io_poller()
+        Box::pin(HopPoller { hop: self, inner: None })
     }
 
     fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
+        let (sock, dest) = self.sender();
         if transmit.destination != self.virtual_addr {
-            return self.inner.try_send(transmit);
+            return sock.try_send(transmit);
         }
-        self.inner.try_send(&Transmit { destination: self.destination(), ..*transmit })
+        sock.try_send(&Transmit { destination: dest, ..*transmit })
     }
 
     fn poll_recv(&self, cx: &mut Context, bufs: &mut [IoSliceMut<'_>], meta: &mut [RecvMeta]) -> Poll<io::Result<usize>> {
-        let n = match self.inner.poll_recv(cx, bufs, meta) {
-            Poll::Ready(Ok(n)) => n,
-            other => return other,
+        let (prev, current) = {
+            let mut st = self.state.lock().unwrap();
+            st.recv_waker = Some(cx.waker().clone());
+            (st.prev.clone(), st.current.clone())
         };
-        for m in meta.iter_mut().take(n) {
-            if m.addr.ip() == self.virtual_addr.ip() && self.ports.binary_search(&m.addr.port()).is_ok() {
-                m.addr = self.virtual_addr;
+        // Errors on the retiring socket don't matter; it is dropped at the next hop anyway.
+        if let Some(prev) = prev {
+            if let Poll::Ready(Ok(n)) = prev.poll_recv(cx, bufs, meta) {
+                self.rewrite(meta, n);
+                return Poll::Ready(Ok(n));
             }
         }
+        let n = std::task::ready!(current.poll_recv(cx, bufs, meta))?;
+        self.rewrite(meta, n);
         Poll::Ready(Ok(n))
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.local_addr()
+        self.state.lock().unwrap().current.local_addr()
     }
 
     fn may_fragment(&self) -> bool {
-        self.inner.may_fragment()
+        self.state.lock().unwrap().current.may_fragment()
     }
 
     fn max_transmit_segments(&self) -> usize {
-        self.inner.max_transmit_segments()
+        self.segments.0
     }
 
     fn max_receive_segments(&self) -> usize {
-        self.inner.max_receive_segments()
+        self.segments.1
     }
 }
 
