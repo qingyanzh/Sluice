@@ -82,7 +82,7 @@ struct NodesView: View {
                             Button("复制名称") { copyText(node.name) }
                             Button("复制服务器") { copyText(node.endpoint) }
                         }
-                        if node.id != visible.last?.id { Divider().padding(.leading, 52) }
+                        if node.id != visible.last?.id { Divider().padding(.leading, 60) }
                     }
                 }
                 .glass()
@@ -143,7 +143,7 @@ struct NodeBrowserRow: View {
             IconTile(symbol: node.isSubscription ? "link" : "server.rack", size: 28)
             VStack(alignment: .leading, spacing: 3) {
                 Text(node.name).font(DS.label.weight(.medium)).foregroundStyle(Color.primary).lineLimit(1)
-                Text(node.endpoint).font(DS.small.monospaced()).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
+                Text(node.endpoint).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 8)
             Text(node.kind).font(DS.caption).foregroundStyle(DS.ink2)
@@ -151,7 +151,7 @@ struct NodeBrowserRow: View {
             if !node.isSubscription { LatencyBadge(latency: latency).frame(width: 72, alignment: .trailing) }
             Image(systemName: "chevron.right").font(DS.caption).foregroundStyle(DS.ink3)
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
+        .padding(.horizontal, DS.cardPadding).padding(.vertical, 14)
         .background(hovering ? Color.primary.opacity(0.035) : .clear)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
@@ -180,7 +180,7 @@ struct NodeDetailSheet: View {
                     row("最近延迟", latency.map { $0 < 0 ? "测试失败" : "\($0) ms" } ?? "尚未测试")
                 }
             }
-            .padding(16).glass()
+            .padding(DS.cardPadding).glass()
             Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : "连接参数可在配置页编辑，节点切换和延迟测试请前往策略页。")
                 .font(DS.small).foregroundStyle(DS.ink2)
             HStack {

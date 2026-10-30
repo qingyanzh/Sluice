@@ -91,6 +91,8 @@ final class Core: ObservableObject {
     @Published private(set) var mode = "rule"
     @Published private(set) var testingGroups: Set<String> = []
     @Published private(set) var reloading = false
+    /// A menu bar shortcut to a pane, consumed when the main window appears.
+    @Published var requestedPane: Pane?
     @Published var autoStart: Bool {
         didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
     }
