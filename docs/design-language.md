@@ -60,6 +60,13 @@ Supporting text uses `DS.ink2` (66% of the primary colour) and metadata
 Pane titles are 26pt bold, figures are semibold, and captions are semibold,
 so the key value in every card reads first.
 
+## Appearance
+
+The app follows the system appearance by default; 概览 › 外观 can pin it to
+light or dark. Every colour is dynamic: tokens in `DS` resolve per appearance,
+and the config editor uses the system label colours, never a colour with a
+fixed alpha, so nothing turns grey-on-grey in dark mode.
+
 ## Icon
 
 The icon is five bars on a light lavender tile. They share a left edge and

@@ -141,9 +141,36 @@ struct Sidebar: View {
     }
 }
 
+/// The app's own appearance setting, independent of the system's.
+enum Appearance: String, CaseIterable {
+    case system, light, dark
+    var title: String {
+        switch self {
+        case .system: "跟随系统"
+        case .light: "浅色"
+        case .dark: "深色"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .system: "circle.lefthalf.filled"
+        case .light: "sun.max"
+        case .dark: "moon"
+        }
+    }
+    var scheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
 struct MainView: View {
     @EnvironmentObject var core: Core
     @State private var pane: Pane? = .activity
+    @AppStorage("appearance") private var appearance = Appearance.system
 
     var body: some View {
         HStack(spacing: 0) {
@@ -184,6 +211,7 @@ struct MainView: View {
         .background(Backdrop())
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle("")
+        .preferredColorScheme(appearance.scheme)
         .frame(minWidth: 860, minHeight: 560)
         .onAppear {
             core.refreshSystemProxy()
@@ -234,7 +262,7 @@ struct StatusOrb: View {
         switch state {
         case .running: "checkmark"
         case .starting: "ellipsis"
-        case .stopped: "pause.fill"
+        case .stopped: "power"
         case .failed: "exclamationmark"
         }
     }
@@ -275,6 +303,8 @@ struct IconTile: View {
             }
             .frame(width: size, height: size)
             .animation(DS.spring, value: on)
+            // Decorative: the label next to it already says what it is.
+            .accessibilityHidden(true)
     }
 }
 
@@ -724,9 +754,14 @@ struct BigNumber: View {
             Text(value).font(DS.figure(28))
                 .fixedSize()
                 .contentTransition(.numericText())
-                .animation(.smooth(duration: 0.4), value: value)
-            if !unit.isEmpty { Text(unit).font(DS.label).foregroundStyle(DS.ink2).fixedSize() }
+            if !unit.isEmpty {
+                Text(unit).font(DS.label).foregroundStyle(DS.ink2).fixedSize()
+                    .contentTransition(.opacity)
+            }
         }
+        // Animate the row, not just the digits, so the unit slides as the number widens.
+        .animation(.smooth(duration: 0.4), value: value)
+        .animation(.smooth(duration: 0.4), value: unit)
     }
 }
 
@@ -781,6 +816,7 @@ struct ActivityView: View {
     private var hero: some View {
         let subline: String = {
             if case .failed(let why) = core.state { return why }
+            if core.state == .stopped { return "点击「启动」开始接管流量 · \(URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent)" }
             let ports = [core.summary.httpListen.map { "HTTP \(port($0))" }, core.summary.socksListen.map { "SOCKS5 \(port($0))" }]
                 .compactMap { $0 }.joined(separator: " · ")
             let profile = URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent
@@ -803,6 +839,14 @@ struct ActivityView: View {
                     Button { core.restart() } label: { Image(systemName: "arrow.clockwise") }
                         .help("重启内核").accessibilityLabel("重启内核").disabled(!core.isActive)
                     StartStopButton().glassButton(prominent: true)
+                        .background {
+                            // While stopped, a soft halo invites the one action that matters.
+                            if core.state == .stopped {
+                                Capsule().fill(DS.accent.opacity(0.35))
+                                    .phaseAnimator([0.0, 1.0]) { v, k in v.scaleEffect(1 + 0.25 * k).opacity(0.8 - 0.8 * k) }
+                                        animation: { _ in .easeOut(duration: 1.6) }
+                            }
+                        }
                 }
                 .glassButton()
             }
@@ -1064,6 +1108,7 @@ struct OverviewView: View {
                                 status: core.autoStart ? "已启用" : "已禁用", statusOn: core.autoStart)
                     LoginItemCard()
                 }.entrance(2)
+                AppearanceCard().entrance(3)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -1092,6 +1137,23 @@ struct FeatureCard: View {
             StatusBadge(text: status, tone: statusOn ? .green : .secondary)
         }
         .frame(minHeight: 110, alignment: .topLeading)
+        .card()
+    }
+}
+
+struct AppearanceCard: View {
+    @AppStorage("appearance") private var appearance = Appearance.system
+    var body: some View {
+        HStack(spacing: 10) {
+            IconTile(symbol: appearance.icon, on: true, size: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("外观").font(DS.heading)
+                Text("Sluice 窗口使用的颜色模式").font(DS.small).foregroundStyle(DS.ink2)
+            }
+            Spacer(minLength: 16)
+            GlassSegmented(options: Appearance.allCases.map { ($0, $0.title, $0.icon) }, selection: $appearance)
+                .frame(width: 320)
+        }
         .card()
     }
 }
@@ -1779,10 +1841,7 @@ struct ConfigView: View {
                 Button("选取…", action: choose)
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }
             }
-            TextEditor(text: $text)
-                .font(.system(.body, design: .monospaced))
-                .autocorrectionDisabled()
-                .padding(8)
+            ConfigEditor(text: $text)
                 .glassPanel()
             HStack {
                 if let (msg, ok) = message {
@@ -1834,6 +1893,85 @@ struct ConfigView: View {
             core.configPath = url.path
             core.refreshSummary()
             load()
+        }
+    }
+}
+
+/// Config text editor with quiet syntax colouring: section headers in the accent,
+/// keys and rule types in emphasis, values in secondary ink, comments faded.
+struct ConfigEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        scroll.drawsBackground = false
+        let tv = scroll.documentView as! NSTextView
+        tv.delegate = context.coordinator
+        tv.isRichText = false
+        tv.allowsUndo = true
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false
+        tv.isContinuousSpellCheckingEnabled = false
+        tv.drawsBackground = false
+        tv.textContainerInset = NSSize(width: 10, height: 12)
+        tv.string = text
+        Coordinator.highlight(tv)
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        let tv = scroll.documentView as! NSTextView
+        if tv.string != text {
+            tv.string = text
+            Coordinator.highlight(tv)
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ConfigEditor
+        init(_ parent: ConfigEditor) { self.parent = parent }
+
+        func textDidChange(_ note: Notification) {
+            guard let tv = note.object as? NSTextView else { return }
+            parent.text = tv.string
+            Coordinator.highlight(tv)
+        }
+
+        static let body = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        static let strong = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .semibold)
+        static let header = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .bold)
+
+        static func highlight(_ tv: NSTextView) {
+            guard let storage = tv.textStorage else { return }
+            let s = storage.string as NSString
+            let all = NSRange(location: 0, length: s.length)
+            // Dynamic system colours, so the editor stays legible in both appearances.
+            let ink = NSColor.labelColor, soft = NSColor.secondaryLabelColor
+            storage.beginEditing()
+            storage.setAttributes([.font: body, .foregroundColor: ink], range: all)
+            s.enumerateSubstrings(in: all, options: .byLines) { line, range, _, _ in
+                guard let line else { return }
+                let t = line.trimmingCharacters(in: .whitespaces)
+                let l = line as NSString
+                if t.hasPrefix("#") || t.hasPrefix(";") || t.hasPrefix("//") {
+                    storage.addAttribute(.foregroundColor, value: NSColor.tertiaryLabelColor, range: range)
+                } else if t.hasPrefix("["), t.hasSuffix("]") {
+                    storage.addAttributes([.font: header, .foregroundColor: NSColor(DS.accent)], range: range)
+                } else if case let eq = l.range(of: "=").location, eq != NSNotFound {
+                    storage.addAttributes([.font: strong], range: NSRange(location: range.location, length: eq))
+                    storage.addAttribute(.foregroundColor, value: soft, range: NSRange(location: range.location + eq, length: range.length - eq))
+                } else if case let comma = l.range(of: ",").location, comma != NSNotFound {
+                    // Rule lines: TYPE,value,POLICY. The type leads, the rest is detail.
+                    storage.addAttributes([.font: strong], range: NSRange(location: range.location, length: comma))
+                    storage.addAttribute(.foregroundColor, value: soft, range: NSRange(location: range.location + comma, length: range.length - comma))
+                }
+            }
+            storage.endEditing()
+            tv.typingAttributes = [.font: body, .foregroundColor: ink]
         }
     }
 }
