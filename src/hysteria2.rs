@@ -170,11 +170,14 @@ pub struct Hy2Server {
     password: String,
     sni: String,
     obfs: Option<String>,
+    /// Port hopping: (all server ports, hop interval); `None` uses `port` only.
+    hop: Option<(Vec<u16>, Duration)>,
     client_config: quinn::ClientConfig,
     live: Mutex<Option<Live>>,
 }
 
 impl Hy2Server {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         server: String,
         port: u16,
@@ -182,7 +185,16 @@ impl Hy2Server {
         sni: Option<String>,
         skip_cert_verify: bool,
         obfs: Option<String>,
+        ports: Option<String>,
+        hop_interval: Option<u64>,
     ) -> Result<Self> {
+        let hop = match ports {
+            Some(spec) => Some((
+                crate::udphop::parse_ports(&spec)?,
+                hop_interval.map_or(crate::udphop::DEFAULT_INTERVAL, Duration::from_secs),
+            )),
+            None => None,
+        };
         let tls = quic_tls_config(skip_cert_verify, b"h3")?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
         let mut transport = quinn::TransportConfig::default();
@@ -190,25 +202,29 @@ impl Hy2Server {
         transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
         client_config.transport_config(Arc::new(transport));
         let sni = sni.unwrap_or_else(|| server.clone());
-        Ok(Hy2Server { server, port, password, sni, obfs, client_config, live: Mutex::new(None) })
+        Ok(Hy2Server { server, port, password, sni, obfs, hop, client_config, live: Mutex::new(None) })
     }
 
     async fn dial(&self) -> Result<Live> {
         let addr = *resolve(&self.server, self.port).await?.first().ok_or_else(|| anyhow!("{}: no address", self.server))?;
         let socket = udp_socket_std(&addr)?;
-        let endpoint = match &self.obfs {
-            None => quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?,
-            Some(pw) => {
-                use quinn::Runtime;
-                let inner = quinn::TokioRuntime.wrap_udp_socket(socket)?;
-                let obfuscated = Arc::new(crate::salamander::Salamander::new(inner, pw));
-                quinn::Endpoint::new_with_abstract_socket(
-                    quinn::EndpointConfig::default(),
-                    None,
-                    obfuscated,
-                    Arc::new(quinn::TokioRuntime),
-                )?
+        let endpoint = if self.obfs.is_none() && self.hop.is_none() {
+            quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?
+        } else {
+            use quinn::Runtime;
+            // Salamander sits above the hop socket, so obfuscation is independent of the port.
+            let mut sock: Arc<dyn quinn::AsyncUdpSocket> = match &self.hop {
+                None => quinn::TokioRuntime.wrap_udp_socket(socket)?,
+                Some((ports, interval)) => {
+                    drop(socket);
+                    let make = Box::new(move || quinn::TokioRuntime.wrap_udp_socket(udp_socket_std(&addr)?));
+                    Arc::new(crate::udphop::UdpHop::new(make, addr, ports.clone(), *interval)?)
+                }
+            };
+            if let Some(pw) = &self.obfs {
+                sock = Arc::new(crate::salamander::Salamander::new(sock, pw));
             }
+            quinn::Endpoint::new_with_abstract_socket(quinn::EndpointConfig::default(), None, sock, Arc::new(quinn::TokioRuntime))?
         };
         let conn = tokio::time::timeout(
             Duration::from_secs(10),

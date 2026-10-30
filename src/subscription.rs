@@ -26,16 +26,15 @@ fn b64_str(s: &str) -> Option<String> {
 }
 
 /// Pieces of `scheme://userinfo@host:port?query#name`.
-struct Link<'a> {
+struct Link {
     user: Option<String>,
     host: String,
     port: u16,
     query: HashMap<String, String>,
     name: Option<String>,
-    rest: &'a str,
 }
 
-fn split_link(body: &str) -> Result<Link<'_>> {
+fn split_link(body: &str) -> Result<Link> {
     let (body, name) = match body.split_once('#') {
         Some((b, n)) => (b, Some(percent_decode(n)).filter(|n| !n.is_empty())),
         None => (body, None),
@@ -59,7 +58,7 @@ fn split_link(body: &str) -> Result<Link<'_>> {
         .filter_map(|kv| kv.split_once('='))
         .map(|(k, v)| (k.to_ascii_lowercase(), percent_decode(v)))
         .collect();
-    Ok(Link { user, host, port, query, name, rest: main })
+    Ok(Link { user, host, port, query, name })
 }
 
 fn truthy(v: Option<&String>) -> bool {
@@ -202,6 +201,20 @@ fn parse_trojan(body: &str) -> Result<(Option<String>, ProxyDef)> {
 }
 
 fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
+    // `host:20000-50000` / `host:443,8443` is a port-hopping spec; the first port stands in
+    // as the plain port so split_link can parse the rest.
+    let end = body.find(['/', '?', '#']).unwrap_or(body.len());
+    let mut ports = None;
+    let rewritten;
+    let body = match body[..end].rsplit_once(':') {
+        Some((head, spec)) if spec.contains(['-', ',']) => {
+            let first = crate::udphop::parse_ports(spec)?[0];
+            ports = Some(spec.to_string());
+            rewritten = format!("{head}:{first}{}", &body[end..]);
+            rewritten.as_str()
+        }
+        _ => body,
+    };
     let l = split_link(body)?;
     let q = &l.query;
     let obfs = match q.get("obfs").map(String::as_str) {
@@ -209,14 +222,17 @@ fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
         Some("salamander") => Some(q.get("obfs-password").cloned().ok_or_else(|| anyhow!("salamander without obfs-password"))?),
         Some(other) => bail!("hysteria2 obfs {other:?} not supported"),
     };
-    if l.rest.contains(',') {
-        bail!("hysteria2 port hopping not supported yet");
+    let ports = ports.or_else(|| q.get("mport").cloned().filter(|p| !p.is_empty()));
+    if let Some(p) = &ports {
+        crate::udphop::parse_ports(p)?;
     }
     let def = ProxyDef::Hysteria2 {
         password: l.user.ok_or_else(|| anyhow!("hysteria2 link without password"))?,
         sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
         skip_cert_verify: truthy(q.get("insecure")),
         obfs,
+        ports,
+        hop_interval: None,
         server: l.host,
         port: l.port,
     };
@@ -344,6 +360,26 @@ mod tests {
             let (back_name, back) = parse_proxy(&line).unwrap();
             assert_eq!((back_name, format!("{back:?}")), (name, format!("{def:?}")), "{line}");
         }
+    }
+
+    #[test]
+    fn hy2_port_hopping() {
+        for (link, spec) in [
+            ("hy2://pw@h.example:20000-50000/?sni=h.example#A", "20000-50000"),
+            ("hysteria2://pw@[::1]:443,8443,20000-30000?obfs=salamander&obfs-password=o#B", "443,8443,20000-30000"),
+            ("hy2://pw@h.example:443/?mport=1000-2000#C", "1000-2000"),
+        ] {
+            let (nodes, skipped) = parse(link);
+            assert!(skipped.is_empty(), "{skipped:?}");
+            let def = &nodes[0].1;
+            assert!(matches!(def, ProxyDef::Hysteria2 { ports: Some(p), .. } if p == spec), "{def:?}");
+            let back = parse_proxy(&def.to_line("X")).unwrap().1;
+            assert_eq!(format!("{back:?}"), format!("{def:?}"));
+        }
+        assert!(matches!(&parse("hy2://pw@h.example:8443#D").0[0].1, ProxyDef::Hysteria2 { ports: None, .. }));
+        assert!(!parse("hy2://pw@h.example:5-3#E").1.is_empty());
+        let (_, def) = parse_proxy("H = hysteria2, h.example, 443, password=x, port-hopping=\"443;5000-6000\", port-hopping-interval=10").unwrap();
+        assert!(matches!(def, ProxyDef::Hysteria2 { ports: Some(p), hop_interval: Some(10), .. } if p == "443,5000-6000"));
     }
 
     #[test]
