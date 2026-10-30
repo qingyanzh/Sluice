@@ -216,7 +216,7 @@ mod tests {
                 for (kind, credentials, expected) in [
                     ("vmess", "uuid: test-uuid, alterId: '0', cipher: chacha20-poly1305", ProxyDef::Vmess {
                         server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), method: "chacha20-poly1305".into(),
-                        tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                        tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(), alter_id: 0,
                     }),
                     ("vless", "uuid: test-uuid", ProxyDef::Vless {
                         server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), tls,
@@ -238,7 +238,7 @@ mod tests {
     fn shadowsocks_and_hysteria2_roundtrip() {
         assert_parses_and_roundtrips(
             "proxies:\n  - {name: Test, type: ss, server: '::1', port: 8388, cipher: aes-256-gcm, password: 'p@ss:word=1'}",
-            ProxyDef::Shadowsocks { server: "::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word=1".into() },
+            ProxyDef::Shadowsocks { server: "::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word=1".into(), plugin: None },
         );
         for (opts, obfs, ports, hop_interval) in [
             ("", None, None, None),
@@ -262,7 +262,7 @@ mod tests {
                 &format!("proxies:\n  - {{name: Test, type: vmess, server: h, port: 80, uuid: u{cipher}}}"),
                 ProxyDef::Vmess {
                     server: "h".into(), port: 80, uuid: "u".into(), method: "auto".into(),
-                    tls: false, sni: None, skip_cert_verify: false, layer: None,
+                    tls: false, sni: None, skip_cert_verify: false, layer: None, alter_id: 0,
                 },
             );
         }
@@ -295,8 +295,8 @@ mod tests {
             ("type: trojan", "missing password"),
             ("type: hysteria2", "missing password"),
             ("type: socks5", "not supported"),
-            ("type: ss, cipher: aes-128-gcm, password: p, plugin: obfs", "ss plugins not supported"),
-            ("type: vmess, uuid: u, alterId: 1", "legacy vmess"),
+            ("type: ss, cipher: aes-128-gcm, password: p, plugin: kcptun", "ss plugin \"kcptun\" not supported"),
+            ("type: vmess, alterId: 1", "missing uuid"),
             ("type: trojan, password: p, network: kcp", "transport"),
             ("type: trojan, password: p, network: xhttp, xhttp-opts: {mode: invalid}", "unknown xhttp mode"),
             ("type: trojan, password: p, network: xhttp, xhttp-opts: {x-padding-bytes: 20-10}", "bad xhttp padding range"),
@@ -351,7 +351,7 @@ mod tests {
             let yaml = format!("proxies:\n  - {{name: Test, type: vmess, server: h, port: 443, uuid: u, tls: {value}, skip-cert-verify: {value}}}");
             assert_parses_and_roundtrips(&yaml, ProxyDef::Vmess {
                 server: "h".into(), port: 443, uuid: "u".into(), method: "auto".into(), tls: expected,
-                sni: None, skip_cert_verify: expected, layer: None,
+                sni: None, skip_cert_verify: expected, layer: None, alter_id: 0,
             });
         }
     }

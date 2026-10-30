@@ -473,7 +473,7 @@ mod tests {
                 "ss, ss.example, 8388, encrypt-method=chacha20-ietf-poly1305, password=secret:with=punctuation".to_string(),
                 ProxyDef::Shadowsocks {
                     server: "ss.example".into(), port: 8388,
-                    method: "chacha20-ietf-poly1305".into(), password: "secret:with=punctuation".into(),
+                    method: "chacha20-ietf-poly1305".into(), password: "secret:with=punctuation".into(), plugin: None,
                 },
             ),
             (
@@ -524,7 +524,7 @@ mod tests {
                         format!("vmess, proxy.example, 443, username=test-uuid, encrypt-method=aes-128-gcm, {opts}"),
                         ProxyDef::Vmess {
                             server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), method: "aes-128-gcm".into(),
-                            tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                            tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(), alter_id: 0,
                         },
                     ),
                     (
@@ -556,7 +556,7 @@ mod tests {
         for (line, expected) in [
             ("V = VMESS, h, 1, UUID=u", ProxyDef::Vmess {
                 server: "h".into(), port: 1, uuid: "u".into(), method: "auto".into(),
-                tls: false, sni: None, skip_cert_verify: false, layer: None,
+                tls: false, sni: None, skip_cert_verify: false, layer: None, alter_id: 0,
             }),
             ("V = VLESS, h, 1, USERNAME=\"u\"", ProxyDef::Vless {
                 server: "h".into(), port: 1, uuid: "u".into(), tls: false, sni: None,

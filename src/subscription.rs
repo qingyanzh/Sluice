@@ -426,7 +426,7 @@ mod tests {
                     &format!("vmess://{}", STANDARD.encode(json.to_string())),
                     ProxyDef::Vmess {
                         server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), method: "aes-128-gcm".into(),
-                        tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                        tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(), alter_id: 0,
                     },
                 );
             }
@@ -437,7 +437,7 @@ mod tests {
     fn shadowsocks_encodings_and_ipv6_roundtrip() {
         use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
         let expected = ProxyDef::Shadowsocks {
-            server: "::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word".into(),
+            server: "::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word".into(), plugin: None,
         };
         for creds in [STANDARD.encode("aes-256-gcm:p@ss:word"), STANDARD_NO_PAD.encode("aes-256-gcm:p@ss:word"), URL_SAFE_NO_PAD.encode("aes-256-gcm:p@ss:word"), "aes-256-gcm:p%40ss%3Aword".into()] {
             assert_link_roundtrip(&format!("ss://{creds}@[::1]:8388#Test%20node"), expected.clone());
@@ -476,7 +476,7 @@ mod tests {
                     &format!("vmess://{}", STANDARD.encode(json.to_string())),
                     ProxyDef::Vmess {
                         server: "h".into(), port: 80, uuid: "u".into(), method: "auto".into(), tls: false,
-                        sni: Some("cdn.example".into()), skip_cert_verify: true, layer: None,
+                        sni: Some("cdn.example".into()), skip_cert_verify: true, layer: None, alter_id: 0,
                     },
                 );
             }
@@ -528,7 +528,7 @@ mod tests {
             ("socks5://h:1", "not supported"),
             ("ss://not-base64", "bad ss link"),
             ("ss://method@h:1", "bad ss credentials"),
-            ("ss://aes-128-gcm:p@h:1?plugin=obfs", "ss plugins not supported"),
+            ("ss://aes-128-gcm:p@h:1?plugin=kcptun", "ss plugin \"kcptun\" not supported"),
             ("vless://h:443", "vless link without uuid"),
             ("trojan://h:443", "trojan link without password"),
             ("hy2://h:443", "hysteria2 link without password"),
@@ -548,7 +548,7 @@ mod tests {
             assert!(format!("{err:#}").contains(reason), "{link}: {err:#}");
         }
         for (json, reason) in [
-            (r#"{"add":"h","port":443,"id":"u","aid":1}"#, "legacy vmess"),
+            (r#"{"add":"h","port":443,"aid":1}"#, "vmess link without id"),
             (r#"{"port":443,"id":"u"}"#, "without address"),
             (r#"{"add":"h","id":"u"}"#, "without port"),
             (r#"{"add":"h","port":443}"#, "without id"),
@@ -676,7 +676,7 @@ mod tests {
         assert!(encoded.contains('/'));
         assert_link_roundtrip(
             &format!("ss://{encoded}#Test%20node"),
-            ProxyDef::Shadowsocks { server: "h".into(), port: 8388, method: "aes-128-gcm".into(), password: "pa?".into() },
+            ProxyDef::Shadowsocks { server: "h".into(), port: 8388, method: "aes-128-gcm".into(), password: "pa?".into(), plugin: None },
         );
     }
 
