@@ -194,52 +194,76 @@ struct MenuBarLabel: View {
     }()
 
     var body: some View {
-        HStack(spacing: 1) {
-            if displayMode.showsIcon {
-                ZStack {
-                    if let icon = Self.statusIcon {
-                        Image(nsImage: icon)
-                            .renderingMode(.template)
-                            .frame(width: 15, height: 15)
-                            .foregroundStyle(iconTone)
-                    } else {
-                        SluiceMark()
-                            .fill(iconTone)
-                            .frame(width: 15, height: 15)
-                    }
-                }
-                .frame(width: 15, height: 15)
-                .overlay(alignment: .bottomTrailing) {
-                    if showOutboundMode {
-                        Text(modeMark)
-                            .font(.system(size: 6))
-                            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
-                            .frame(width: 8, height: 8)
-                            .background(RoundedRectangle(cornerRadius: 2)
-                                .fill(colorScheme == .dark ? Color.white : Color.black.opacity(0.7)))
-                            .offset(x: 6, y: 1)
-                    }
-                }
-                .accessibilityHidden(true)
-            }
-            if displayMode.showsSpeed {
-                VStack(alignment: .center, spacing: 0) {
-                    Text(menuBarSpeed(core.upRate)).frame(height: 9)
-                    Text(menuBarSpeed(core.downRate)).frame(height: 9)
-                }
-                .font(.system(size: 9))
-                .lineLimit(1)
-                .foregroundStyle(iconTone)
-                .accessibilityElement(children: .combine)
-            }
-        }
+        Image(nsImage: statusImage)
         .accessibilityLabel("Sluice，\(core.state.label)\(showOutboundMode && displayMode.showsIcon ? "，\(modeName)" : "")\(displayMode.showsSpeed ? "，上传每秒 \(menuBarSpeed(core.upRate))，下载每秒 \(menuBarSpeed(core.downRate))" : "")")
     }
 
-    private var iconTone: Color {
-        if core.state.isFailed { return DS.fail }
-        if dimWhenNotProxying && !core.systemProxyOn && !core.summary.enhancedMode { return .secondary }
-        return .primary
+    /// A single AppKit image gives MenuBarExtra the complete intrinsic width and
+    /// two-line height. SwiftUI text stacks are clipped to one line in its label.
+    private var statusImage: NSImage {
+        let upload = menuBarSpeed(core.upRate) as NSString
+        let download = menuBarSpeed(core.downRate) as NSString
+        let font = NSFont.systemFont(ofSize: 9)
+        let measure: [NSAttributedString.Key: Any] = [.font: font]
+        let speedWidth = ceil(max(upload.size(withAttributes: measure).width,
+                                  download.size(withAttributes: measure).width)) + 2
+        // Keep the text clear of the 8-point mode badge, as Surge does.
+        let speedX: CGFloat = displayMode.showsIcon ? (showOutboundMode ? 30 : 23) : 0
+        let width = displayMode.showsSpeed ? speedX + speedWidth : (showOutboundMode ? 23 : 18)
+        let dark = colorScheme == .dark
+        let dimmed = dimWhenNotProxying && !core.systemProxyOn && !core.summary.enhancedMode
+        let ink = (core.state.isFailed ? NSColor.systemRed : dark ? NSColor.white : NSColor.black)
+            .withAlphaComponent(dimmed ? 0.55 : 1)
+        let icon = Self.statusIcon
+        let mode = modeMark as NSString
+        let showsIcon = displayMode.showsIcon
+        let showsSpeed = displayMode.showsSpeed
+        let showsMode = showOutboundMode
+
+        return NSImage(size: NSSize(width: width, height: 22), flipped: false) { _ in
+            if showsIcon {
+                let iconRect = NSRect(x: 1, y: 3, width: 15, height: 15)
+                if let icon {
+                    icon.draw(in: iconRect)
+                    if let context = NSGraphicsContext.current?.cgContext {
+                        context.setBlendMode(.sourceAtop)
+                        context.setFillColor(ink.cgColor)
+                        context.fill(iconRect)
+                        context.setBlendMode(.normal)
+                    }
+                } else {
+                    ink.setFill()
+                    let path = SluiceMark().path(in: iconRect).cgPath
+                    NSGraphicsContext.current?.cgContext.addPath(path)
+                    NSGraphicsContext.current?.cgContext.fillPath()
+                }
+                if showsMode {
+                    let badge = NSRect(x: 14, y: 2, width: 8, height: 8)
+                    (dark ? NSColor.white : NSColor.black.withAlphaComponent(0.7)).setFill()
+                    NSBezierPath(roundedRect: badge, xRadius: 2, yRadius: 2).fill()
+                    let centered = NSMutableParagraphStyle()
+                    centered.alignment = .center
+                    mode.draw(in: NSRect(x: 14, y: 1.5, width: 8, height: 8), withAttributes: [
+                        .font: NSFont.menuBarFont(ofSize: 6),
+                        .foregroundColor: dark ? NSColor.black : NSColor.white,
+                        .paragraphStyle: centered,
+                    ])
+                }
+            }
+            if showsSpeed {
+                let centered = NSMutableParagraphStyle()
+                centered.alignment = .center
+                centered.lineBreakMode = .byTruncatingTail
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: ink,
+                    .paragraphStyle: centered,
+                ]
+                upload.draw(in: NSRect(x: speedX, y: 12, width: speedWidth, height: 9), withAttributes: attributes)
+                download.draw(in: NSRect(x: speedX, y: 3, width: speedWidth, height: 9), withAttributes: attributes)
+            }
+            return true
+        }
     }
 
     private var modeName: String { (OutboundMode(rawValue: core.mode) ?? .rule).title }
