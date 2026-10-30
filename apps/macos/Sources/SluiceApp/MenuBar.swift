@@ -139,6 +139,7 @@ struct MenuBarContent: View {
         Button("编辑当前配置", systemImage: "curlybraces.square") { showWindow(.profile) }
 
         Divider()
+        CheckForUpdatesButton()
         Button("退出 Sluice", systemImage: "power") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
