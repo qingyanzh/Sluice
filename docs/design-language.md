@@ -1,122 +1,94 @@
-# Sluice Flow: design language of the macOS app
+# Sluice Flow: macOS design language
 
-Sluice moves traffic the way a sluice moves water: quietly, in one direction,
-under control. The interface follows the same idea. It is calm and it gets out
-of the way. The only things that stand out are the ones that are active.
-
-All values live in `DS` in `apps/macos/Sources/SluiceApp/Views.swift`. Views use
-these tokens and never set their own values.
-
-## Principles
-
-1. **Calm surfaces.** The page is a solid off-white (graphite in dark mode).
-   Content sits on white cards with a hairline border and a soft two-layer
-   shadow. There are no gradients and no decorative colour behind content.
-2. **Glass is for controls.** Liquid Glass (`glassEffect`, `.glass` buttons) is
-   used only on things you operate: search, segmented controls, buttons and the
-   floating status card. Content is never on glass.
-3. **One accent means "active".** The brand blue-violet (`DS.accent`, taken
-   from the app icon) appears only on
-   what is selected, primary or flowing: the selected sidebar item, the
-   selected segment, the primary button and download traffic. Everything else
-   is grey. Red is used only for rejects and errors. Green is used only for
-   status dots.
-4. **The flow mark.** This is the signature element: a short accent capsule
-   that marks whatever is active. It sits under the selected segment and beside
-   the selected request. When the selection moves, the mark slides with it.
-5. **Icon tiles.** Every symbol that names a thing (sidebar items, feature
-   cards, policy groups, nodes, facts, empty states) sits in an `IconTile`: a
-   continuous rounded square at 30% corner radius. At rest it is a quiet grey
-   tile with an outline glyph. When on, it fills with the accent and the glyph
-   turns white and filled. Site initials (`Monogram`) use the same tile.
-6. **Capsule geometry.** Everything interactive is a capsule: buttons, fields,
-   segments and progress bars. Cards use a 14pt continuous corner and tiles use
-   12pt. Nothing has a square corner.
-7. **One spring.** All motion uses `DS.spring` (response 0.32, damping 0.82):
-   - Pressed surfaces sink to 97%.
-   - Tiles lift on hover.
-   - Selections slide between items.
-   - Numbers roll when they change.
-   - Symbols bounce or swap.
-   - Panes cross-fade with an 8pt rise.
-   - Cards enter one after another (`entrance`): they rise 14pt, sharpen
-     from a slight blur and settle, each 45ms after the last.
-8. **One type scale.** SF Pro at fixed steps. Figures use medium weight with
-   monospaced digits.
-
-   | Token     | Size and weight | Used for              |
-   |-----------|-----------------|-----------------------|
-   | `title`   | 26 bold         | pane titles           |
-   | `display` | 22 semibold     | status                |
-   | `heading` | 14 semibold     | card and tile names   |
-   | `label`   | 13              | body text             |
-   | `small`   | 12              | descriptions          |
-   | `caption` | 11 semibold     | metadata              |
-
-## Contrast
-
-Supporting text uses `DS.ink2` (72% of the primary colour) and metadata
-`DS.ink3` (56%), both darker than the system secondary and tertiary styles.
-Secondary buttons (`SecondaryCapsuleStyle`) have a surface fill, a 1pt
-`DS.stroke` border and full-strength text, so they never read as disabled;
-disabled controls fade to 40% and say why in their help text.
-Pane titles are 26pt bold, figures are semibold, and captions are semibold,
-so the key value in every card reads first.
-
-## State colours
-
-One grammar, tokens in `DS`: blue (`accent`) is action, selection and the
-current page; green (`ok`) is confirmed working; orange (`warn`) is attention
-or an inconsistent state; red (`fail`) is failure; grey (`off`) is off,
-unconfigured or no data. No other colour carries meaning. Icon tiles are flat
-(no glow), containers have a hairline and one faint shadow, and the accent fill
-is kept for the primary button.
+Sluice presents the connection state first, then the route, then live activity.
+Keep the interface quiet, readable, and consistent across light and dark mode.
+Shared layout, colour, and type tokens live in `DS` in
+`apps/macos/Sources/SluiceApp/Views.swift`.
 
 ## Layout
 
-- Home reads in three tiers: state and its one main action; how traffic leaves
-  (出站模式 · 当前节点 · 系统代理, each opening the pane that changes it);
-  traffic and requests. The sidebar's start button is a quiet round icon.
-- Content stops at `DS.maxContentWidth`; lists size to their rows.
-- Every empty pane uses `EmptyState`: an illustration, the reason, one primary
-  action and at most one secondary.
-- 设置 sits apart at the bottom of the sidebar.
+- The sidebar is 212 pt wide. Navigation rows are 44 pt tall, with 4 pt between
+  rows and 24 pt between groups. Use a plain 17 pt symbol and a 14 pt label;
+  the selected row gets a subtle surface, not an icon tile.
+- Page gutters are 28 pt. Cards use 20 pt padding, a 14 pt corner radius,
+  and 16 pt between peers. Sections use 24 pt of separation.
+- The activity page has a state card, a three-part route card, and four equal
+  224 pt cards in a two-column grid. At narrow widths the four cards stack.
+  Rankings show three items so they stay within the shared card height.
+- Settings use two columns of equal-height feature cards. Lists give rows
+  enough vertical padding for a 13 pt primary line and readable metadata.
+- Content stops at `DS.maxContentWidth` on wide windows. Page headers move
+  controls to a second row when needed.
 
-## States and failures
+## Type and contrast
 
-- The core's state reads the same everywhere: the activity hero, the toolbar
-  pills, the policy and requests empty states, and the rule test. While
-  stopped, every place that needs the core says so and offers 启动 Sluice.
-- A setting that is on but not working is a warning, not a success: the system
-  proxy pointing at a stopped core is an orange banner on every pane, with
-  启动 and 关闭系统代理 right there.
-- Missing setup is stated with its effect and its fix ("还没有代理节点 … 所有流量
-  都会直连", with 添加节点 / 添加订阅 opening the sheet directly).
-- Every error has a plain Chinese first line (what happened and what to do);
-  the core's own message folds under 详细信息; format errors show a correct
-  example with a copy button (`ErrorText`).
+Use SF Pro for text and monospaced digits for figures. Large figures use a
+medium weight so card labels remain easy to scan.
 
-## Appearance
+| Token | Size and weight | Use |
+|-------|-----------------|-----|
+| `title` | 24 semibold | Page titles |
+| `display` | 22 medium | Main state |
+| `heading` | 14 semibold | Card titles |
+| `navigation` | 14 regular | Sidebar |
+| `label` | 13 regular | Body and controls |
+| `small` | 12 regular | Descriptions |
+| `caption` | 11 medium | Metadata |
 
-The app follows the system appearance by default; 设置 › 外观 can pin it to
-light or dark. Every colour is dynamic: tokens in `DS` resolve per appearance,
-and the config editor uses the system label colours, never a colour with a
-fixed alpha, so nothing turns grey-on-grey in dark mode.
+`DS.ink2` is for descriptions and labels. `DS.ink3` is for timestamps,
+secondary metadata, and hints. Both are opaque dynamic colours selected for
+the current appearance; avoid stacking transparent text over tinted cards.
+Search and form placeholders use these inks directly. The configuration
+editor applies the same contrast to comments and line numbers. Disabled
+controls may fade, while enabled supporting text should remain legible.
+
+## Colour and surfaces
+
+- Use a solid off-white page and white content cards in light mode; deep
+  graphite and slightly lighter cards in dark mode. Keep borders and shadows
+  quiet. Glass belongs on interactive controls.
+- `DS.accent` marks the selected page, active segment, main action, and
+  download traffic. Green (`DS.ok`) means working, orange (`DS.warn`) means
+  attention, red (`DS.fail`) means failure, and neutral (`DS.off`) means off.
+- A system proxy enabled while the core is stopped is a warning in every
+  pane, including its status chip in Settings. State colour must reflect the
+  effect on connectivity, not just the switch position.
+- Use `DS.spring` for pressed and selection motion. Respect the system Reduce
+  Motion preference for pane transitions.
+
+## Browsing and editing
+
+- Search fields use ⌘F to focus and Esc to clear. Empty filtered lists offer
+  a clear action. Request updates can be paused without pausing traffic.
+- Nodes show names, protocol, and endpoint metadata. Details do not reveal
+  passwords or subscription URL tokens.
+- Configuration drafts survive pane navigation. External edits are detected
+  before saving, and saved and applied are separate outcomes.
+- Empty states explain why content is unavailable and offer one useful action.
+  Running and stopped states should be visually coherent in every pane.
+
+## Menu bar
+
+- The macOS status item uses a monochrome version of Sluice's five-channel mark,
+  with three persistent display modes: icon and live speed, icon only, or
+  live speed only. Live speed uses Surge's two centred 9 pt rows: upload above
+  download, without arrows, decimal KB/s and higher units. Zero traffic shows
+  `0 KB/s`. The current outbound mode is a small D/G/R badge on the icon.
+- The icon can dim when neither the system proxy nor enhanced mode is enabled.
+  These preferences are available in Settings and the status menu.
+- The native menu begins with engine state, profile name, and live traffic.
+  Start or stop is the first action. Outbound mode and selectable policy
+  groups use submenus with checkmarks, followed by system proxy and enhanced
+  mode switches.
+- Reload and restart are available only when the engine supports them. Main
+  window, requests, and current configuration have direct shortcuts below the
+  controls.
 
 ## Icon
 
-The icon is five bars on a light lavender tile. They share a left edge and
-their lengths swell to the longest in the middle, then fall away. Every bar
-uses the same blue-to-violet gradient, with a white outline and a soft
-coloured shadow. The tile has a bright inner border and a glow at the top
-left.
-
-It uses the same vocabulary as the interface: capsule shapes, a calm light
-surface and a single hue.
-
-The icon is generated by `apps/macos/Icon/make-icon.swift`:
-
-```bash
-swift apps/macos/Icon/make-icon.swift /tmp/Sluice.iconset
-iconutil -c icns /tmp/Sluice.iconset -o apps/macos/Icon/Sluice.icns
-```
+The app icon is generated by `apps/macos/Icon/make-icon.swift` from the
+installed Surge app icon. Its five bars, spacing, tile, shadows, and glow
+are preserved; only hue and saturation change, producing a pearl and
+lagoon palette. The native Surge status-bar silhouette is bundled as a
+template image so macOS can tint it for each appearance and connection
+state. The deep teal UI accent keeps controls legible in both appearances.
