@@ -33,6 +33,19 @@ enum Pane: String, CaseIterable, Identifiable {
         }
     }
 
+    var tint: Color {
+        switch self {
+        case .activity: .blue
+        case .overview: .indigo
+        case .requests: .teal
+        case .policy: .purple
+        case .nodes: .orange
+        case .rule: .pink
+        case .logs: .gray
+        case .profile: .green
+        }
+    }
+
     /// Sidebar sections, Surge-style: an untitled top group, then titled groups.
     static let sections: [(String?, [Pane])] = [
         (nil, [.activity, .overview]),
@@ -78,7 +91,17 @@ struct MainView: View {
             List(selection: $pane) {
                 ForEach(Pane.sections, id: \.1) { title, panes in
                     Section {
-                        ForEach(panes) { p in Label(p.title, systemImage: p.icon).tag(p) }
+                        ForEach(panes) { p in
+                            Label {
+                                Text(p.title).font(DS.label)
+                            } icon: {
+                                Image(systemName: p.icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(p.tint.gradient, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            }
+                            .labelStyle(BadgeLabelStyle())
+                            .tag(p)
+                        }
                     } header: {
                         if let title { Text(title) }
                     }
@@ -163,9 +186,10 @@ struct TogglePill: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Circle().fill(on ? Color.green : Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
-                Text(title)
+                    .shadow(color: on ? .green.opacity(0.6) : .clear, radius: 3)
+                Text(title).font(.system(size: 12, weight: .medium))
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 4)
         }
     }
 }
@@ -202,7 +226,7 @@ struct StatusFooter: View {
             StartStopButton(compact: true).buttonStyle(.borderless).font(.title3)
         }
         .padding(8)
-        .glass(radius: DS.smallRadius + 2)
+        .liquidGlass(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -266,22 +290,28 @@ enum DS {
     static let radius: CGFloat = 14
     static let smallRadius: CGFloat = 10
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.82)
+
+    static let page = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua]) == .darkAqua
+            ? NSColor(red: 0.105, green: 0.105, blue: 0.115, alpha: 1)
+            : NSColor(red: 0.962, green: 0.965, blue: 0.972, alpha: 1)
+    })
+    static let surface = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua]) == .darkAqua
+            ? NSColor(red: 0.16, green: 0.16, blue: 0.175, alpha: 1)
+            : .white
+    })
+
+    /// Type scale: one face (SF Pro) at a few fixed steps; rounded only for figures.
+    static let title = Font.system(size: 26, weight: .bold)
+    static let caption = Font.system(size: 11, weight: .semibold)
+    static let label = Font.system(size: 13)
+    static func figure(_ size: CGFloat) -> Font { .system(size: size, weight: .semibold, design: .rounded).monospacedDigit() }
 }
 
-/// Soft, tinted backdrop behind the glass surfaces; it is what makes them read as translucent.
+/// Solid page colour: a quiet off-white in light mode, deep graphite in dark mode.
 struct Backdrop: View {
-    @Environment(\.colorScheme) private var scheme
-    var body: some View {
-        let a = scheme == .dark ? 0.22 : 0.16
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-            Circle().fill(Color.cyan.opacity(a)).frame(width: 520, height: 520).blur(radius: 120)
-                .offset(x: 260, y: -220)
-            Circle().fill(Color.indigo.opacity(a)).frame(width: 560, height: 560).blur(radius: 140)
-                .offset(x: -240, y: 260)
-        }
-        .ignoresSafeArea()
-    }
+    var body: some View { DS.page.ignoresSafeArea() }
 }
 
 /// A search field shaped like the other glass controls.
@@ -298,13 +328,14 @@ struct SearchField: View {
             }
         }
         .font(.callout)
-        .padding(.horizontal, 10).padding(.vertical, 5)
+        .padding(.horizontal, 12).padding(.vertical, 6)
         .frame(width: 220)
-        .glass(radius: 8)
+        .liquidGlass(in: Capsule())
     }
 }
 
-/// Segmented control with a sliding glass thumb.
+/// Segmented control: a Liquid Glass track whose selected segment is a tinted glass
+/// thumb that slides between options.
 struct GlassSegmented<T: Hashable>: View {
     let options: [(T, String, String?)]
     @Binding var selection: T
@@ -315,27 +346,26 @@ struct GlassSegmented<T: Hashable>: View {
                 let on = value == selection
                 Button { withAnimation(DS.spring) { selection = value } } label: {
                     HStack(spacing: 5) {
-                        if let icon { Image(systemName: icon) }
+                        if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)) }
                         Text(title)
                     }
-                    .font(.callout.weight(on ? .semibold : .regular))
-                    .foregroundStyle(on ? Color.primary : Color.secondary)
-                    .frame(maxWidth: .infinity).padding(.vertical, 6)
+                    .font(.system(size: 13, weight: on ? .semibold : .medium))
+                    .foregroundStyle(on ? Color.white : Color.secondary)
+                    .frame(maxWidth: .infinity).padding(.vertical, 7)
                     .background {
                         if on {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor))
-                                .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                            Capsule().fill(Color.accentColor.gradient)
+                                .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
                                 .matchedGeometryEffect(id: "thumb", in: ns)
                         }
                     }
-                    .contentShape(Rectangle())
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(3)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .liquidGlass(in: Capsule())
     }
 }
 
@@ -345,15 +375,34 @@ extension View {
         VStack(spacing: 0) { header(); self }
     }
 
-    /// Frosted surface: material, hairline highlight, faint shadow.
+    /// Content surface: a crisp card on the page colour, with a hairline and a soft shadow.
     func glass(radius: CGFloat = DS.radius, highlighted: Bool = false) -> some View {
-        background(.regularMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        background(DS.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(highlighted
-                    ? AnyShapeStyle(Color.accentColor.opacity(0.7))
-                    : AnyShapeStyle(LinearGradient(colors: [.white.opacity(0.45), .white.opacity(0.08)], startPoint: .top, endPoint: .bottom)),
-                    lineWidth: highlighted ? 1.5 : 1))
-            .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
+                .strokeBorder(highlighted ? Color.accentColor.opacity(0.8) : Color.primary.opacity(0.07),
+                              lineWidth: highlighted ? 1.5 : 0.5))
+            .shadow(color: .black.opacity(0.05), radius: 1, y: 0.5)
+            .shadow(color: .black.opacity(0.05), radius: 10, y: 4)
+    }
+
+    /// Liquid Glass for the control layer (macOS 26+), frosted material before that.
+    @ViewBuilder
+    func liquidGlass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
+        if #available(macOS 26, *) {
+            glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+        } else {
+            background(.regularMaterial, in: shape)
+        }
+    }
+
+    /// Glass push button; `prominent` tints it with the accent colour.
+    @ViewBuilder
+    func glassButton(prominent: Bool = false) -> some View {
+        if #available(macOS 26, *) {
+            if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
+        } else {
+            if prominent { buttonStyle(.borderedProminent) } else { buttonStyle(.bordered) }
+        }
     }
 
     /// A glass container for tables, lists and editors, inset by the gutter.
@@ -373,11 +422,11 @@ struct PaneHeader<Trailing: View>: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 28, weight: .bold, design: .rounded))
+                Text(title).font(DS.title)
                 if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
-            trailing
+            HStack(spacing: 8) { trailing }.glassButton()
         }
         .padding(.horizontal, DS.gutter).padding(.top, 14).padding(.bottom, 14)
     }
@@ -428,17 +477,30 @@ struct CardTitle: View {
     var tint: Color = .accentColor
     var body: some View {
         Label {
-            Text(text).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(text).font(DS.caption).foregroundStyle(.secondary)
         } icon: {
-            Image(systemName: icon).font(.caption.weight(.semibold)).foregroundStyle(tint)
+            Image(systemName: icon).font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(tint.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
+        .labelStyle(BadgeLabelStyle())
     }
 }
 
+struct BadgeLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 7) { configuration.icon; configuration.title }
+    }
+}
+
+/// Section heading in the System Settings manner: small, secondary, above a group of cards.
 struct SectionTitle: View {
     let text: String
-    var color: Color = .accentColor
-    var body: some View { Text(text).font(.callout.weight(.semibold)).foregroundStyle(color).padding(.top, 6) }
+    var color: Color = .secondary
+    var body: some View {
+        Text(text).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+            .padding(.top, 10).padding(.leading, 2)
+    }
 }
 
 struct BigNumber: View {
@@ -446,7 +508,7 @@ struct BigNumber: View {
     var unit: String = ""
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
-            Text(value).font(.system(size: 30, weight: .semibold, design: .rounded).monospacedDigit())
+            Text(value).font(DS.figure(30))
                 .contentTransition(.numericText())
                 .animation(.smooth(duration: 0.4), value: value)
             if !unit.isEmpty { Text(unit).font(.callout).foregroundStyle(.secondary) }
@@ -533,10 +595,11 @@ struct ActivityView: View {
             }
             Spacer(minLength: 0)
             HStack {
-                StartStopButton().buttonStyle(.borderedProminent)
+                StartStopButton().glassButton(prominent: true)
                 Button("重启") { core.restart() }.disabled(!core.isActive)
                 Button("重载配置") { core.reload() }.disabled(core.state != .running)
             }
+            .glassButton()
             .controlSize(.small)
         }
         .frame(minHeight: 130, alignment: .topLeading)
@@ -565,7 +628,7 @@ struct ActivityView: View {
 
     private func stat(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(value).font(.system(.title2, design: .rounded).weight(.medium).monospacedDigit())
+            Text(value).font(DS.figure(20))
                 .contentTransition(.numericText())
                 .animation(.smooth, value: value)
             Text(label).font(.caption).foregroundStyle(.secondary)
@@ -812,6 +875,7 @@ struct PolicyView: View {
                     SectionTitle(text: "策略组")
                     Spacer()
                     Button("测试全部") { core.testAll() }
+                        .glassButton()
                         .controlSize(.small)
                         .disabled(core.groups.allSatisfy(\.isSelectable))
                 }
@@ -888,7 +952,7 @@ struct GroupOptions: View {
                 Text(g.group).font(.headline)
                 Text(g.type).font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("测试") { core.test(group: g.group) }.controlSize(.small).disabled(g.isSelectable)
+                Button("测试") { core.test(group: g.group) }.glassButton().controlSize(.small).disabled(g.isSelectable)
             }
             .padding(10)
             Divider()
@@ -1217,7 +1281,7 @@ struct RuleView: View {
             Text("规则测试").font(.headline)
             HStack {
                 TextField("主机或 主机:端口", text: $target).textFieldStyle(.roundedBorder).onSubmit(check)
-                Button("测试", action: check).disabled(target.isEmpty)
+                Button("测试", action: check).glassButton(prominent: true).disabled(target.isEmpty)
             }
             if let result {
                 HStack(spacing: 16) {
@@ -1332,7 +1396,9 @@ struct ConfigView: View {
                 Button("还原") { load() }.disabled(text == saved)
                 Button(busy ? "检查中…" : "检查") { run(save: false) }.disabled(busy)
                 Button("保存并应用") { run(save: true) }.keyboardShortcut("s").disabled(busy || text == saved)
+                    .glassButton(prominent: true)
             }
+            .glassButton()
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .onAppear(perform: load)
