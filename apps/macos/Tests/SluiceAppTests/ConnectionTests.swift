@@ -2,53 +2,59 @@ import XCTest
 @testable import SluiceApp
 
 final class ConnectionTests: XCTestCase {
-    private func decode(_ fields: String = "") throws -> Connection {
-        let json = """
+    /// The API returns a bare array in chronological order, with nullable source and process.
+    private let fixture = """
+        [
             {
-                "id": 1, "time": "12:34:56", "proto": "TCP",
-                "target": "example.com:443", "policy": "Proxy",
-                "rule": "DOMAIN-SUFFIX,example.com", "outbound": "HK"
-                \(fields)
+                "id": 41, "time_ms": 1793286962123, "network": "tcp",
+                "target": "example.com:443", "src": "127.0.0.1:53721",
+                "rule": "DOMAIN-SUFFIX,example.com", "policy": "Proxy",
+                "outbound": "HK", "process": "Safari"
+            },
+            {
+                "id": 42, "time_ms": 1793286963456, "network": "udp",
+                "target": "1.1.1.1:53", "src": null,
+                "rule": "FINAL", "policy": "DIRECT",
+                "outbound": "DIRECT", "process": null
             }
-            """
-        return try JSONDecoder().decode(Connection.self, from: Data(json.utf8))
+        ]
+        """
+
+    private func connections() throws -> [Connection] {
+        try JSONDecoder().decode([Connection].self, from: Data(fixture.utf8))
     }
 
-    func testDecodesConnectionWithProcess() throws {
-        let connection = try decode(#", "process": "Safari", "up": 1536, "down": 1048576, "duration_ms": 42.5, "status": "active""#)
-        XCTAssertEqual(connection.process, "Safari")
-        XCTAssertEqual(connection.up, 1536)
-        XCTAssertEqual(connection.down, 1048576)
-        XCTAssertEqual(connection.durationMs, 42.5)
-        XCTAssertEqual(connection.status, "active")
-        XCTAssertEqual(connection.policyChain, "Proxy → HK")
-    }
+    func testDecodesRealConnectionArray() throws {
+        let records = try connections()
+        XCTAssertEqual(records.map(\.id), [41, 42])
+        let tcp = records[0]
+        XCTAssertEqual(tcp.proto, "TCP")
+        XCTAssertEqual(tcp.target, "example.com:443")
+        XCTAssertEqual(tcp.src, "127.0.0.1:53721")
+        XCTAssertEqual(tcp.process, "Safari")
+        XCTAssertEqual(tcp.rule, "DOMAIN-SUFFIX,example.com")
+        XCTAssertEqual(tcp.policyChain, "Proxy → HK")
 
-    func testDecodesConnectionWithoutProcess() throws {
-        let connection = try decode()
-        XCTAssertNil(connection.process)
-        XCTAssertNil(connection.up)
-        XCTAssertNil(connection.down)
-        XCTAssertNil(connection.durationMs)
-        XCTAssertNil(connection.status)
-        XCTAssertEqual(connection.target, "example.com:443")
-        XCTAssertEqual(connection.rule, "DOMAIN-SUFFIX,example.com")
-    }
+        let clock = DateFormatter()
+        clock.dateFormat = "HH:mm:ss"
+        // 2026-10-29 15:16:02.123 UTC, displayed in the user's local time zone.
+        let date = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-29T15:16:02Z"))
+        XCTAssertEqual(tcp.time, clock.string(from: date))
 
-    func testDecodesNullProcessAndZeroTraffic() throws {
-        let connection = try decode(#", "process": null, "up": 0, "down": 0"#)
-        XCTAssertNil(connection.process)
-        XCTAssertEqual(connection.up, 0)
-        XCTAssertEqual(connection.down, 0)
+        let udp = records[1]
+        XCTAssertEqual(udp.proto, "UDP")
+        XCTAssertNil(udp.src)
+        XCTAssertNil(udp.process)
+        XCTAssertEqual(udp.policyChain, "DIRECT")
     }
 
     func testSearchMatchesProcessAndExistingFields() throws {
-        let connection = try decode(#", "process": "Safari""#)
+        let records = try connections()
         for query in ["", "sAfArI", "EXAMPLE.COM", "proxy", "hk"] {
-            XCTAssertTrue(connection.matches(query), query)
+            XCTAssertTrue(records[0].matches(query), query)
         }
-        XCTAssertFalse(connection.matches("Firefox"))
-        XCTAssertTrue(try decode().matches("example.com"))
-        XCTAssertFalse(try decode().matches("Safari"))
+        XCTAssertFalse(records[0].matches("Firefox"))
+        XCTAssertTrue(records[1].matches("1.1.1.1"))
+        XCTAssertFalse(records[1].matches("Safari"))
     }
 }

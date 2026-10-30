@@ -17,20 +17,39 @@ struct Connection: Decodable, Identifiable {
     let rule: String
     let outbound: String
     let process: String?
-    let up: UInt64?
-    let down: UInt64?
-    let durationMs: Double?
-    let status: String?
+    let src: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, time, proto, target, policy, rule, outbound, process, up, down, status
-        case durationMs = "duration_ms"
+        case id, network, target, src, policy, rule, outbound, process
+        case timeMs = "time_ms"
     }
 
     var policyChain: String { policy == outbound ? policy : "\(policy) → \(outbound)" }
 
     func matches(_ query: String) -> Bool {
         query.isEmpty || [target, policy, outbound, process ?? ""].contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+}
+
+extension Connection {
+    private static let clock: DateFormatter = {
+        let clock = DateFormatter()
+        clock.dateFormat = "HH:mm:ss"
+        return clock
+    }()
+
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        id = try fields.decode(Int.self, forKey: .id)
+        let timeMs = try fields.decode(Int64.self, forKey: .timeMs)
+        time = Self.clock.string(from: Date(timeIntervalSince1970: Double(timeMs) / 1000))
+        proto = try fields.decode(String.self, forKey: .network).uppercased()
+        target = try fields.decode(String.self, forKey: .target)
+        src = try fields.decodeIfPresent(String.self, forKey: .src)
+        policy = try fields.decode(String.self, forKey: .policy)
+        rule = try fields.decode(String.self, forKey: .rule)
+        outbound = try fields.decode(String.self, forKey: .outbound)
+        process = try fields.decodeIfPresent(String.self, forKey: .process)
     }
 }
 
@@ -126,7 +145,8 @@ final class Core: ObservableObject {
     private var pending = ""
     private var nextID = 0
     private let maxLines = 2000
-    private var usesConnectionAPI = false
+    // Prefer the API until the core explicitly reports 404.
+    private var usesConnectionAPI = true
     private var clearedConnectionIDs: Set<Connection.ID> = []
 
     static let defaultConfigPath: String = {
@@ -161,7 +181,7 @@ final class Core: ObservableObject {
         refreshSummary()
     }
 
-    var api: APIClient? { summary.apiPort.map(APIClient.init(port:)) }
+    var api: APIClient? { summary.apiPort.map { APIClient(port: $0) } }
 
     /// The core binary: bundled in the app, or $SLUICE_CORE, or the repo's release build.
     var coreBinary: URL? {
@@ -215,6 +235,8 @@ final class Core: ObservableObject {
             state = .failed("Sluice core binary not found. Build it with `cargo build --release`.")
             return
         }
+
+        usesConnectionAPI = true
 
         if summary.enhancedMode {
             startPrivileged(binary)
@@ -381,7 +403,7 @@ final class Core: ObservableObject {
         var tick = 0
         var last = Date()
         var connectionsSupported = true
-        usesConnectionAPI = false
+        usesConnectionAPI = true
         clearedConnectionIDs = []
         while !Task.isCancelled {
             if let pid = rootPID {
@@ -402,11 +424,15 @@ final class Core: ObservableObject {
                 last = Date()
                 if connectionsSupported {
                     do {
-                        if let fresh = try await api.connections() {
+                        let fresh = try await api.connections()
+                        guard !Task.isCancelled else { return }
+                        if let fresh {
                             usesConnectionAPI = true
                             connections = Array(fresh.filter { !clearedConnectionIDs.contains($0.id) }.suffix(maxLines))
                         } else {
                             connectionsSupported = false
+                            usesConnectionAPI = false
+                            connections = logs.compactMap { connection(from: $0) }
                         }
                     } catch {
                         // Keep the last records on a transient API or decoding failure.
@@ -663,14 +689,17 @@ final class Core: ObservableObject {
         }
         let (time, level, message) = (String(m.1), String(m.2), String(m.3))
         appendLog(time: time, level: level, message: message)
-        if !usesConnectionAPI, let c = message.wholeMatch(of: Core.connPattern) {
-            nextID += 1
-            connections.append(Connection(
-                id: nextID, time: Core.shortTime(time), proto: c.1 == nil ? "TCP" : "UDP",
-                target: String(c.2), policy: String(c.3), rule: String(c.4), outbound: String(c.5),
-                process: nil, up: nil, down: nil, durationMs: nil, status: nil))
+        if !usesConnectionAPI, let log = logs.last, let connection = connection(from: log) {
+            connections.append(connection)
             if connections.count > maxLines { connections.removeFirst(connections.count - maxLines) }
         }
+    }
+
+    private func connection(from log: LogLine) -> Connection? {
+        guard let c = log.message.wholeMatch(of: Core.connPattern) else { return nil }
+        return Connection(id: log.id, time: log.time, proto: c.1 == nil ? "TCP" : "UDP",
+                          target: String(c.2), policy: String(c.3), rule: String(c.4), outbound: String(c.5),
+                          process: nil, src: nil)
     }
 
     private func appendLog(time: String? = nil, level: String, message: String) {

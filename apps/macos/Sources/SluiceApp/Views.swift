@@ -4,7 +4,7 @@ import ServiceManagement
 import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
-    case activity, overview, requests, policy, nodes, rule, logs, profile
+    case activity, overview, requests, policy, nodes, rule, logs, dns, profile
     var id: String { rawValue }
 
     var title: String {
@@ -16,6 +16,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .nodes: "节点"
         case .rule: "规则"
         case .logs: "日志"
+        case .dns: "DNS 缓存"
         case .profile: "配置"
         }
     }
@@ -29,6 +30,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .nodes: "globe.asia.australia"
         case .rule: "line.3.horizontal.decrease.circle"
         case .logs: "doc.text"
+        case .dns: "network"
         case .profile: "curlybraces.square"
         }
     }
@@ -43,6 +45,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .nodes: "配置中的节点和订阅"
         case .rule: "自上而下匹配，命中即停止"
         case .logs: "内核输出"
+        case .dns: "缓存的域名解析与剩余有效期"
         case .profile: ""
         }
     }
@@ -51,11 +54,11 @@ enum Pane: String, CaseIterable, Identifiable {
     static let sections: [(String?, [Pane])] = [
         (nil, [.activity]),
         ("代理", [.requests, .policy, .nodes, .rule]),
-        ("工具", [.logs, .profile]),
+        ("工具", [.logs, .dns, .profile]),
     ]
     /// 设置 sits apart at the bottom of the sidebar, above the status footer.
     static let pinned: Pane = .overview
-    /// Sidebar order, which is also the ⌘1…⌘8 order.
+    /// Sidebar order, which is also the ⌘1…⌘9 order.
     static let ordered: [Pane] = sections.flatMap(\.1) + [pinned]
 }
 
@@ -190,7 +193,7 @@ struct MainView: View {
         HStack(spacing: 0) {
             Sidebar(pane: $pane)
                 .background {
-                    // ⌘1…⌘8 jump to panes in sidebar order.
+                    // ⌘1…⌘9 jump to panes in sidebar order.
                     ForEach(Array(Pane.ordered.enumerated()), id: \.element) { i, p in
                         Button("") { withAnimation(DS.spring) { pane = p } }
                             .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
@@ -219,6 +222,7 @@ struct MainView: View {
                 case .nodes: NodesView(intent: $nodesIntent)
                 case .rule: RuleView(pane: $pane)
                 case .logs: LogsView()
+                case .dns: DNSView()
                 case .profile: ConfigView(draft: configDraft)
                 }
                 }
@@ -1687,12 +1691,8 @@ struct RequestDetail: View {
                                          ("出站", AnyView(OutboundTag(name: c.outbound)))])
                     detailGroup("请求", [("时间", AnyView(Text(c.time).monospacedDigit())),
                                          ("进程", AnyView(Text(c.process ?? "—").textSelection(.enabled))),
+                                         ("来源", AnyView(Text(c.src ?? "—").textSelection(.enabled))),
                                          ("目标", AnyView(Text(c.target).textSelection(.enabled)))])
-                    detailGroup("流量", [("上传", AnyView(Text(c.up.map { formatBytes(Double($0)) } ?? "—").monospacedDigit())),
-                                         ("下载", AnyView(Text(c.down.map { formatBytes(Double($0)) } ?? "—").monospacedDigit()))])
-                    if c.status != nil || c.durationMs != nil {
-                        detailGroup("连接", statusRows(c))
-                    }
                 }
                 .padding(20)
             }
@@ -1701,15 +1701,6 @@ struct RequestDetail: View {
         } else {
             EmptyState(icon: "sidebar.right", title: "未选择请求", detail: "选择左侧的请求查看详情")
         }
-    }
-
-    private func statusRows(_ connection: Connection) -> [(String, AnyView)] {
-        var rows: [(String, AnyView)] = []
-        if let status = connection.status { rows.append(("状态", AnyView(Text(status).textSelection(.enabled)))) }
-        if let duration = connection.durationMs {
-            rows.append(("耗时", AnyView(Text(String(format: "%.0f ms", duration)).monospacedDigit())))
-        }
-        return rows
     }
 
     private func detailGroup(_ title: String, _ rows: [(String, AnyView)]) -> some View {

@@ -34,6 +34,27 @@ struct Traffic: Decodable {
     let active: Int
 }
 
+struct DNSCache: Decodable {
+    let entries: [DNSCacheEntry]
+}
+
+struct DNSCacheEntry: Decodable, Identifiable {
+    let name: String
+    let type: String
+    let ttl: Int
+    let answers: [String]
+
+    var id: String { "\(type):\(name)" }
+
+    func matches(_ query: String) -> Bool {
+        query.isEmpty || ([name, type] + answers).contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+}
+
+struct DNSFlushResult: Decodable {
+    let flushed: Int
+}
+
 struct APIError: LocalizedError {
     let message: String
     var status: Int? = nil
@@ -43,6 +64,12 @@ struct APIError: LocalizedError {
 /// Client for the core's control API (see src/api.rs).
 struct APIClient {
     let port: Int
+    let session: URLSession
+
+    init(port: Int, session: URLSession = .shared) {
+        self.port = port
+        self.session = session
+    }
 
     private func url(_ path: String) -> URL {
         URL(string: "http://127.0.0.1:\(port)\(path)")!
@@ -51,7 +78,7 @@ struct APIClient {
     private func request(_ method: String, _ path: String) async throws -> Data {
         var req = URLRequest(url: url(path), timeoutInterval: 15)
         req.httpMethod = method
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
             let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -93,9 +120,17 @@ struct APIClient {
     func connections() async throws -> [Connection]? {
         do {
             return try JSONDecoder().decode([Connection].self, from: await request("GET", "/v1/connections"))
-        } catch let error as APIError where error.status == 404 || error.status == 405 {
+        } catch let error as APIError where error.status == 404 {
             return nil
         }
+    }
+
+    func dns() async throws -> DNSCache {
+        try JSONDecoder().decode(DNSCache.self, from: await request("GET", "/v1/dns"))
+    }
+
+    func flushDNS() async throws -> DNSFlushResult {
+        try JSONDecoder().decode(DNSFlushResult.self, from: await request("POST", "/v1/dns/flush"))
     }
 
     func reload() async throws {
