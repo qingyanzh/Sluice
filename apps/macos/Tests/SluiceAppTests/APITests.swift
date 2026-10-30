@@ -70,6 +70,27 @@ final class APITests: XCTestCase {
             XCTFail("Malformed stats must not enable fallback")
         } catch is DecodingError {}
     }
+
+    func testDiagnosticsExportUsesGETAndEscapesOutputPath() async throws {
+        let session = session()
+        defer { session.invalidateAndCancel() }
+        let output = URL(fileURLWithPath: "/tmp/Sluice 诊断 &?#.zip")
+        let file = try await APIClient(port: 200, session: session).exportDiagnostics(to: output)
+        XCTAssertEqual(file.path, output.path)
+        do {
+            _ = try await APIClient(port: 500, session: session).exportDiagnostics(to: output)
+            XCTFail("Server failures must reach the export UI")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 500)
+            XCTAssertEqual(error.message, "export failed")
+        }
+        do {
+            _ = try await APIClient(port: 201, session: session).exportDiagnostics(to: output)
+            XCTFail("A relative path cannot be revealed in Finder")
+        } catch let error as APIError {
+            XCTAssertTrue(error.message.contains("无效"))
+        }
+    }
 }
 
 /// Port selects the HTTP status; all requests are intercepted without opening sockets.
@@ -92,6 +113,12 @@ private final class ControlAPIStub: URLProtocol {
             body = status == 200
                 ? #"{"up":123,"down":456,"active":2,"policies":[],"nodes":[],"history":[]}"#
                 : "{}"
+        case ("GET", "/v1/diag"):
+            let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "path" }?.value
+            XCTAssertEqual(path, "/tmp/Sluice 诊断 &?#.zip")
+            XCTAssertEqual(request.timeoutInterval, 180)
+            body = status == 200 ? #"{"path":"/tmp/Sluice 诊断 &?#.zip"}"#
+                : status == 201 ? #"{"path":"relative.zip"}"# : #"{"error":"export failed"}"#
         default:
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return

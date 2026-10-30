@@ -39,6 +39,7 @@ func menuBarSpeed(_ bytesPerSecond: Double) -> String {
 /// The status bar menu keeps the frequent controls available without opening a window.
 struct MenuBarContent: View {
     @EnvironmentObject private var core: Core
+    @ObservedObject private var diagnostics = DiagnosticsExporter.shared
     @Environment(\.openWindow) private var openWindow
     @AppStorage("menuBarDisplayMode") private var displayMode = MenuBarDisplayMode.iconAndSpeed
     @AppStorage("menuBarShowOutboundMode") private var showOutboundMode = true
@@ -144,8 +145,18 @@ struct MenuBarContent: View {
             .keyboardShortcut("0")
         Button("查看请求", systemImage: "arrow.up.arrow.down.circle") { showWindow(.requests) }
         Button("编辑当前配置", systemImage: "curlybraces.square") { showWindow(.profile) }
-        Button("导出诊断信息…", systemImage: "stethoscope") { core.exportDiagnostics() }
-            .disabled(core.exportingDiagnostics)
+        Button("导出诊断信息…", systemImage: "stethoscope") {
+            if core.lastActionError?.hasPrefix("导出诊断信息失败：") == true { core.lastActionError = nil }
+            Task {
+                await diagnostics.export(api: core.state == .running ? core.api : nil,
+                                         binary: core.coreBinary, configPath: core.configPath, reveal: true)
+                if case .failed(let message) = diagnostics.state {
+                    core.lastActionError = "导出诊断信息失败：\(message)"
+                    showWindow(.overview)
+                }
+            }
+        }
+        .disabled(diagnostics.state.isExporting)
 
         Divider()
         CheckForUpdatesButton()
