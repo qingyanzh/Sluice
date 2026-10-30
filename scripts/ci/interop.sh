@@ -1,6 +1,6 @@
 #!/bin/bash
 # Interop test against real servers on a proxy-free machine: Shadowsocks (ssserver), VMess /
-# VLESS / Trojan incl. WebSocket (Xray) and Hysteria2 (official server). For each node it checks
+# VLESS / Trojan incl. WebSocket, gRPC, XHTTP (Xray) and Hysteria2 (official server). For each node it checks
 # HTTPS, a 10 MB download, UDP DNS (public targets) and full-cone UDP (two local ports on one
 # association) through Sluice's SOCKS5 inbound.
 # Needs: ssserver, xray, hysteria on PATH and a built ./target/release/sluice.
@@ -21,6 +21,7 @@ wrong_pub=$(xray x25519 | awk -F': ' '/Public ?[Kk]ey/{print $2}')
 reality="\"security\":\"reality\",\"realitySettings\":{\"dest\":\"www.apple.com:443\",\"serverNames\":[\"www.apple.com\"],\"privateKey\":\"$reality_priv\",\"shortIds\":[\"0123abcd\"]}"
 ws='"network":"ws","wsSettings":{"path":"/ray"}'
 grpc='"network":"grpc","grpcSettings":{"serviceName":"gun"}'
+xhttp='"network":"xhttp","xhttpSettings":{"path":"/xh"}'
 # Xray 26.10+ blocks private destinations by default; the full-cone check uses loopback.
 cat > "$work/xray.json" <<EOF
 {"log":{"loglevel":"warning"},
@@ -34,7 +35,9 @@ cat > "$work/xray.json" <<EOF
  {"listen":"127.0.0.1","port":19007,"protocol":"vmess","settings":{"clients":[{"id":"$uuid"}]},"streamSettings":{$grpc}},
  {"listen":"127.0.0.1","port":19008,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{"network":"tcp",$reality}},
  {"listen":"127.0.0.1","port":19009,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp",$reality}},
- {"listen":"127.0.0.1","port":19010,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp",$tls}}],
+ {"listen":"127.0.0.1","port":19010,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp",$tls}},
+ {"listen":"127.0.0.1","port":19011,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$xhttp,$tls}},
+ {"listen":"127.0.0.1","port":19012,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"},"streamSettings":{$xhttp,$reality}}],
 "outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow","ip":["127.0.0.0/8"]}]}}]}
 EOF
 cat > "$work/hy.yaml" <<EOF
@@ -77,10 +80,13 @@ VMess-gRPC = vmess, 127.0.0.1, 19007, username=$uuid, grpc=true, grpc-service-na
 VLESS-REALITY = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.apple.com, reality-public-key=$reality_pub, reality-short-id=0123abcd
 VLESS-REALITY-Vision = vless, 127.0.0.1, 19009, uuid=$uuid, sni=www.apple.com, reality-public-key=$reality_pub, reality-short-id=0123abcd, flow=xtls-rprx-vision
 VLESS-TLS-Vision = vless, 127.0.0.1, 19010, uuid=$uuid, tls=true, sni=test.local, skip-cert-verify=true, flow=xtls-rprx-vision
+VLESS-XHTTP-TLS = vless, 127.0.0.1, 19011, uuid=$uuid, tls=true, sni=test.local, skip-cert-verify=true, xhttp=true, xhttp-path=/xh
+VLESS-XHTTP-StreamUp = vless, 127.0.0.1, 19011, uuid=$uuid, tls=true, sni=test.local, skip-cert-verify=true, xhttp=true, xhttp-path=/xh, xhttp-mode=stream-up
+VLESS-XHTTP-REALITY = vless, 127.0.0.1, 19012, uuid=$uuid, sni=www.apple.com, reality-public-key=$reality_pub, reality-short-id=0123abcd, xhttp=true, xhttp-path=/xh
 REALITY-WrongKey = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.apple.com, reality-public-key=$wrong_pub, reality-short-id=0123abcd
 Hy2-Obfs = hysteria2, 127.0.0.1, 19444, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret
 [Proxy Group]
-P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, VLESS-REALITY, VLESS-REALITY-Vision, VLESS-TLS-Vision, REALITY-WrongKey, Hysteria2, Hy2-Obfs
+P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, VLESS-REALITY, VLESS-REALITY-Vision, VLESS-TLS-Vision, VLESS-XHTTP-TLS, VLESS-XHTTP-StreamUp, VLESS-XHTTP-REALITY, REALITY-WrongKey, Hysteria2, Hy2-Obfs
 [Rule]
 FINAL,P
 EOF
@@ -98,7 +104,7 @@ cat > "$work/xray-client.json" <<EOF
 EOF
 xray run -c "$work/xray-client.json" > "$work/xray-client.log" 2>&1 &
 sleep 2
-RUST_LOG=sluice=info,sluice::vision=debug ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
+RUST_LOG=sluice=info,sluice::vision=debug,sluice::transport=debug ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
 for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:16170/v1/policies && break; sleep 0.5; done
 
 # Xray's own REALITY client and Sluice against the same server: Sluice must do as well
@@ -119,7 +125,7 @@ echo "REALITY control: xray $xray_ok/20, sluice $sluice_ok/20 $([ $control_fail 
 
 fails=$control_fail
 printf '%-20s %-6s %-12s %s / %s\n' NODE HTTPS DOWNLOAD UDP CONE
-for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision Hysteria2 Hy2-Obfs; do
+for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision VLESS-XHTTP-TLS VLESS-XHTTP-StreamUp VLESS-XHTTP-REALITY Hysteria2 Hy2-Obfs; do
     curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
     https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
     size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \

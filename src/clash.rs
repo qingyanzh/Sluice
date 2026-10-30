@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_yaml::Value;
 
 use crate::config::ProxyDef;
-use crate::transport::{Layer, WsOpts};
+use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
 /// Whether `text` looks like a Clash config (a top-level `proxies:` key).
 pub fn looks_like(text: &str) -> bool {
@@ -29,7 +29,7 @@ fn need(v: &Value, key: &str) -> Result<String> {
 }
 
 /// `network: ws` (`ws-opts: {path, headers: {Host}}`) or `network: grpc`
-/// (`grpc-opts: {grpc-service-name}`).
+/// (`grpc-opts: {grpc-service-name}`) or `network: xhttp` (`xhttp-opts: {path, host, mode}`).
 fn transport(v: &Value) -> Result<Option<Layer>> {
     match s(v, "network").as_deref() {
         None | Some("tcp") => Ok(None),
@@ -42,6 +42,16 @@ fn transport(v: &Value) -> Result<Option<Layer>> {
         Some("grpc") => Ok(Some(Layer::Grpc {
             service: v.get("grpc-opts").and_then(|o| s(o, "grpc-service-name")).unwrap_or_default(),
         })),
+        Some("xhttp") => {
+            let opts = v.get("xhttp-opts");
+            let get = |k: &str| opts.and_then(|o| s(o, k));
+            let mut x = XhttpOpts { path: get("path").unwrap_or_else(|| "/".into()), host: get("host"), ..Default::default() };
+            x.mode = XhttpMode::parse(&get("mode").unwrap_or_default())?;
+            if let Some(p) = get("x-padding-bytes") {
+                x.padding = XhttpOpts::parse_padding(&p)?;
+            }
+            Ok(Some(Layer::Xhttp(x)))
+        }
         Some(other) => bail!("transport {other:?} not supported yet"),
     }
 }
@@ -186,4 +196,14 @@ proxy-groups:
         assert!(matches!(&nodes[3].1, ProxyDef::Trojan { skip_cert_verify: true, .. }));
         assert!(matches!(&nodes[4].1, ProxyDef::Hysteria2 { port: 8443, .. }));
     }
+
+    #[test]
+    fn xhttp() {
+        let yaml = "proxies:\n  - {name: XH, type: vless, server: x.example, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, network: xhttp, xhttp-opts: {path: /xh, host: cdn.example, mode: packet-up}}\n";
+        let (nodes, skipped) = parse(yaml).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(matches!(&nodes[0].1, ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. }
+            if x.path == "/xh" && x.host.as_deref() == Some("cdn.example") && x.mode == XhttpMode::PacketUp));
+    }
+
 }

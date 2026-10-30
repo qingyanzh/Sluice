@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::rule::Rule;
-use crate::transport::{Layer, WsOpts};
+use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
 #[derive(Debug, Default)]
 pub struct General {
@@ -66,6 +66,17 @@ impl ProxyDef {
             if let Some(Layer::Grpc { service }) = layer {
                 parts.push("grpc=true".into());
                 parts.push(format!("grpc-service-name={service}"));
+            }
+            if let Some(Layer::Xhttp(x)) = layer {
+                parts.push("xhttp=true".into());
+                parts.push(format!("xhttp-path={}", x.path));
+                parts.extend(x.host.iter().map(|h| format!("xhttp-host={h}")));
+                if x.mode != XhttpMode::Auto {
+                    parts.push(format!("xhttp-mode={}", x.mode.as_str()));
+                }
+                if x.padding != XhttpOpts::default().padding {
+                    parts.push(format!("xhttp-padding-bytes={}-{}", x.padding.0, x.padding.1));
+                }
             }
             if let Some(Layer::Ws(w)) = layer {
                 parts.push("ws=true".into());
@@ -203,6 +214,13 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
     let mut take = |k: &str| params.remove(k);
     let layer = if matches!(take("grpc").as_deref(), Some("true" | "1")) {
         Some(Layer::Grpc { service: take("grpc-service-name").ok_or_else(|| anyhow!("grpc=true needs grpc-service-name"))? })
+    } else if matches!(take("xhttp").as_deref(), Some("true" | "1")) {
+        let mut x = XhttpOpts { path: take("xhttp-path").unwrap_or_else(|| "/".into()), host: take("xhttp-host"), ..Default::default() };
+        x.mode = XhttpMode::parse(&take("xhttp-mode").unwrap_or_default())?;
+        if let Some(p) = take("xhttp-padding-bytes") {
+            x.padding = XhttpOpts::parse_padding(&p)?;
+        }
+        Some(Layer::Xhttp(x))
     } else {
         matches!(take("ws").as_deref(), Some("true" | "1"))
             .then(|| Layer::Ws(WsOpts::from_params(take("ws-path"), take("ws-headers"))))
@@ -371,6 +389,16 @@ mod tests {
         assert_eq!(cfg.groups[1].kind, GroupKind::UrlTest { tolerance_ms: 50 });
         assert_eq!(cfg.groups[1].interval_secs, 300);
         assert!(cfg.rules.len() >= 5);
+    }
+
+    #[test]
+    fn xhttp_roundtrip() {
+        let line = "X = vless, v.example, 443, uuid=u, tls=true, xhttp=true, xhttp-path=/xh, xhttp-host=cdn.example, xhttp-mode=stream-up, xhttp-padding-bytes=10-20";
+        let (name, def) = parse_proxy(line).unwrap();
+        let expected = XhttpOpts { path: "/xh".into(), host: Some("cdn.example".into()), mode: XhttpMode::StreamUp, padding: (10, 20) };
+        assert!(matches!(&def, ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. } if *x == expected));
+        let again = parse_proxy(&def.to_line(&name)).unwrap().1;
+        assert!(matches!(&again, ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. } if *x == expected));
     }
 
     #[test]

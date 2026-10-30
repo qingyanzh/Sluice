@@ -12,7 +12,7 @@ use log::{info, warn};
 use crate::api::percent_decode;
 use crate::config::{parse_proxy, Config, ProxyDef};
 use crate::ruleset::fetch;
-use crate::transport::{Layer, WsOpts};
+use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
 fn b64(s: &str) -> Option<Vec<u8>> {
     use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -78,6 +78,25 @@ fn layer_from_query(q: &HashMap<String, String>) -> Result<Option<Layer>> {
         Some("grpc") => Ok(Some(Layer::Grpc {
             service: q.get("serviceName").or(q.get("servicename")).cloned().unwrap_or_default(),
         })),
+        Some("xhttp" | "splithttp") => {
+            let mut x = XhttpOpts { host: q.get("host").cloned().filter(|h| !h.is_empty()), ..Default::default() };
+            x.path = q.get("path").cloned().unwrap_or(x.path);
+            x.mode = XhttpMode::parse(q.get("mode").map_or("", String::as_str))?;
+            // `extra` is the JSON of further XHTTP settings; only the padding range matters here.
+            let extra: Option<serde_json::Value> = q.get("extra").and_then(|e| serde_json::from_str(e).ok());
+            match extra.as_ref().map(|e| &e["xPaddingBytes"]) {
+                Some(serde_json::Value::String(p)) => x.padding = XhttpOpts::parse_padding(p)?,
+                Some(serde_json::Value::Number(n)) => x.padding = XhttpOpts::parse_padding(&n.to_string())?,
+                Some(serde_json::Value::Object(o)) => {
+                    let get = |k: &str| o.get(k).and_then(|v| v.as_u64()).map(|v| v as u32);
+                    if let (Some(a), Some(b)) = (get("from"), get("to")) {
+                        x.padding = (a, b);
+                    }
+                }
+                _ => {}
+            }
+            Ok(Some(Layer::Xhttp(x)))
+        }
         Some(other) => bail!("transport {other:?} not supported yet"),
     }
 }
@@ -112,6 +131,10 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
         None | Some("tcp") => None,
         Some("ws") => Some(Layer::Ws(WsOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), headers: Vec::new() })),
         Some("grpc") => Some(Layer::Grpc { service: field("path").unwrap_or_default() }),
+        Some("xhttp" | "splithttp") => {
+            let mode = XhttpMode::parse(field("type").as_deref().filter(|t| *t != "none").unwrap_or(""))?;
+            Some(Layer::Xhttp(XhttpOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), mode, ..Default::default() }))
+        }
         Some(other) => bail!("transport {other:?} not supported yet"),
     };
     let server = field("add").ok_or_else(|| anyhow!("vmess link without address"))?;
@@ -375,4 +398,18 @@ mod tests {
         assert!(matches!(&nodes[4].1, ProxyDef::Trojan { skip_cert_verify: true, .. }));
         assert!(matches!(&nodes[5].1, ProxyDef::Hysteria2 { port: 8443, skip_cert_verify: true, .. }));
     }
+
+    #[test]
+    fn xhttp_link() {
+        let link = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@x.example:443?security=tls&sni=x.example&type=xhttp&path=%2Fxh&host=cdn.example&mode=stream-up&extra=%7B%22xPaddingBytes%22%3A%2210-20%22%7D#XH";
+        let (nodes, skipped) = parse(link);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        match &nodes[0].1 {
+            ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. } => {
+                assert_eq!((x.path.as_str(), x.host.as_deref(), x.mode, x.padding), ("/xh", Some("cdn.example"), XhttpMode::StreamUp, (10, 20)))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
 }
