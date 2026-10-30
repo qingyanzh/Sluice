@@ -27,13 +27,21 @@ func draw(_ s: CGFloat) -> NSImage {
         ctx.restoreGState()
 
         // The mark: three staggered streams, flowing left to right. Two are graphite;
-        // the lowest, the one in motion, is the accent.
+        // they deepen from graphite through slate into the accent.
         func capsule(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat) -> CGPath {
             CGPath(roundedRect: CGRect(x: x * u, y: y * u, width: w * u, height: 104 * u),
                    cornerWidth: 52 * u, cornerHeight: 52 * u, transform: nil)
         }
-        let streams = [(capsule(240, 600, 430), false), (capsule(290, 460, 494), false), (capsule(354, 320, 430), true)]
-        for (path, accent) in streams {
+        // Same length, same vertical gap (140) and the same horizontal step (60) between streams.
+        let streams = [(capsule(242, 600, 420), 0), (capsule(302, 460, 420), 1), (capsule(362, 320, 420), 2)]
+        // Three tones, deepening into the accent as the stream moves: graphite, slate, blue.
+        let tones: [[NSColor]] = [
+            [rgb(0.11, 0.12, 0.14), rgb(0.26, 0.27, 0.30)],
+            [rgb(0.36, 0.45, 0.60), rgb(0.52, 0.62, 0.76)],
+            [rgb(0.10, 0.40, 1.0), rgb(0.33, 0.68, 1.0)],
+        ]
+        for (path, i) in streams {
+            let accent = i == 2
             ctx.saveGState()
             ctx.setShadow(offset: CGSize(width: 0, height: -8 * u), blur: 20 * u,
                           color: accent ? rgb(0.10, 0.40, 1, 0.35).cgColor : NSColor.black.withAlphaComponent(0.14).cgColor)
@@ -41,7 +49,7 @@ func draw(_ s: CGFloat) -> NSImage {
             ctx.restoreGState()
             ctx.saveGState()
             ctx.addPath(path); ctx.clip()
-            let colors = accent ? [rgb(0.10, 0.40, 1.0), rgb(0.33, 0.68, 1.0)] : [rgb(0.11, 0.12, 0.14), rgb(0.26, 0.27, 0.30)]
+            let colors = tones[i]
             let box = path.boundingBox
             ctx.drawLinearGradient(gradient(colors, [0, 1]), start: CGPoint(x: box.minX, y: box.minY),
                                    end: CGPoint(x: box.maxX, y: box.maxY), options: [])

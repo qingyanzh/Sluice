@@ -48,9 +48,10 @@ these tokens and never set their own values.
 
 ## Icon
 
-The app icon is three staggered capsule streams on an off-white squircle. They
-flow left to right. The upper two are graphite, and the lowest, the stream in
-motion, is the accent blue. It uses the same vocabulary as the interface:
+The app icon is three capsule streams on an off-white squircle. They have the
+same length and are staggered at equal steps, flowing left to right. Their
+colour deepens from graphite through slate into the accent blue, the stream
+in motion. It uses the same vocabulary as the interface:
 capsule shapes, a calm light surface, and one accent that means "active".
 Each stream has a soft shadow and a faint top highlight.
 
