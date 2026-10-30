@@ -51,8 +51,12 @@ enum Pane: String, CaseIterable, Identifiable {
     static let sections: [(String?, [Pane])] = [
         (nil, [.activity]),
         ("代理", [.requests, .policy, .nodes, .rule]),
-        ("工具", [.logs, .profile, .overview]),
+        ("工具", [.logs, .profile]),
     ]
+    /// 设置 sits apart at the bottom of the sidebar, above the status footer.
+    static let pinned: Pane = .overview
+    /// Sidebar order, which is also the ⌘1…⌘8 order.
+    static let ordered: [Pane] = sections.flatMap(\.1) + [pinned]
 }
 
 /// Outbound modes, in the order Surge shows them.
@@ -105,6 +109,7 @@ struct Sidebar: View {
                 .padding(.horizontal, 12).padding(.top, 52).padding(.bottom, 12)
             }
             .scrollIndicators(.never)
+            row(Pane.pinned).padding(.horizontal, 12)
             StatusFooter().padding(12)
         }
         .frame(width: 200)
@@ -137,7 +142,7 @@ struct Sidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
-        .help("\(p.title)  ⌘\((Pane.sections.flatMap(\.1).firstIndex(of: p) ?? 0) + 1)")
+        .help("\(p.title)  ⌘\((Pane.ordered.firstIndex(of: p) ?? 0) + 1)")
         .onHover { inside in withAnimation(.easeOut(duration: 0.15)) { hovered = inside ? p : (hovered == p ? nil : hovered) } }
     }
 }
@@ -182,7 +187,7 @@ struct MainView: View {
             Sidebar(pane: $pane)
                 .background {
                     // ⌘1…⌘8 jump to panes in sidebar order.
-                    ForEach(Array(Pane.sections.flatMap(\.1).enumerated()), id: \.element) { i, p in
+                    ForEach(Array(Pane.ordered.enumerated()), id: \.element) { i, p in
                         Button("") { withAnimation(DS.spring) { pane = p } }
                             .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
                             .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
@@ -191,6 +196,15 @@ struct MainView: View {
             VStack(spacing: 0) {
                 if let err = core.lastActionError {
                     ErrorBanner(message: err) { core.lastActionError = nil }
+                }
+                if core.systemProxyOn && core.state != .running && core.state != .starting {
+                    // Inconsistent and harmful: the system sends traffic to a port nobody listens on.
+                    Notice(tone: DS.warn, icon: "exclamationmark.triangle.fill", title: "系统代理已开启，但内核未运行",
+                           detail: "此时经过系统代理的网络请求都会失败。启动 Sluice，或关闭系统代理恢复直接上网。") {
+                        Button("关闭系统代理") { core.setSystemProxy(false) }.glassButton()
+                        Button("启动 Sluice") { core.start() }.glassButton(prominent: true)
+                    }
+                    .padding(.horizontal, DS.gutter).padding(.top, 8)
                 }
                 Group {
                 switch pane ?? .activity {
@@ -205,6 +219,8 @@ struct MainView: View {
                 }
                 }
                 .id(pane)
+                .frame(maxWidth: DS.maxContentWidth)
+                .frame(maxWidth: .infinity)
                 .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 8)), removal: .opacity))
             }
             .animation(.smooth(duration: 0.25), value: pane)
@@ -238,14 +254,7 @@ struct MainView: View {
 
 struct StatusDot: View {
     let state: Core.State
-    var color: Color {
-        switch state {
-        case .running: .green
-        case .starting: .orange
-        case .stopped: .secondary
-        case .failed: .red
-        }
-    }
+    var color: Color { state.tone }
     var body: some View {
         Circle().fill(color).frame(width: 8, height: 8)
             .background {
@@ -260,18 +269,23 @@ struct StatusDot: View {
     }
 }
 
+extension Core.State {
+    /// The state colour grammar applied to the core: green running, orange starting, grey stopped, red failed.
+    var tone: Color {
+        switch self {
+        case .running: DS.ok
+        case .starting: DS.warn
+        case .stopped: DS.off
+        case .failed: DS.fail
+        }
+    }
+}
+
 /// The hero status mark: a soft tinted disc holding a symbol, with a breathing
 /// ring while running.
 struct StatusOrb: View {
     let state: Core.State
-    private var color: Color {
-        switch state {
-        case .running: .green
-        case .starting: .orange
-        case .stopped: .secondary
-        case .failed: .red
-        }
-    }
+    private var color: Color { state.tone }
     private var symbol: String {
         switch state {
         case .running: "checkmark"
@@ -306,10 +320,7 @@ struct IconTile: View {
     var tone: Color = DS.accent
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-            .fill(on ? AnyShapeStyle(tone.gradient) : AnyShapeStyle(Color.primary.opacity(0.075)))
-            .overlay(RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-                .strokeBorder(Color.white.opacity(on ? 0.25 : 0), lineWidth: 0.5))
-            .shadow(color: tone.opacity(on ? 0.30 : 0), radius: 3, y: 1)
+            .fill(on ? AnyShapeStyle(tone) : AnyShapeStyle(Color.primary.opacity(0.075)))
             .overlay {
                 Image(systemName: symbol)
                     .symbolVariant(on ? .fill : .none)
@@ -349,9 +360,8 @@ struct TogglePill: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                let dot: Color = warning ? .orange : on ? .green : Color.secondary.opacity(0.5)
+                let dot: Color = warning ? DS.warn : on ? DS.ok : DS.off.opacity(0.6)
                 Circle().fill(dot).frame(width: 7, height: 7)
-                    .shadow(color: on ? dot.opacity(0.6) : .clear, radius: 3)
                     .scaleEffect(on ? 1 : 0.8)
                     .animation(DS.spring, value: on)
                 Text(title).font(DS.small.weight(on ? .semibold : .medium))
@@ -392,7 +402,7 @@ struct StatusFooter: View {
             }
             Spacer()
             StartStopButton(compact: true)
-                .buttonStyle(RoundIconStyle(prominent: !core.isActive))
+                .buttonStyle(RoundIconStyle())
         }
         .padding(8)
         .liquidGlass(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -413,6 +423,12 @@ struct StartStopButton: View {
                 .help("启动 Sluice")
         }
     }
+}
+
+struct AnyButtonStyle: ButtonStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: ButtonStyle>(_ style: S) { make = { AnyView(style.makeBody(configuration: $0)) } }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
 struct AnyLabelStyle: LabelStyle {
@@ -480,8 +496,22 @@ enum DS {
             : NSColor(red: 0.24, green: 0.36, blue: 0.98, alpha: 1)
     })
     /// Text inks, darker than the system secondary/tertiary so supporting text stays legible.
-    static let ink2 = Color.primary.opacity(0.66)
-    static let ink3 = Color.primary.opacity(0.46)
+    /// ink2 is helper text; ink3 is the faintest text allowed (placeholders, hints).
+    static let ink2 = Color.primary.opacity(0.72)
+    static let ink3 = Color.primary.opacity(0.56)
+    /// Border of secondary buttons and fields: visible enough to read as clickable.
+    static let stroke = Color.primary.opacity(0.16)
+
+    /// State colour grammar. Blue (accent) is action, selection, current page;
+    /// green is confirmed working; orange is attention or an inconsistent state;
+    /// red is failure; grey is off, unconfigured or no data. Nothing else carries colour.
+    static let ok = Color.green
+    static let warn = Color.orange
+    static let fail = Color.red
+    static let off = Color.secondary
+
+    /// Content never stretches past this width on wide windows.
+    static let maxContentWidth: CGFloat = 1180
 
     static let page = Color(nsColor: NSColor(name: nil) { a in
         a.bestMatch(from: [.darkAqua]) == .darkAqua
@@ -577,10 +607,9 @@ extension View {
     func glass(radius: CGFloat = DS.radius, highlighted: Bool = false) -> some View {
         background(DS.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(highlighted ? DS.accent.opacity(0.8) : Color.primary.opacity(0.09),
+                .strokeBorder(highlighted ? DS.accent.opacity(0.8) : Color.primary.opacity(0.10),
                               lineWidth: highlighted ? 1.5 : 0.5))
-            .shadow(color: .black.opacity(0.05), radius: 1, y: 0.5)
-            .shadow(color: .black.opacity(0.06), radius: 12, y: 5)
+            .shadow(color: .black.opacity(0.04), radius: 2, y: 1)
     }
 
     /// Liquid Glass for the control layer (macOS 26+), frosted material before that.
@@ -597,9 +626,9 @@ extension View {
     @ViewBuilder
     func glassButton(prominent: Bool = false) -> some View {
         if #available(macOS 26, *) {
-            if prominent { buttonStyle(PrimaryCapsuleStyle()) } else { buttonStyle(.glass).buttonBorderShape(.capsule) }
+            if prominent { buttonStyle(PrimaryCapsuleStyle()) } else { buttonStyle(SecondaryCapsuleStyle()) }
         } else {
-            if prominent { buttonStyle(PrimaryCapsuleStyle()) } else { buttonStyle(.bordered).buttonBorderShape(.capsule) }
+            if prominent { buttonStyle(PrimaryCapsuleStyle()) } else { buttonStyle(SecondaryCapsuleStyle()) }
         }
     }
 
@@ -632,8 +661,7 @@ struct RoundIconStyle: ButtonStyle {
             .font(.system(size: 10, weight: .bold))
             .foregroundStyle(prominent ? Color.white : Color.primary.opacity(0.75))
             .frame(width: 26, height: 26)
-            .background(prominent ? AnyShapeStyle(DS.accent.gradient) : AnyShapeStyle(Color.primary.opacity(hovering ? 0.12 : 0.07)), in: Circle())
-            .shadow(color: prominent ? DS.accent.opacity(0.35) : .clear, radius: 4, y: 1)
+            .background(prominent ? AnyShapeStyle(DS.accent.gradient) : AnyShapeStyle(Color.primary.opacity(hovering ? 0.13 : 0.08)), in: Circle())
             .scaleEffect(configuration.isPressed ? 0.9 : hovering ? 1.06 : 1)
             .animation(DS.spring, value: configuration.isPressed)
             .animation(DS.spring, value: hovering)
@@ -653,18 +681,42 @@ struct PressableStyle: ButtonStyle {
 
 /// The one filled button: a soft accent capsule with white text.
 struct PrimaryCapsuleStyle: ButtonStyle {
+    /// The page's main action (start/stop on the home page) is one size up.
+    var large = false
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(DS.small.weight(.medium))
+            .font(large ? DS.label.weight(.semibold) : DS.small.weight(.medium))
             .lineLimit(1).fixedSize()
             .foregroundStyle(.white)
-            .padding(.horizontal, 12).padding(.vertical, 4)
+            .padding(.horizontal, large ? 18 : 12).padding(.vertical, 4)
+            .frame(minHeight: large ? 32 : 24)
             .background(DS.accent.opacity(enabled ? 1 : 0.4), in: Capsule())
-            .shadow(color: DS.accent.opacity(0.25), radius: 4, y: 1)
             .opacity(configuration.isPressed ? 0.8 : 1)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(DS.spring, value: configuration.isPressed)
+    }
+}
+
+/// The secondary button: surface fill, a visible border and full-strength text, so it
+/// reads as clickable next to helper text. Disabled is clearly faded (say why in `.help`).
+struct SecondaryCapsuleStyle: ButtonStyle {
+    var large = false
+    @Environment(\.isEnabled) private var enabled
+    @State private var hovering = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(large ? DS.label.weight(.semibold) : DS.small.weight(.medium))
+            .lineLimit(1).fixedSize()
+            .foregroundStyle(Color.primary)
+            .padding(.horizontal, large ? 18 : 12).padding(.vertical, 4)
+            .frame(minHeight: large ? 32 : 24)
+            .background(hovering && enabled ? Color.primary.opacity(0.06) : DS.surface.opacity(0.9), in: Capsule())
+            .overlay(Capsule().strokeBorder(DS.stroke, lineWidth: 1))
+            .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(DS.spring, value: configuration.isPressed)
+            .onHover { hovering = $0 }
     }
 }
 
@@ -737,8 +789,7 @@ struct HoverLift: ViewModifier {
     @State private var hovering = false
     func body(content: Content) -> some View {
         content
-            .scaleEffect(hovering ? 1.02 : 1)
-            .shadow(color: .black.opacity(hovering ? 0.10 : 0), radius: 10, y: 4)
+            .scaleEffect(hovering ? 1.01 : 1)
             .animation(.spring(response: 0.3, dampingFraction: 0.75), value: hovering)
             .onHover { hovering = $0 }
     }
@@ -817,6 +868,9 @@ struct ActivityView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.gap) {
                 hero.entrance(0)
+                SectionTitle(text: "出站").entrance(1)
+                routeCard.entrance(1)
+                SectionTitle(text: "流量与请求").entrance(2)
                 HStack(alignment: .top, spacing: DS.gap) {
                     TrafficCard(up: core.upRate, down: core.downRate, history: core.rateHistory, running: core.state == .running)
                         .frame(maxWidth: .infinity)
@@ -824,12 +878,12 @@ struct ActivityView: View {
                     connectionsCard.frame(width: 260)
                 }
                 .fixedSize(horizontal: false, vertical: true)
-                .entrance(1)
+                .entrance(2)
                 HStack(alignment: .top, spacing: DS.gap) {
                     totalCard.frame(maxWidth: .infinity)
                     topCard.frame(maxWidth: .infinity)
                 }
-                .entrance(2)
+                .entrance(3)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -851,65 +905,63 @@ struct ActivityView: View {
             let profile = URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent
             return [profile, ports, core.privileged ? "增强模式" : nil].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         }()
-        // Two tiers: the state and its controls, then the three facts that describe how traffic leaves.
-        return VStack(alignment: .leading, spacing: 16) {
+        // Tier 1: the state and the one action that changes it. Reload and restart stay small.
+        return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 14) {
                 StatusOrb(state: core.state)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(core.state.label).font(DS.title).tracking(-0.3)
                         .contentTransition(.opacity).animation(DS.spring, value: core.state.label)
-                    Text(subline).font(DS.small).foregroundStyle(core.state.isFailed ? Color.red : Color.secondary)
+                    Text(subline).font(DS.small).foregroundStyle(core.state.isFailed ? DS.fail : DS.ink2)
                         .lineLimit(2).textSelection(.enabled)
                 }
                 Spacer(minLength: 12)
                 HStack(spacing: 8) {
                     Button { core.reload() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
-                        .help("重载配置").accessibilityLabel("重载配置").disabled(core.state != .running)
+                        .buttonStyle(RoundIconStyle())
+                        .help(core.state == .running ? "重载配置" : "内核未运行，无法重载").accessibilityLabel("重载配置")
+                        .disabled(core.state != .running)
                     Button { core.restart() } label: { Image(systemName: "arrow.clockwise") }
-                        .help("重启内核").accessibilityLabel("重启内核").disabled(!core.isActive)
-                    StartStopButton().glassButton(prominent: true)
-                        .background {
-                            // While stopped, a soft halo invites the one action that matters.
-                            if core.state == .stopped {
-                                Capsule().fill(DS.accent.opacity(0.35))
-                                    .phaseAnimator([0.0, 1.0]) { v, k in v.scaleEffect(1 + 0.25 * k).opacity(0.8 - 0.8 * k) }
-                                        animation: { _ in .easeOut(duration: 1.6) }
-                            }
-                        }
-                }
-                .glassButton()
-            }
-            // What needs attention comes before the facts, with its fix right there.
-            if proxyWithoutCore {
-                Notice(tone: .orange, icon: "exclamationmark.triangle.fill", title: "系统代理已开启，但内核未运行",
-                       detail: "此时经过系统代理的网络请求都会失败。启动 Sluice，或关闭系统代理恢复直接上网。") {
-                    Button("关闭系统代理") { core.setSystemProxy(false) }.glassButton()
-                    Button("启动 Sluice") { core.start() }.glassButton(prominent: true)
+                        .buttonStyle(RoundIconStyle())
+                        .help(core.isActive ? "重启内核" : "内核未运行，无法重启").accessibilityLabel("重启内核")
+                        .disabled(!core.isActive)
+                    StartStopButton()
+                        .buttonStyle(core.isActive ? AnyButtonStyle(SecondaryCapsuleStyle(large: true)) : AnyButtonStyle(PrimaryCapsuleStyle(large: true)))
+                        .padding(.leading, 4)
                 }
             }
             if !core.summary.hasNodes {
-                Notice(tone: DS.accent, icon: "globe.asia.australia", title: "还没有代理节点",
-                       detail: "当前配置里没有节点或订阅，所有流量都会直连。添加订阅或节点后即可通过代理访问。") {
+                Notice(tone: DS.accent, icon: "globe.asia.australia", title: "尚未添加代理节点",
+                       detail: "当前所有流量都会直连。添加订阅可以批量导入，也可以粘贴单个节点链接。") {
                     Button("添加节点") { nodesIntent = .node; pane = .nodes }.glassButton()
                     Button("添加订阅") { nodesIntent = .subscription; pane = .nodes }.glassButton(prominent: true)
                 }
             }
-            Divider().opacity(0.6)
-            HStack(spacing: 0) {
-                fact("出站模式", OutboundMode(rawValue: core.mode)?.title ?? core.mode,
-                     note: core.summary.hasNodes ? nil : "全部直连",
-                     icon: OutboundMode(rawValue: core.mode)?.icon ?? "arrow.triangle.branch", accent: core.state == .running)
-                Divider().frame(height: 28).padding(.horizontal, 12)
-                fact("当前节点", currentNode, icon: "globe.asia.australia")
-                Divider().frame(height: 28).padding(.horizontal, 12)
-                if proxyWithoutCore {
-                    fact("系统代理", "已开启 · 内核未运行", icon: "network", accent: true, tone: .orange)
-                } else {
-                    fact("系统代理", core.systemProxyOn ? "已接管" : "未接管", icon: "network", accent: core.systemProxyOn)
-                }
-            }
         }
         .card()
+    }
+
+    /// Tier 2: how traffic leaves — mode, node, system proxy. Each fact opens the pane that changes it.
+    private var routeCard: some View {
+        HStack(spacing: 0) {
+            fact("出站模式", OutboundMode(rawValue: core.mode)?.title ?? core.mode,
+                 note: core.summary.hasNodes ? nil : "全部直连",
+                 icon: OutboundMode(rawValue: core.mode)?.icon ?? "arrow.triangle.branch",
+                 tone: core.state == .running ? DS.accent : nil) { pane = .policy }
+            Divider().frame(height: 32)
+            fact("当前节点", currentNode, icon: "globe.asia.australia",
+                 tone: core.state == .running && core.summary.hasNodes ? DS.ok : nil) { pane = core.summary.hasNodes ? .policy : .nodes }
+            Divider().frame(height: 32)
+            if proxyWithoutCore {
+                fact("系统代理", "已开启 · 内核未运行", icon: "network", tone: DS.warn) { pane = .overview }
+            } else {
+                fact("系统代理", core.systemProxyOn ? "已接管" : "未接管", icon: "network",
+                     tone: core.systemProxyOn ? DS.ok : nil) { pane = .overview }
+            }
+        }
+        .padding(.vertical, 6).padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glass()
     }
 
     /// The system proxy points at Sluice while nothing is listening: the user's network is broken.
@@ -921,19 +973,28 @@ struct ActivityView: View {
         return selected == "DIRECT" ? "直连" : selected
     }
 
-    private func fact(_ label: String, _ value: String, note: String? = nil, icon: String, accent: Bool = false, tone: Color = DS.accent) -> some View {
-        HStack(spacing: 9) {
-            IconTile(symbol: icon, on: accent, size: 28, tone: tone)
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    Text(label).font(DS.caption).foregroundStyle(DS.ink2)
-                    if let note { Text("· \(note)").font(DS.caption).foregroundStyle(.orange) }
+    /// One fact: its tile is coloured by the state grammar (nil = grey, off or no data).
+    private func fact(_ label: String, _ value: String, note: String? = nil, icon: String, tone: Color? = nil,
+                      open: @escaping () -> Void) -> some View {
+        Button(action: open) {
+            HStack(spacing: 10) {
+                IconTile(symbol: icon, on: tone != nil, size: 28, tone: tone ?? DS.accent)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Text(label).font(DS.caption).foregroundStyle(DS.ink2)
+                        if let note { Text("· \(note)").font(DS.caption).foregroundStyle(DS.warn) }
+                    }
+                    Text(value).font(DS.heading).foregroundStyle(tone == DS.warn ? DS.warn : Color.primary)
+                        .lineLimit(1).truncationMode(.middle)
+                        .contentTransition(.opacity).animation(DS.spring, value: value)
                 }
-                Text(value).font(DS.heading).foregroundStyle(tone == DS.accent ? Color.primary : tone)
-                    .lineLimit(1).truncationMode(.middle)
-                    .contentTransition(.opacity).animation(DS.spring, value: value)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(DS.ink3)
             }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(PressableStyle())
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -1416,25 +1477,38 @@ struct NodesView: View {
     @State private var showAddSub = false
     @State private var text = ""
 
-    private let columns = [GridItem(.adaptive(minimum: 190), spacing: DS.gap)]
-
     var body: some View {
         let proxies = ConfigText.lines(of: "Proxy", in: text)
         let subs = ConfigText.lines(of: "Proxy Group", in: text).filter { $0.contains("policy-path=") }
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                SectionTitle(text: "代理 (\(proxies.count))")
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(Array(proxies.enumerated()), id: \.element) { i, l in NodeCard(line: l).entrance(i) }
-                    AddCard(title: "添加节点") { showAddNode = true }
-                }
-                SectionTitle(text: "订阅 (\(subs.count))")
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(subs, id: \.self) { NodeCard(line: $0) }
-                    AddCard(title: "添加订阅") { showAddSub = true }
+        Group {
+            if proxies.isEmpty && subs.isEmpty {
+                EmptyState(icon: "globe.asia.australia", title: "尚未添加代理节点",
+                           detail: "添加订阅可以批量导入，也可以粘贴单个节点链接。",
+                           action: ("添加订阅", { showAddSub = true }), secondary: ("添加节点", { showAddNode = true }))
+                    .frame(height: 300)
+                    .glass()
+                    .entrance(0)
+                    .padding(.horizontal, DS.gutter)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionTitle(text: "订阅 (\(subs.count))")
+                        if subs.isEmpty {
+                            hint("还没有订阅。订阅可以一次导入并自动更新一组节点。", "添加订阅") { showAddSub = true }
+                        } else {
+                            list(subs)
+                        }
+                        SectionTitle(text: "节点 (\(proxies.count))")
+                        if proxies.isEmpty {
+                            hint("还没有单独添加的节点。", "添加节点") { showAddNode = true }
+                        } else {
+                            list(proxies)
+                        }
+                    }
+                    .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
                 }
             }
-            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .paneHeader {
             PaneHeader(title: "节点", subtitle: Pane.nodes.subtitle) {
@@ -1460,61 +1534,65 @@ struct NodesView: View {
         text = core.readConfig()
         core.refreshSummary()
     }
+
+    /// Rows sized to their content in one bordered container.
+    private func list(_ lines: [String]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(lines.enumerated()), id: \.element) { i, l in
+                if i > 0 { Divider().padding(.leading, 50) }
+                NodeRow(line: l)
+            }
+        }
+        .glass()
+        .entrance(0)
+    }
+
+    /// A one-line prompt in place of an empty section.
+    private func hint(_ text: String, _ title: String, _ action: @escaping () -> Void) -> some View {
+        HStack {
+            Text(text).font(DS.small).foregroundStyle(DS.ink2)
+            Spacer()
+            Button(title, action: action).glassButton()
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .glass()
+    }
 }
 
-struct NodeCard: View {
+/// One node or subscription: name and type, then server and latency in fixed columns.
+struct NodeRow: View {
     @EnvironmentObject var core: Core
     let line: String
+    @State private var hovering = false
     var body: some View {
         let (name, rest) = line.firstIndex(of: "=").map {
             (line[..<$0].trimmingCharacters(in: .whitespaces), line[line.index(after: $0)...].trimmingCharacters(in: .whitespaces))
         } ?? (line, "")
         let parts = rest.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        // A node's latency, if any group has tested it.
+        let isSub = line.contains("policy-path=")
         let latency = core.groups.lazy.flatMap(\.options).first { $0.name == name && $0.latencyMs != nil }?.latencyMs
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 10) {
-                IconTile(symbol: line.contains("policy-path=") ? "link" : "server.rack", size: 28)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(name).font(DS.heading).lineLimit(1)
-                    Text((parts.first ?? "").uppercased()).font(DS.caption).foregroundStyle(DS.ink2)
-                }
+        // Server and port only; credentials stay out of the list. Subscriptions show their host.
+        let server = isSub
+            ? (parts.first { $0.hasPrefix("policy-path=") }.flatMap { URL(string: String($0.dropFirst(12)))?.host } ?? "")
+            : parts.dropFirst().prefix(2).filter { !$0.contains("=") }.joined(separator: ":")
+        HStack(spacing: 12) {
+            IconTile(symbol: isSub ? "link" : "server.rack", size: 26)
+            Text(name).font(DS.label.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(isSub ? "订阅" : (parts.first ?? "").uppercased()).font(DS.caption).foregroundStyle(DS.ink2)
+                .frame(width: 80, alignment: .leading)
+            Text(server).font(.system(size: 11.5).monospaced()).foregroundStyle(DS.ink2)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(width: 220, alignment: .leading)
+            Group {
+                if latency != nil { LatencyBadge(latency: latency) } else { Text("—").foregroundStyle(DS.ink3) }
             }
-            Spacer(minLength: 10)
-            HStack {
-                // Server and port only; credentials stay out of the list.
-                Text(parts.dropFirst().prefix(2).filter { !$0.contains("=") }.joined(separator: ":"))
-                    .font(.system(size: 11).monospaced()).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
-                Spacer()
-                if latency != nil {
-                    LatencyBadge(latency: latency)
-                }
-            }
+            .frame(width: 72, alignment: .trailing)
         }
-        .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
-        .padding(12)
-        .tileBackground()
-        .hoverLift()
+        .padding(.horizontal, 12).frame(height: 42)
+        .background(hovering ? Color.primary.opacity(0.035) : .clear)
+        .onHover { hovering = $0 }
         .help(name)
-    }
-}
-
-struct AddCard: View {
-    let title: String
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: "plus").font(.system(size: 16, weight: .medium))
-                Text(title).font(DS.small.weight(.medium))
-            }
-            .foregroundStyle(DS.ink2)
-                .frame(maxWidth: .infinity, minHeight: 102)
-                .overlay(RoundedRectangle(cornerRadius: DS.smallRadius + 2, style: .continuous).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(.separator))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(PressableStyle())
-        .hoverLift()
     }
 }
 
@@ -1811,22 +1889,37 @@ struct ErrorText: View {
     }
 }
 
-/// Centered placeholder used by every empty list.
+/// The one empty-state component: an illustration, what is missing and why, one primary
+/// action (and at most one secondary). Used by every empty pane and list.
 struct EmptyState: View {
     let icon: String
     let title: String
     var detail: String = ""
     /// Optional next step, e.g. ("启动 Sluice", core.start).
     var action: (String, () -> Void)?
+    var secondary: (String, () -> Void)?
     var body: some View {
         VStack(spacing: 8) {
-            IconTile(symbol: icon, size: 48).padding(.bottom, 4)
-            Text(title).font(DS.heading).foregroundStyle(DS.ink2)
-            if !detail.isEmpty { Text(detail).font(DS.small).foregroundStyle(DS.ink3) }
-            if let action {
-                Button(action.0, action: action.1).glassButton(prominent: true).padding(.top, 6)
+            ZStack {
+                Circle().fill(DS.accent.opacity(0.08)).frame(width: 76, height: 76)
+                Image(systemName: icon).font(.system(size: 28, weight: .regular)).foregroundStyle(DS.accent)
+            }
+            .padding(.bottom, 6)
+            .accessibilityHidden(true)
+            Text(title).font(DS.heading).foregroundStyle(Color.primary)
+            if !detail.isEmpty {
+                Text(detail).font(DS.small).foregroundStyle(DS.ink2).multilineTextAlignment(.center)
+                    .frame(maxWidth: 360).fixedSize(horizontal: false, vertical: true)
+            }
+            if action != nil || secondary != nil {
+                HStack(spacing: 8) {
+                    if let action { Button(action.0, action: action.1).glassButton(prominent: true) }
+                    if let secondary { Button(secondary.0, action: secondary.1).glassButton() }
+                }
+                .padding(.top, 8)
             }
         }
+        .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -2104,16 +2197,15 @@ struct LogsView: View {
             }
             ScrollViewReader { proxy in
                 List(lines) { l in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(l.time).foregroundStyle(DS.ink2)
-                        Text(l.level).font(.system(size: 9, weight: .bold)).foregroundStyle(color(l.level))
-                            .padding(.horizontal, 5).padding(.vertical, 2)
-                            .background(color(l.level).opacity(0.10), in: Capsule())
-                            .frame(width: 52, alignment: .leading)
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(l.time).foregroundStyle(DS.ink3).lineLimit(1).fixedSize()
+                        Text(l.level).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(color(l.level))
+                            .frame(width: 40, alignment: .leading)
                         Text(l.message).textSelection(.enabled)
-                            .foregroundStyle(l.level == "ERROR" ? Color.red : Color.primary)
+                            .foregroundStyle(l.level == "ERROR" ? DS.fail : Color.primary)
                     }
-                    .font(.system(.callout, design: .monospaced))
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .listRowInsets(EdgeInsets(top: 1, leading: 10, bottom: 1, trailing: 10))
                     .listRowBackground(
                         (l.level == "ERROR" || l.level == "WARN")
                             ? RoundedRectangle(cornerRadius: 6, style: .continuous).fill(color(l.level).opacity(0.08)).padding(.horizontal, 6)
@@ -2149,7 +2241,8 @@ struct ConfigView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PaneHeader(title: "配置", subtitle: URL(fileURLWithPath: core.configPath).lastPathComponent) {
+            let name = URL(fileURLWithPath: core.configPath).lastPathComponent
+            PaneHeader(title: "配置", subtitle: text == saved ? "\(name) · 已保存" : "\(name) · 有未保存的修改") {
                 Button("选取…", action: choose)
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }
             }
@@ -2163,10 +2256,15 @@ struct ConfigView: View {
                         ErrorText(raw: msg)
                     }
                 }
+                if message == nil && text != saved {
+                    Label("有未保存的修改", systemImage: "circle.fill").font(DS.small.weight(.medium)).foregroundStyle(DS.warn)
+                        .labelStyle(DotLabelStyle())
+                }
                 Spacer()
-                Button("还原") { load() }.disabled(text == saved)
+                Button("还原") { load() }.disabled(text == saved).help(text == saved ? "没有修改可还原" : "放弃修改，恢复到磁盘上的版本")
                 Button(busy ? "检查中…" : "检查") { run(save: false) }.disabled(busy)
                 Button("保存并应用") { run(save: true) }.keyboardShortcut("s").disabled(busy || text == saved)
+                    .help(text == saved ? "没有修改需要保存" : "检查通过后保存，并让运行中的内核重新加载 (⌘S)")
                     .glassButton(prominent: true)
             }
             .glassButton()
@@ -2212,6 +2310,55 @@ struct ConfigView: View {
     }
 }
 
+/// A small coloured dot before a label, for states such as "unsaved".
+struct DotLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) { configuration.icon.font(.system(size: 6)); configuration.title }
+    }
+}
+
+/// Line numbers in the editor's gutter.
+final class LineNumberRuler: NSRulerView {
+    private let font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+    init(textView: NSTextView) {
+        super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
+        clientView = textView
+        ruleThickness = 40
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: textView, queue: .main) { [weak self] _ in
+            self?.needsDisplay = true
+        }
+    }
+    required init(coder: NSCoder) { fatalError() }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        guard let tv = clientView as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer else { return }
+        let s = tv.string as NSString
+        let visible = tv.visibleRect
+        let glyphs = lm.glyphRange(forBoundingRect: visible, in: tc)
+        let chars = lm.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        // Line number of the first visible character.
+        var line = 1
+        s.enumerateSubstrings(in: NSRange(location: 0, length: chars.location), options: [.byLines, .substringNotRequired]) { _, _, _, _ in line += 1 }
+        if chars.location > 0, s.character(at: chars.location - 1) != 10 { line -= 1 }
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]
+        let inset = tv.textContainerOrigin.y
+        var index = chars.location
+        while index < NSMaxRange(chars) || (index == s.length && index == chars.location) {
+            let lineRange = s.lineRange(for: NSRange(location: index, length: 0))
+            let glyph = lm.glyphIndexForCharacter(at: lineRange.location)
+            let frag = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let y = convert(NSPoint(x: 0, y: frag.minY + inset), from: tv).y
+            let label = "\(line)" as NSString
+            let size = label.size(withAttributes: attrs)
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y + (frag.height - size.height) / 2), withAttributes: attrs)
+            line += 1
+            if NSMaxRange(lineRange) <= index { break }
+            index = NSMaxRange(lineRange)
+            if index >= s.length { break }
+        }
+    }
+}
+
 /// Config text editor with quiet syntax colouring: section headers in the accent,
 /// keys and rule types in emphasis, values in secondary ink, comments faded.
 struct ConfigEditor: NSViewRepresentable {
@@ -2231,9 +2378,13 @@ struct ConfigEditor: NSViewRepresentable {
         tv.isAutomaticTextReplacementEnabled = false
         tv.isContinuousSpellCheckingEnabled = false
         tv.drawsBackground = false
-        tv.textContainerInset = NSSize(width: 10, height: 12)
+        tv.textContainerInset = NSSize(width: 6, height: 12)
         tv.string = text
         Coordinator.highlight(tv)
+        let ruler = LineNumberRuler(textView: tv)
+        scroll.verticalRulerView = ruler
+        scroll.hasVerticalRuler = true
+        scroll.rulersVisible = true
         return scroll
     }
 
@@ -2243,6 +2394,7 @@ struct ConfigEditor: NSViewRepresentable {
         if tv.string != text {
             tv.string = text
             Coordinator.highlight(tv)
+            scroll.verticalRulerView?.needsDisplay = true
         }
     }
 

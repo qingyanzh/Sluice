@@ -55,10 +55,32 @@ these tokens and never set their own values.
 
 ## Contrast
 
-Supporting text uses `DS.ink2` (66% of the primary colour) and metadata
-`DS.ink3` (46%), both darker than the system secondary and tertiary styles.
+Supporting text uses `DS.ink2` (72% of the primary colour) and metadata
+`DS.ink3` (56%), both darker than the system secondary and tertiary styles.
+Secondary buttons (`SecondaryCapsuleStyle`) have a surface fill, a 1pt
+`DS.stroke` border and full-strength text, so they never read as disabled;
+disabled controls fade to 40% and say why in their help text.
 Pane titles are 26pt bold, figures are semibold, and captions are semibold,
 so the key value in every card reads first.
+
+## State colours
+
+One grammar, tokens in `DS`: blue (`accent`) is action, selection and the
+current page; green (`ok`) is confirmed working; orange (`warn`) is attention
+or an inconsistent state; red (`fail`) is failure; grey (`off`) is off,
+unconfigured or no data. No other colour carries meaning. Icon tiles are flat
+(no glow), containers have a hairline and one faint shadow, and the accent fill
+is kept for the primary button.
+
+## Layout
+
+- Home reads in three tiers: state and its one main action; how traffic leaves
+  (出站模式 · 当前节点 · 系统代理, each opening the pane that changes it);
+  traffic and requests. The sidebar's start button is a quiet round icon.
+- Content stops at `DS.maxContentWidth`; lists size to their rows.
+- Every empty pane uses `EmptyState`: an illustration, the reason, one primary
+  action and at most one secondary.
+- 设置 sits apart at the bottom of the sidebar.
 
 ## States and failures
 
@@ -66,8 +88,8 @@ so the key value in every card reads first.
   pills, the policy and requests empty states, and the rule test. While
   stopped, every place that needs the core says so and offers 启动 Sluice.
 - A setting that is on but not working is a warning, not a success: the system
-  proxy pointing at a stopped core is orange, with 启动 and 关闭系统代理 right
-  there.
+  proxy pointing at a stopped core is an orange banner on every pane, with
+  启动 and 关闭系统代理 right there.
 - Missing setup is stated with its effect and its fix ("还没有代理节点 … 所有流量
   都会直连", with 添加节点 / 添加订阅 opening the sheet directly).
 - Every error has a plain Chinese first line (what happened and what to do);
