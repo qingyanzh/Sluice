@@ -20,7 +20,9 @@ struct StructuredConfigEditors: View {
                 Spacer()
                 Button("添加", systemImage: "plus") { edit(nil) }
                 Button("编辑", systemImage: "pencil") { edit(selection) }.disabled(selectedIndex == nil)
-                Button("删除", systemImage: "minus") { mutate { $0.delete(selection!, in: section) } }.disabled(selectedIndex == nil)
+                Button("删除", systemImage: "minus") {
+                    if let selection { mutate { $0.delete(selection, in: section) } }
+                }.disabled(selectedIndex == nil)
                 Button { move(-1) } label: { Image(systemName: "arrow.up") }
                     .help("上移").disabled(selectedIndex == nil || selectedIndex == 0)
                 Button { move(1) } label: { Image(systemName: "arrow.down") }
@@ -53,7 +55,9 @@ struct StructuredConfigEditors: View {
                 return nil
             }
         }
-        .onChange(of: text) { selection = nil }
+        .onChange(of: text) {
+            if let selection, !ids.contains(selection) { self.selection = nil }
+        }
         .onChange(of: section) { selection = nil }
     }
 
@@ -76,6 +80,8 @@ struct StructuredConfigEditors: View {
             TableColumn("名称") { Text($0.value.name) }.width(min: 90, ideal: 150)
             TableColumn("类型") { Text($0.value.type).foregroundStyle(DS.ink2) }.width(min: 90, ideal: 120)
             TableColumn("成员") { Text($0.value.members.joined(separator: ", ")).lineLimit(2) }.width(min: 120, ideal: 280)
+            TableColumn("测试 URL") { Text($0.value.url).lineLimit(1).foregroundStyle(DS.ink2) }.width(min: 100, ideal: 180)
+            TableColumn("间隔（秒）") { Text($0.value.interval).monospacedDigit().foregroundStyle(DS.ink2) }.width(75)
         }
         .font(DS.label)
         .overlay { if document.groups.isEmpty { empty("还没有策略组", detail: "添加策略组，将节点组合为手动或自动策略。") } }
@@ -105,7 +111,7 @@ struct StructuredConfigEditors: View {
         selection = nil
     }
     private func move(_ offset: Int) {
-        guard let selection, let index = selectedIndex else { return }
+        guard let selection, let index = selectedIndex, ids.indices.contains(index + offset) else { return }
         let destination = ids[index + offset]
         mutate { $0.move(selection, by: offset, in: section) }
         self.selection = destination
@@ -153,8 +159,7 @@ private struct RuleConfigSheet: View {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("更新草稿") {
-                    rule.value = StructuredConfig.trim(rule.value)
-                    rule.options = StructuredConfig.trim(rule.options)
+                    rule.normalise()
                     guard (rule.isFinal || !rule.value.isEmpty), !rule.policy.isEmpty,
                           !rule.serialised.contains("\n"), !rule.serialised.contains("\r"),
                           let parsed = StructuredConfig.Rule(line: rule.serialised), parsed == rule
@@ -229,6 +234,7 @@ private struct GroupConfigSheet: View {
               !["#", ";", "//", "["].contains(where: group.name.hasPrefix),
               !group.serialised.contains("\r"), !group.serialised.contains("\n"),
               !group.url.contains(","), !group.members.contains(group.name),
+              StructuredConfig.Group(line: group.serialised) == group,
               !group.members.isEmpty || group.parameter("policy-path") != nil
         else { error = "请填写有效名称，并添加至少一个成员或保留订阅参数。"; return }
         if !group.interval.isEmpty, UInt64(group.interval) == nil {

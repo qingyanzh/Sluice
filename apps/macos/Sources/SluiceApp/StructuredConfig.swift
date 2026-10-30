@@ -24,7 +24,7 @@ struct StructuredConfig {
         init() {}
         init?(line: String) {
             let parts = StructuredConfig.splitRule(line)
-            guard let kind = parts.first, !kind.isEmpty else { return nil }
+            guard let kind = parts.first, Self.types.contains(kind.uppercased()) else { return nil }
             type = kind
             if isFinal {
                 guard parts.count >= 2, !parts[1].isEmpty else { return nil }
@@ -36,6 +36,12 @@ struct StructuredConfig {
                 policy = parts[2]
                 options = parts.dropFirst(3).joined(separator: ",")
             }
+        }
+        mutating func normalise() {
+            type = StructuredConfig.trim(type)
+            value = isFinal ? "" : StructuredConfig.trim(value)
+            policy = StructuredConfig.trim(policy)
+            options = StructuredConfig.trim(options)
         }
         var serialised: String {
             let fields = isFinal ? [type, policy] : [type, value, policy]
@@ -65,7 +71,7 @@ struct StructuredConfig {
             guard let eq = line.firstIndex(of: "=") else { return nil }
             name = StructuredConfig.trim(String(line[..<eq]))
             let parts = line[line.index(after: eq)...].components(separatedBy: ",").map(StructuredConfig.trim).filter { !$0.isEmpty }
-            guard !name.isEmpty, let kind = parts.first else { return nil }
+            guard !name.isEmpty, let kind = parts.first, Self.types.contains(kind.lowercased()) else { return nil }
             type = kind
             members = parts.dropFirst().filter { !$0.contains("=") }
             parameters = parts.dropFirst().filter { $0.contains("=") }
@@ -73,7 +79,7 @@ struct StructuredConfig {
         func parameter(_ key: String) -> String? {
             parameters.last { Self.key($0) == key }.map {
                 let value = StructuredConfig.trim(String($0[$0.index(after: $0.firstIndex(of: "=")!)...]))
-                if value.count >= 2, (value.first == "\"" && value.last == "\"" || value.first == "'" && value.last == "'") {
+                if value.count >= 2, value.first == "\"", value.last == "\"" {
                     return String(value.dropFirst().dropLast())
                 }
                 return value
