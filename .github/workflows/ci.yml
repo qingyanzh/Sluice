@@ -59,3 +59,21 @@ jobs:
         with:
           name: tun-logs
           path: ci-logs
+
+  rules:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sluice
+          path: target/release
+      - run: chmod +x target/release/sluice
+      - run: bash scripts/ci/rules.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rules-logs
+          path: ci-logs

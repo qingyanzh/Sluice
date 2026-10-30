@@ -26,6 +26,8 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - Trojan (UDP ASSOCIATE framing)
   - Hysteria2 (QUIC datagrams, with fragmentation)
 - Rules: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, IP-CIDR / IP-CIDR6 (`no-resolve`), GEOIP (needs `geoip-db`), FINAL
+- More rules: PROCESS-NAME (owning process of the client socket, via libproc; in TUN mode other users' processes need root), DST-PORT (`443`, `8000-9000`, `>1024`), IN-PORT, SRC-IP, PROTOCOL (TCP/UDP/HTTP/HTTPS/QUIC), URL-REGEX (full URL for plain HTTP through the HTTP inbound, `https://host/` for CONNECT), IP-ASN (needs `asn-db`, e.g. GeoLite2-ASN.mmdb), and logical `AND,((DOMAIN,a.com),(DST-PORT,443)),Proxy` / `OR` / `NOT`. All of these also work inside RULE-SET files
+- `GET /v1/connections` lists recent routing decisions (with `process` when a PROCESS-NAME rule looked it up); `/v1/route` accepts `process=`, `src=` and `proto=`
 - Rule sets: `RULE-SET,<url|file>,Policy` (Surge rule lists) and `DOMAIN-SET,<url|file>,Policy` (domain lists, `.example.com` = with subdomains; Clash `payload:` lists also accepted). Remote lists are cached in `~/Library/Caches/Sluice` and refreshed every `rule-set-update-interval` seconds (default 86400).
 - Subscriptions: `Group = select, policy-path=<url|file>, policy-regex-filter=<regex>, update-interval=86400` imports nodes from share links (`ss://`, `vmess://`, `vless://`, `trojan://`, `hysteria2://`, plain or base64), Surge proxy lines, or Clash / Mihomo YAML (`proxies:`). Links needing unsupported features (XTLS-Vision flow, Hysteria2 port hopping) are skipped and reported. Groups sharing a URL share its nodes.
 - Policy groups (nestable):

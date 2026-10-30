@@ -13,6 +13,7 @@ use tun::AbstractDevice;
 use crate::dns::FakeDns;
 use crate::reload::RouterHandle;
 use crate::router::Router;
+use crate::rule::{ConnInfo, Proto};
 use crate::udp::Packet;
 use crate::util::{Host, Target};
 
@@ -47,7 +48,8 @@ fn to_target(dst: SocketAddr, fake: &FakeDns) -> Option<Target> {
 
 async fn handle_tcp(mut tcp: IpStackTcpStream, router: Arc<Router>, fake: Arc<FakeDns>) {
     let Some(target) = to_target(tcp.peer_addr(), &fake) else { return };
-    match router.dispatch(&target).await {
+    let ctx = ConnInfo::new(Proto::Tcp, Some(tcp.local_addr()), None, tcp.peer_addr().port());
+    match router.dispatch_with(&target, &ctx).await {
         Ok(Some(mut up)) => {
             if let Err(e) = tokio::io::copy_bidirectional(&mut tcp, &mut up).await {
                 debug!("{target}: {e}");
@@ -61,7 +63,7 @@ async fn handle_tcp(mut tcp: IpStackTcpStream, router: Arc<Router>, fake: Arc<Fa
 async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<FakeDns>) -> Result<()> {
     let dst = udp.peer_addr();
     let mut buf = vec![0u8; 65535];
-    if dst.port() == 53 {
+    if fake.hijacks(dst) {
         loop {
             let n = udp.read(&mut buf).await?;
             if n == 0 {
@@ -74,7 +76,9 @@ async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<Fa
     }
 
     let Some(target) = to_target(dst, &fake) else { return Ok(()) };
-    let Some(mut pipe) = router.dispatch_udp(&target).await? else { return Ok(()) };
+    let proto = if dst.port() == 443 { Proto::Quic } else { Proto::Udp };
+    let ctx = ConnInfo::new(proto, Some(udp.local_addr()), None, dst.port());
+    let Some(mut pipe) = router.dispatch_udp_with(&target, &ctx).await? else { return Ok(()) };
     debug!("TUN UDP {} -> {target}: flow open", udp.local_addr());
     // ipstack ends the stream after its UDP idle timeout, which closes the pipe. Each
     // ipstack stream is one 5-tuple, so replies from other sources are answered as if

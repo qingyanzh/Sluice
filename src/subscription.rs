@@ -12,7 +12,7 @@ use log::{info, warn};
 use crate::api::percent_decode;
 use crate::config::{parse_proxy, Config, ProxyDef};
 use crate::ruleset::fetch;
-use crate::transport::{Layer, WsOpts};
+use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
 fn b64(s: &str) -> Option<Vec<u8>> {
     use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -26,16 +26,15 @@ fn b64_str(s: &str) -> Option<String> {
 }
 
 /// Pieces of `scheme://userinfo@host:port?query#name`.
-struct Link<'a> {
+struct Link {
     user: Option<String>,
     host: String,
     port: u16,
     query: HashMap<String, String>,
     name: Option<String>,
-    rest: &'a str,
 }
 
-fn split_link(body: &str) -> Result<Link<'_>> {
+fn split_link(body: &str) -> Result<Link> {
     let (body, name) = match body.split_once('#') {
         Some((b, n)) => (b, Some(percent_decode(n)).filter(|n| !n.is_empty())),
         None => (body, None),
@@ -59,7 +58,7 @@ fn split_link(body: &str) -> Result<Link<'_>> {
         .filter_map(|kv| kv.split_once('='))
         .map(|(k, v)| (k.to_ascii_lowercase(), percent_decode(v)))
         .collect();
-    Ok(Link { user, host, port, query, name, rest: main })
+    Ok(Link { user, host, port, query, name })
 }
 
 fn truthy(v: Option<&String>) -> bool {
@@ -78,6 +77,25 @@ fn layer_from_query(q: &HashMap<String, String>) -> Result<Option<Layer>> {
         Some("grpc") => Ok(Some(Layer::Grpc {
             service: q.get("serviceName").or(q.get("servicename")).cloned().unwrap_or_default(),
         })),
+        Some("xhttp" | "splithttp") => {
+            let mut x = XhttpOpts { host: q.get("host").cloned().filter(|h| !h.is_empty()), ..Default::default() };
+            x.path = q.get("path").cloned().unwrap_or(x.path);
+            x.mode = XhttpMode::parse(q.get("mode").map_or("", String::as_str))?;
+            // `extra` is the JSON of further XHTTP settings; only the padding range matters here.
+            let extra: Option<serde_json::Value> = q.get("extra").and_then(|e| serde_json::from_str(e).ok());
+            match extra.as_ref().map(|e| &e["xPaddingBytes"]) {
+                Some(serde_json::Value::String(p)) => x.padding = XhttpOpts::parse_padding(p)?,
+                Some(serde_json::Value::Number(n)) => x.padding = XhttpOpts::parse_padding(&n.to_string())?,
+                Some(serde_json::Value::Object(o)) => {
+                    let get = |k: &str| o.get(k).and_then(|v| v.as_u64()).map(|v| v as u32);
+                    if let (Some(a), Some(b)) = (get("from"), get("to")) {
+                        x.padding = (a, b);
+                    }
+                }
+                _ => {}
+            }
+            Ok(Some(Layer::Xhttp(x)))
+        }
         Some(other) => bail!("transport {other:?} not supported yet"),
     }
 }
@@ -112,6 +130,10 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
         None | Some("tcp") => None,
         Some("ws") => Some(Layer::Ws(WsOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), headers: Vec::new() })),
         Some("grpc") => Some(Layer::Grpc { service: field("path").unwrap_or_default() }),
+        Some("xhttp" | "splithttp") => {
+            let mode = XhttpMode::parse(field("type").as_deref().filter(|t| *t != "none").unwrap_or(""))?;
+            Some(Layer::Xhttp(XhttpOpts { path: field("path").unwrap_or_else(|| "/".into()), host: field("host"), mode, ..Default::default() }))
+        }
         Some(other) => bail!("transport {other:?} not supported yet"),
     };
     let server = field("add").ok_or_else(|| anyhow!("vmess link without address"))?;
@@ -179,6 +201,20 @@ fn parse_trojan(body: &str) -> Result<(Option<String>, ProxyDef)> {
 }
 
 fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
+    // `host:20000-50000` / `host:443,8443` is a port-hopping spec; the first port stands in
+    // as the plain port so split_link can parse the rest.
+    let end = body.find(['/', '?', '#']).unwrap_or(body.len());
+    let mut ports = None;
+    let rewritten;
+    let body = match body[..end].rsplit_once(':') {
+        Some((head, spec)) if spec.contains(['-', ',']) => {
+            let first = crate::udphop::parse_ports(spec)?[0];
+            ports = Some(spec.to_string());
+            rewritten = format!("{head}:{first}{}", &body[end..]);
+            rewritten.as_str()
+        }
+        _ => body,
+    };
     let l = split_link(body)?;
     let q = &l.query;
     let obfs = match q.get("obfs").map(String::as_str) {
@@ -186,14 +222,17 @@ fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
         Some("salamander") => Some(q.get("obfs-password").cloned().ok_or_else(|| anyhow!("salamander without obfs-password"))?),
         Some(other) => bail!("hysteria2 obfs {other:?} not supported"),
     };
-    if l.rest.contains(',') {
-        bail!("hysteria2 port hopping not supported yet");
+    let ports = ports.or_else(|| q.get("mport").cloned().filter(|p| !p.is_empty()));
+    if let Some(p) = &ports {
+        crate::udphop::parse_ports(p)?;
     }
     let def = ProxyDef::Hysteria2 {
         password: l.user.ok_or_else(|| anyhow!("hysteria2 link without password"))?,
         sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
         skip_cert_verify: truthy(q.get("insecure")),
         obfs,
+        ports,
+        hop_interval: None,
         server: l.host,
         port: l.port,
     };
@@ -324,6 +363,26 @@ mod tests {
     }
 
     #[test]
+    fn hy2_port_hopping() {
+        for (link, spec) in [
+            ("hy2://pw@h.example:20000-50000/?sni=h.example#A", "20000-50000"),
+            ("hysteria2://pw@[::1]:443,8443,20000-30000?obfs=salamander&obfs-password=o#B", "443,8443,20000-30000"),
+            ("hy2://pw@h.example:443/?mport=1000-2000#C", "1000-2000"),
+        ] {
+            let (nodes, skipped) = parse(link);
+            assert!(skipped.is_empty(), "{skipped:?}");
+            let def = &nodes[0].1;
+            assert!(matches!(def, ProxyDef::Hysteria2 { ports: Some(p), .. } if p == spec), "{def:?}");
+            let back = parse_proxy(&def.to_line("X")).unwrap().1;
+            assert_eq!(format!("{back:?}"), format!("{def:?}"));
+        }
+        assert!(matches!(&parse("hy2://pw@h.example:8443#D").0[0].1, ProxyDef::Hysteria2 { ports: None, .. }));
+        assert!(!parse("hy2://pw@h.example:5-3#E").1.is_empty());
+        let (_, def) = parse_proxy("H = hysteria2, h.example, 443, password=x, port-hopping=\"443;5000-6000\", port-hopping-interval=10").unwrap();
+        assert!(matches!(def, ProxyDef::Hysteria2 { ports: Some(p), hop_interval: Some(10), .. } if p == "443,5000-6000"));
+    }
+
+    #[test]
     fn links() {
         let ss = format!("ss://{}@1.2.3.4:8388#HK%201", STANDARD.encode("aes-256-gcm:pw"));
         let legacy = format!("ss://{}#Legacy", STANDARD.encode("chacha20-ietf-poly1305:p@ss@5.6.7.8:443"));
@@ -375,4 +434,18 @@ mod tests {
         assert!(matches!(&nodes[4].1, ProxyDef::Trojan { skip_cert_verify: true, .. }));
         assert!(matches!(&nodes[5].1, ProxyDef::Hysteria2 { port: 8443, skip_cert_verify: true, .. }));
     }
+
+    #[test]
+    fn xhttp_link() {
+        let link = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@x.example:443?security=tls&sni=x.example&type=xhttp&path=%2Fxh&host=cdn.example&mode=stream-up&extra=%7B%22xPaddingBytes%22%3A%2210-20%22%7D#XH";
+        let (nodes, skipped) = parse(link);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        match &nodes[0].1 {
+            ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. } => {
+                assert_eq!((x.path.as_str(), x.host.as_deref(), x.mode, x.padding), ("/xh", Some("cdn.example"), XhttpMode::StreamUp, (10, 20)))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
 }

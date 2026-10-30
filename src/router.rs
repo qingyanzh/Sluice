@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -9,7 +11,7 @@ use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::config::{Config, GroupDef, GroupKind, ProxyDef};
-use crate::rule::{Matcher, Rule};
+use crate::rule::{ConnInfo, Matcher, Rule};
 use crate::ss::SsServer;
 use crate::transport::Transport;
 use crate::trojan::TrojanServer;
@@ -38,6 +40,7 @@ pub struct Router {
     /// Last health-check result per option name: `Some(ms)` healthy, `None` failed.
     latency: RwLock<HashMap<String, Option<u64>>>,
     geoip: Option<maxminddb::Reader<Vec<u8>>>,
+    asn: Option<maxminddb::Reader<Vec<u8>>>,
     mode: RwLock<Mode>,
 }
 
@@ -105,6 +108,8 @@ pub struct Decision {
     pub rule: String,
     pub policy: String,
     pub outbound: String,
+    /// The client's process, if a PROCESS-NAME rule had to look it up.
+    pub process: Option<String>,
 }
 
 impl Router {
@@ -133,8 +138,8 @@ impl Router {
                         flow.as_deref(),
                     )?)
                 }
-                ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
-                    Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs)?)
+                ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs, ports, hop_interval } => {
+                    Outbound::Hysteria2(Hy2Server::new(server, port, password, sni, skip_cert_verify, obfs, ports, hop_interval)?)
                 }
                 ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
                     Outbound::Vmess(VmessServer::new(Transport::new(server, port, tls, sni, skip_cert_verify, layer)?, &uuid, &method)?)
@@ -178,6 +183,14 @@ impl Router {
             log::warn!("GEOIP rules present but no geoip-db configured; they will never match");
         }
 
+        let asn = match &cfg.general.asn_db {
+            Some(path) => Some(maxminddb::Reader::open_readfile(path).with_context(|| format!("open asn-db {path}"))?),
+            None => None,
+        };
+        if asn.is_none() && cfg.rules.iter().any(|r| matches!(r.matcher, Matcher::IpAsn { .. })) {
+            log::warn!("IP-ASN rules present but no asn-db configured; they will never match");
+        }
+
         let router = Router {
             rules: cfg.rules.clone(),
             outbounds,
@@ -186,6 +199,7 @@ impl Router {
             latency: RwLock::new(HashMap::new()),
             mode: RwLock::new(Mode::Rule),
             geoip,
+            asn,
         };
         // Catches group cycles at load time rather than on first request.
         for g in &router.groups {
@@ -197,6 +211,11 @@ impl Router {
     fn country(&self, ip: IpAddr) -> Option<String> {
         let country: maxminddb::geoip2::Country = self.geoip.as_ref()?.lookup(ip).ok()?;
         country.country?.iso_code.map(str::to_string)
+    }
+
+    fn asn_of(&self, ip: IpAddr) -> Option<u32> {
+        let asn: maxminddb::geoip2::Asn = self.asn.as_ref()?.lookup(ip).ok()?;
+        asn.autonomous_system_number
     }
 
     async fn ip_of(target: &Target, no_resolve: bool, cache: &mut Option<Option<IpAddr>>) -> Option<IpAddr> {
@@ -213,38 +232,86 @@ impl Router {
         }
     }
 
-    async fn match_rule(&self, target: &Target) -> &Rule {
+    async fn match_rule(&self, target: &Target, ctx: &ConnInfo) -> &Rule {
         let mut resolved = None;
         for rule in &self.rules {
-            let hit = match &rule.matcher {
-                Matcher::Final => true,
-                Matcher::Domain(_) | Matcher::DomainSuffix(_) | Matcher::DomainKeyword(_) => {
-                    matches!(&target.host, Host::Domain(d) if rule.match_domain(d))
-                }
-                Matcher::IpCidr { cidr, no_resolve, .. } => {
-                    Self::ip_of(target, *no_resolve, &mut resolved).await.is_some_and(|ip| cidr.contains(ip))
-                }
-                Matcher::GeoIp { country, no_resolve } => match Self::ip_of(target, *no_resolve, &mut resolved).await {
-                    Some(ip) => self.country(ip).as_deref() == Some(country.as_str()),
-                    None => false,
-                },
-                Matcher::RuleSet { set, no_resolve } => {
-                    let (domain_hit, has_ip) = {
-                        let data = set.data.read().unwrap();
-                        (matches!(&target.host, Host::Domain(d) if data.match_domain(d)), data.has_ip_rules())
-                    };
-                    domain_hit
-                        || (has_ip
-                            && Self::ip_of(target, *no_resolve, &mut resolved)
-                                .await
-                                .is_some_and(|ip| set.data.read().unwrap().match_ip(ip)))
-                }
-            };
-            if hit {
+            if self.eval(&rule.matcher, target, ctx, &mut resolved).await {
                 return rule;
             }
         }
         self.rules.last().expect("FINAL rule validated")
+    }
+
+    /// Whether `m` matches; boxed because logical rules recurse.
+    fn eval<'a>(
+        &'a self,
+        m: &'a Matcher,
+        target: &'a Target,
+        ctx: &'a ConnInfo,
+        resolved: &'a mut Option<Option<IpAddr>>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match m {
+                Matcher::Final => true,
+                Matcher::Domain(_) | Matcher::DomainSuffix(_) | Matcher::DomainKeyword(_) => {
+                    matches!(&target.host, Host::Domain(d) if m.match_domain(d))
+                }
+                Matcher::IpCidr { cidr, no_resolve, .. } => {
+                    Self::ip_of(target, *no_resolve, resolved).await.is_some_and(|ip| cidr.contains(ip))
+                }
+                Matcher::GeoIp { country, no_resolve } => match Self::ip_of(target, *no_resolve, resolved).await {
+                    Some(ip) => self.country(ip).as_deref() == Some(country.as_str()),
+                    None => false,
+                },
+                Matcher::IpAsn { asn, no_resolve } => match Self::ip_of(target, *no_resolve, resolved).await {
+                    Some(ip) => self.asn_of(ip) == Some(*asn),
+                    None => false,
+                },
+                Matcher::DstPort { range, .. } => range.contains(target.port),
+                Matcher::InPort { range, .. } => ctx.in_port.is_some_and(|p| range.contains(p)),
+                Matcher::SrcIp { cidr, .. } => ctx.src.is_some_and(|s| cidr.contains(s.ip())),
+                Matcher::Protocol(p) => p.covers(ctx.proto),
+                Matcher::UrlRegex(re) => ctx.url.as_deref().is_some_and(|u| re.is_match(u)),
+                Matcher::ProcessName(name) => ctx.process().await.is_some_and(|p| p.eq_ignore_ascii_case(name)),
+                Matcher::And(v) => {
+                    for sub in v {
+                        if !self.eval(sub, target, ctx, &mut *resolved).await {
+                            return false;
+                        }
+                    }
+                    true
+                }
+                Matcher::Or(v) => {
+                    for sub in v {
+                        if self.eval(sub, target, ctx, &mut *resolved).await {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                Matcher::Not(sub) => !self.eval(sub, target, ctx, resolved).await,
+                Matcher::RuleSet { set, no_resolve } => {
+                    let (domain_hit, has_ip, others) = {
+                        let data = set.data.read().unwrap();
+                        (matches!(&target.host, Host::Domain(d) if data.match_domain(d)), data.has_ip_rules(), data.others())
+                    };
+                    if domain_hit
+                        || (has_ip
+                            && Self::ip_of(target, *no_resolve, &mut *resolved)
+                                .await
+                                .is_some_and(|ip| set.data.read().unwrap().match_ip(ip)))
+                    {
+                        return true;
+                    }
+                    for sub in others.iter() {
+                        if self.eval(sub, target, ctx, &mut *resolved).await {
+                            return true;
+                        }
+                    }
+                    false
+                }
+            }
+        })
     }
 
     fn group(&self, name: &str) -> Option<&GroupDef> {
@@ -283,9 +350,15 @@ impl Router {
     }
 
     pub async fn decide(&self, target: &Target) -> Result<Decision> {
+        self.decide_with(target, &ConnInfo::default()).await
+    }
+
+    /// Like [`decide`](Self::decide), with what is known about the client for
+    /// PROCESS-NAME, SRC-IP, IN-PORT, PROTOCOL and URL-REGEX rules.
+    pub async fn decide_with(&self, target: &Target, ctx: &ConnInfo) -> Result<Decision> {
         match self.mode() {
             Mode::Direct => {
-                return Ok(Decision { rule: "DIRECT-MODE".into(), policy: "DIRECT".into(), outbound: "DIRECT".into() })
+                return Ok(Decision { rule: "DIRECT-MODE".into(), policy: "DIRECT".into(), outbound: "DIRECT".into(), process: None })
             }
             Mode::Global => {
                 let policy = self
@@ -293,26 +366,47 @@ impl Router {
                     .iter()
                     .find(|r| matches!(r.matcher, Matcher::Final))
                     .map_or("DIRECT".to_string(), |r| r.policy.clone());
-                return Ok(Decision { rule: "GLOBAL-MODE".into(), outbound: self.resolve(&policy)?, policy });
+                return Ok(Decision { rule: "GLOBAL-MODE".into(), outbound: self.resolve(&policy)?, policy, process: None });
             }
             Mode::Rule => {}
         }
-        let rule = self.match_rule(target).await;
-        Ok(Decision { rule: rule.to_string(), policy: rule.policy.clone(), outbound: self.resolve(&rule.policy)? })
+        let rule = self.match_rule(target, ctx).await;
+        Ok(Decision {
+            rule: rule.to_string(),
+            policy: rule.policy.clone(),
+            outbound: self.resolve(&rule.policy)?,
+            process: ctx.known_process().map(str::to_string),
+        })
+    }
+
+    async fn decide_logged(&self, target: &Target, ctx: &ConnInfo) -> Result<Decision> {
+        let d = self.decide_with(target, ctx).await?;
+        let proc_note = d.process.as_deref().map_or(String::new(), |p| format!(" ({p})"));
+        info!("{} {target}{proc_note} -> {} [{}] via {}", ctx.proto.name(), d.policy, d.rule, d.outbound);
+        crate::conns::record(crate::conns::ConnRecord {
+            id: 0,
+            time_ms: 0,
+            network: ctx.proto.name(),
+            target: target.to_string(),
+            src: ctx.src.map(|s| s.to_string()),
+            rule: d.rule.clone(),
+            policy: d.policy.clone(),
+            outbound: d.outbound.clone(),
+            process: d.process.clone(),
+        });
+        Ok(d)
     }
 
     /// Connects to `target` through whatever the rules pick; `None` means rejected.
-    pub async fn dispatch(&self, target: &Target) -> Result<Option<BoxStream>> {
-        let d = self.decide(target).await?;
-        info!("{target} -> {} [{}] via {}", d.policy, d.rule, d.outbound);
+    pub async fn dispatch_with(&self, target: &Target, ctx: &ConnInfo) -> Result<Option<BoxStream>> {
+        let d = self.decide_logged(target, ctx).await?;
         Ok(self.open(&d.outbound, target).await?.map(crate::stats::counted))
     }
 
     /// The outbound for UDP to `target`; `None` means rejected. Every outbound's UDP is
     /// full-cone, so an inbound association needs one [`open_udp`](Self::open_udp) per outbound.
-    pub async fn route_udp(&self, target: &Target) -> Result<Option<String>> {
-        let d = self.decide(target).await?;
-        info!("UDP {target} -> {} [{}] via {}", d.policy, d.rule, d.outbound);
+    pub async fn route_udp_with(&self, target: &Target, ctx: &ConnInfo) -> Result<Option<String>> {
+        let d = self.decide_logged(target, ctx).await?;
         Ok((!matches!(self.outbounds[&d.outbound], Outbound::Reject)).then_some(d.outbound))
     }
 
@@ -329,9 +423,9 @@ impl Router {
         })
     }
 
-    /// UDP counterpart of [`dispatch`](Self::dispatch); `None` means rejected.
-    pub async fn dispatch_udp(&self, target: &Target) -> Result<Option<crate::udp::UdpPipe>> {
-        match self.route_udp(target).await? {
+    /// UDP counterpart of [`dispatch_with`](Self::dispatch_with); `None` means rejected.
+    pub async fn dispatch_udp_with(&self, target: &Target, ctx: &ConnInfo) -> Result<Option<crate::udp::UdpPipe>> {
+        match self.route_udp_with(target, ctx).await? {
             Some(o) => Ok(Some(self.open_udp(&o, target).await?)),
             None => Ok(None),
         }
@@ -512,6 +606,7 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rule::Proto;
 
     fn router(text: &str) -> Router {
         Router::new(&Config::parse(text).unwrap()).unwrap()
@@ -582,6 +677,54 @@ FINAL,DIRECT
         let gone = router(&CONF.replace("Proxy = select, A, DIRECT", "Proxy = select, A"));
         gone.inherit_state(&old);
         assert_eq!(gone.groups().iter().find(|g| g.name == "Proxy").unwrap().selected, "A");
+    }
+
+    async fn decide_ctx(r: &Router, host: &str, ctx: ConnInfo) -> String {
+        r.decide_with(&Target::parse_authority(host, 443).unwrap(), &ctx).await.unwrap().rule
+    }
+
+    #[tokio::test]
+    async fn extended_rules() {
+        let r = router(
+            "
+[Rule]
+AND,((DOMAIN-SUFFIX,a.com),(DST-PORT,443)),REJECT
+OR,((PROCESS-NAME,Curl),(SRC-IP,192.168.9.0/24)),REJECT
+NOT,((PROTOCOL,TCP)),DIRECT
+IN-PORT,7000-7999,DIRECT
+URL-REGEX,^http://ads\\.,REJECT
+IP-CIDR6,2001:db8::/32,DIRECT
+FINAL,DIRECT
+",
+        );
+        let tcp = || ConnInfo::new(Proto::Https, Some("127.0.0.1:50000".parse().unwrap()), Some(6152), 6152);
+        assert_eq!(decide_ctx(&r, "x.a.com", tcp()).await, "AND,((DOMAIN-SUFFIX,a.com),(DST-PORT,443))");
+        assert_eq!(decide_ctx(&r, "x.a.com:80", tcp().with_process("other")).await, "FINAL");
+        assert_eq!(decide_ctx(&r, "b.com", tcp().with_process("curl")).await, "OR,((PROCESS-NAME,Curl),(SRC-IP,192.168.9.0/24))");
+        let lan = ConnInfo::new(Proto::Tcp, Some("192.168.9.4:1234".parse().unwrap()), Some(6152), 6152).with_process("x");
+        assert_eq!(decide_ctx(&r, "b.com", lan).await.split(',').next(), Some("OR"));
+        let quic = ConnInfo::new(Proto::Quic, None, None, 0).with_process("x");
+        assert_eq!(decide_ctx(&r, "b.com", quic).await, "NOT,((PROTOCOL,TCP))");
+        let inport = ConnInfo::new(Proto::Tcp, None, Some(7001), 0).with_process("x");
+        assert_eq!(decide_ctx(&r, "b.com", inport).await, "IN-PORT,7000-7999");
+        let http = || tcp().with_process("x");
+        assert_eq!(decide_ctx(&r, "ads.b.com:80", http().with_url("http://ads.b.com/x".into())).await, "URL-REGEX,^http://ads\\.");
+        assert_eq!(decide_ctx(&r, "[2001:db8::1]:80", http()).await, "IP-CIDR6,2001:db8::/32");
+        let d = r.decide_with(&Target::parse_authority("b.com", 443).unwrap(), &tcp().with_process("curl")).await.unwrap();
+        assert_eq!(d.process.as_deref(), Some("curl"));
+    }
+
+    #[tokio::test]
+    async fn rule_set_with_extended_lines() {
+        let r = router("[Rule]\nRULE-SET,inline.list,REJECT\nFINAL,DIRECT\n");
+        let set = r.rule_sets().pop().unwrap();
+        *set.data.write().unwrap() = crate::ruleset::SetData::parse("PROCESS-NAME,curl\nDST-PORT,22\n", crate::ruleset::SetKind::Rules).0;
+        let ctx = || ConnInfo::new(Proto::Tcp, None, None, 0).with_process("curl");
+        assert_eq!(decide_ctx(&r, "x.org", ctx()).await, "RULE-SET,inline.list");
+        let other = ConnInfo::new(Proto::Tcp, None, None, 0).with_process("wget");
+        assert_eq!(decide_ctx(&r, "x.org:22", other).await, "RULE-SET,inline.list");
+        let other = ConnInfo::new(Proto::Tcp, None, None, 0).with_process("wget");
+        assert_eq!(decide_ctx(&r, "x.org", other).await, "FINAL");
     }
 
     #[test]

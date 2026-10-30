@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::rule::Rule;
-use crate::transport::{Layer, WsOpts};
+use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
 #[derive(Debug, Default)]
 pub struct General {
@@ -11,11 +11,19 @@ pub struct General {
     pub socks5_listen: Option<String>,
     pub api_listen: Option<String>,
     pub geoip_db: Option<String>,
+    /// MaxMind ASN database (e.g. GeoLite2-ASN.mmdb) for IP-ASN rules.
+    pub asn_db: Option<String>,
     pub loglevel: Option<String>,
     pub enhanced_mode: bool,
     pub tun_mtu: Option<u16>,
     pub fake_ip_range: Option<String>,
     pub dns_server: Vec<String>,
+    /// DoH (`https://`), DoT (`tls://`) or DoQ (`quic://`) servers, used instead of `dns_server`.
+    pub encrypted_dns_server: Vec<String>,
+    /// Send encrypted DNS through the proxy rules instead of straight out.
+    pub encrypted_dns_follow_outbound_mode: bool,
+    /// `ip:port` or `*:port` destinations whose DNS queries the TUN answers itself.
+    pub hijack_dns: Vec<String>,
     pub rule_set_update_interval: Option<u64>,
 }
 
@@ -36,8 +44,18 @@ pub enum ProxyDef {
         /// `xtls-rprx-vision` or none.
         flow: Option<String>,
     },
-    /// `obfs`: Salamander obfuscation password.
-    Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, obfs: Option<String> },
+    /// `obfs`: Salamander obfuscation password. `ports`: port-hopping spec such as
+    /// `443;20000-50000` (`port` is then just the first port); `hop_interval` in seconds.
+    Hysteria2 {
+        server: String,
+        port: u16,
+        password: String,
+        sni: Option<String>,
+        skip_cert_verify: bool,
+        obfs: Option<String>,
+        ports: Option<String>,
+        hop_interval: Option<u64>,
+    },
     Vmess {
         server: String,
         port: u16,
@@ -66,6 +84,17 @@ impl ProxyDef {
             if let Some(Layer::Grpc { service }) = layer {
                 parts.push("grpc=true".into());
                 parts.push(format!("grpc-service-name={service}"));
+            }
+            if let Some(Layer::Xhttp(x)) = layer {
+                parts.push("xhttp=true".into());
+                parts.push(format!("xhttp-path={}", x.path));
+                parts.extend(x.host.iter().map(|h| format!("xhttp-host={h}")));
+                if x.mode != XhttpMode::Auto {
+                    parts.push(format!("xhttp-mode={}", x.mode.as_str()));
+                }
+                if x.padding != XhttpOpts::default().padding {
+                    parts.push(format!("xhttp-padding-bytes={}-{}", x.padding.0, x.padding.1));
+                }
             }
             if let Some(Layer::Ws(w)) = layer {
                 parts.push("ws=true".into());
@@ -105,12 +134,18 @@ impl ProxyDef {
                     }
                 }
             }
-            ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs } => {
+            ProxyDef::Hysteria2 { server, port, password, sni, skip_cert_verify, obfs, ports, hop_interval } => {
                 parts.extend(["hysteria2".into(), server.clone(), port.to_string(), format!("password={password}")]);
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 if let Some(o) = obfs {
                     parts.push("obfs=salamander".into());
                     parts.push(format!("obfs-password={o}"));
+                }
+                if let Some(p) = ports {
+                    parts.push(format!("port-hopping={}", p.replace(',', ";")));
+                }
+                if let Some(i) = hop_interval {
+                    parts.push(format!("port-hopping-interval={i}"));
                 }
             }
             ProxyDef::Vmess { server, port, uuid, method, tls, sni, skip_cert_verify, layer } => {
@@ -167,11 +202,17 @@ pub struct Config {
     pub proxies: Vec<(String, ProxyDef)>,
     pub groups: Vec<GroupDef>,
     pub rules: Vec<Rule>,
+    /// `[Host]` lines: name or wildcard pattern, and its value (addresses or `server:...`).
+    pub hosts: Vec<(String, String)>,
 }
 
 fn split_kv(line: &str) -> Result<(&str, &str)> {
     let (k, v) = line.split_once('=').ok_or_else(|| anyhow!("expected `key = value`"))?;
     Ok((k.trim(), v.trim()))
+}
+
+fn list(v: &str) -> Vec<String> {
+    v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
 }
 
 fn unquote(s: &str) -> &str {
@@ -203,6 +244,13 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
     let mut take = |k: &str| params.remove(k);
     let layer = if matches!(take("grpc").as_deref(), Some("true" | "1")) {
         Some(Layer::Grpc { service: take("grpc-service-name").ok_or_else(|| anyhow!("grpc=true needs grpc-service-name"))? })
+    } else if matches!(take("xhttp").as_deref(), Some("true" | "1")) {
+        let mut x = XhttpOpts { path: take("xhttp-path").unwrap_or_else(|| "/".into()), host: take("xhttp-host"), ..Default::default() };
+        x.mode = XhttpMode::parse(&take("xhttp-mode").unwrap_or_default())?;
+        if let Some(p) = take("xhttp-padding-bytes") {
+            x.padding = XhttpOpts::parse_padding(&p)?;
+        }
+        Some(Layer::Xhttp(x))
     } else {
         matches!(take("ws").as_deref(), Some("true" | "1"))
             .then(|| Layer::Ws(WsOpts::from_params(take("ws-path"), take("ws-headers"))))
@@ -254,6 +302,17 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
                 None | Some("none") => None,
                 Some("salamander") => Some(take("obfs-password").ok_or_else(|| anyhow!("obfs=salamander needs obfs-password"))?),
                 Some(other) => bail!("unsupported hysteria2 obfs {other:?} (supported: salamander)"),
+            },
+            ports: match take("port-hopping").or_else(|| take("ports")) {
+                Some(p) => {
+                    crate::udphop::parse_ports(&p)?;
+                    Some(p.replace(';', ","))
+                }
+                None => None,
+            },
+            hop_interval: match take("port-hopping-interval").or_else(|| take("hop-interval")) {
+                Some(i) => Some(i.trim_end_matches('s').parse().map_err(|_| anyhow!("bad port-hopping-interval {i:?}"))?),
+                None => None,
             },
         },
         other => bail!("unsupported proxy type {other:?} (supported: ss, trojan, vless, vmess, hysteria2)"),
@@ -326,6 +385,7 @@ impl Config {
                         "socks5-listen" => g.socks5_listen = Some(listen_addr(v)),
                         "api-listen" => g.api_listen = Some(listen_addr(v)),
                         "geoip-db" => g.geoip_db = Some(v.to_string()),
+                        "asn-db" => g.asn_db = Some(v.to_string()),
                         "loglevel" => g.loglevel = Some(v.to_string()),
                         "enhanced-mode" => g.enhanced_mode = matches!(v, "true" | "1"),
                         "tun-mtu" => g.tun_mtu = Some(v.parse().map_err(|_| anyhow!("bad tun-mtu")).with_context(ctx)?),
@@ -336,11 +396,18 @@ impl Config {
                         "dns-server" => {
                             g.dns_server = v.split(',').map(str::trim).filter(|s| !s.is_empty() && *s != "system").map(String::from).collect()
                         }
+                        "encrypted-dns-server" => g.encrypted_dns_server = list(v),
+                        "encrypted-dns-follow-outbound-mode" => g.encrypted_dns_follow_outbound_mode = matches!(v, "true" | "1"),
+                        "hijack-dns" => g.hijack_dns = list(v),
                         _ => {} // unknown keys are tolerated for compatibility
                     }
                 }
                 "Proxy" => cfg.proxies.push(parse_proxy(line).with_context(ctx)?),
                 "Proxy Group" => cfg.groups.push(parse_group(line).with_context(ctx)?),
+                "Host" => {
+                    let (k, v) = split_kv(line).with_context(ctx)?;
+                    cfg.hosts.push((k.to_string(), v.to_string()));
+                }
                 "Rule" => cfg.rules.push(Rule::parse(line).with_context(ctx)?),
                 _ => {}
             }
@@ -371,6 +438,33 @@ mod tests {
         assert_eq!(cfg.groups[1].kind, GroupKind::UrlTest { tolerance_ms: 50 });
         assert_eq!(cfg.groups[1].interval_secs, 300);
         assert!(cfg.rules.len() >= 5);
+    }
+
+    #[test]
+    fn xhttp_roundtrip() {
+        let line = "X = vless, v.example, 443, uuid=u, tls=true, xhttp=true, xhttp-path=/xh, xhttp-host=cdn.example, xhttp-mode=stream-up, xhttp-padding-bytes=10-20";
+        let (name, def) = parse_proxy(line).unwrap();
+        let expected = XhttpOpts { path: "/xh".into(), host: Some("cdn.example".into()), mode: XhttpMode::StreamUp, padding: (10, 20) };
+        assert!(matches!(&def, ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. } if *x == expected));
+        let again = parse_proxy(&def.to_line(&name)).unwrap().1;
+        assert!(matches!(&again, ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. } if *x == expected));
+    }
+
+    #[test]
+    fn dns_settings() {
+        let cfg = Config::parse(
+            "[General]\ndns-server = system, 223.5.5.5\nencrypted-dns-server = https://1.1.1.1/dns-query, tls://8.8.8.8\n\
+             encrypted-dns-follow-outbound-mode = true\nhijack-dns = 8.8.8.8:53, *:53\n\
+             [Host]\nexample.com = 1.2.3.4\n*.lan = server:192.168.1.1\n",
+        )
+        .unwrap();
+        let g = &cfg.general;
+        assert_eq!(g.dns_server, vec!["223.5.5.5"]);
+        assert_eq!(g.encrypted_dns_server, vec!["https://1.1.1.1/dns-query", "tls://8.8.8.8"]);
+        assert!(g.encrypted_dns_follow_outbound_mode);
+        assert_eq!(g.hijack_dns, vec!["8.8.8.8:53", "*:53"]);
+        assert_eq!(cfg.hosts[1], ("*.lan".to_string(), "server:192.168.1.1".to_string()));
+        crate::dns::Resolver::new(&cfg).unwrap();
     }
 
     #[test]

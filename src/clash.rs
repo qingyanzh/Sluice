@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_yaml::Value;
 
 use crate::config::ProxyDef;
-use crate::transport::{Layer, WsOpts};
+use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
 /// Whether `text` looks like a Clash config (a top-level `proxies:` key).
 pub fn looks_like(text: &str) -> bool {
@@ -29,7 +29,7 @@ fn need(v: &Value, key: &str) -> Result<String> {
 }
 
 /// `network: ws` (`ws-opts: {path, headers: {Host}}`) or `network: grpc`
-/// (`grpc-opts: {grpc-service-name}`).
+/// (`grpc-opts: {grpc-service-name}`) or `network: xhttp` (`xhttp-opts: {path, host, mode}`).
 fn transport(v: &Value) -> Result<Option<Layer>> {
     match s(v, "network").as_deref() {
         None | Some("tcp") => Ok(None),
@@ -42,6 +42,16 @@ fn transport(v: &Value) -> Result<Option<Layer>> {
         Some("grpc") => Ok(Some(Layer::Grpc {
             service: v.get("grpc-opts").and_then(|o| s(o, "grpc-service-name")).unwrap_or_default(),
         })),
+        Some("xhttp") => {
+            let opts = v.get("xhttp-opts");
+            let get = |k: &str| opts.and_then(|o| s(o, k));
+            let mut x = XhttpOpts { path: get("path").unwrap_or_else(|| "/".into()), host: get("host"), ..Default::default() };
+            x.mode = XhttpMode::parse(&get("mode").unwrap_or_default())?;
+            if let Some(p) = get("x-padding-bytes") {
+                x.padding = XhttpOpts::parse_padding(&p)?;
+            }
+            Ok(Some(Layer::Xhttp(x)))
+        }
         Some(other) => bail!("transport {other:?} not supported yet"),
     }
 }
@@ -109,10 +119,15 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
                 Some("salamander") => Some(need(v, "obfs-password")?),
                 Some(other) => bail!("hysteria2 obfs {other:?} not supported"),
             };
-            if s(v, "ports").is_some() {
-                bail!("hysteria2 port hopping not supported yet");
+            let ports = s(v, "ports");
+            if let Some(p) = &ports {
+                crate::udphop::parse_ports(p)?;
             }
-            ProxyDef::Hysteria2 { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, obfs }
+            let hop_interval = match s(v, "hop-interval") {
+                Some(i) => Some(i.parse().map_err(|_| anyhow!("bad hop-interval {i:?}"))?),
+                None => None,
+            };
+            ProxyDef::Hysteria2 { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, obfs, ports, hop_interval }
         }
         other => bail!("{other} not supported"),
     };
@@ -160,7 +175,7 @@ proxies:
         Host: cdn.example.com
   - {name: US VLESS, type: vless, server: us.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: us.example.com}
   - {name: SG Trojan, type: trojan, server: sg.example.com, port: 443, password: pw, sni: sg.example.com, skip-cert-verify: true}
-  - {name: KR HY2, type: hysteria2, server: kr.example.com, port: 8443, password: pw}
+  - {name: KR HY2, type: hysteria2, server: kr.example.com, port: 8443, password: pw, ports: "443,20000-20010", hop-interval: 15}
   - {name: Reality, type: vless, server: r.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: www.microsoft.com, flow: xtls-rprx-vision, reality-opts: {public-key: 9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4, short-id: ab}}
   - {name: Splice, type: vless, server: s.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, flow: xtls-rprx-splice}
   - {name: Plugin SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: obfs}
@@ -184,6 +199,16 @@ proxy-groups:
             other => panic!("{other:?}"),
         }
         assert!(matches!(&nodes[3].1, ProxyDef::Trojan { skip_cert_verify: true, .. }));
-        assert!(matches!(&nodes[4].1, ProxyDef::Hysteria2 { port: 8443, .. }));
+        assert!(matches!(&nodes[4].1, ProxyDef::Hysteria2 { port: 8443, ports: Some(p), hop_interval: Some(15), .. } if p == "443,20000-20010"));
     }
+
+    #[test]
+    fn xhttp() {
+        let yaml = "proxies:\n  - {name: XH, type: vless, server: x.example, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, network: xhttp, xhttp-opts: {path: /xh, host: cdn.example, mode: packet-up}}\n";
+        let (nodes, skipped) = parse(yaml).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(matches!(&nodes[0].1, ProxyDef::Vless { layer: Some(Layer::Xhttp(x)), .. }
+            if x.path == "/xh" && x.host.as_deref() == Some("cdn.example") && x.mode == XhttpMode::PacketUp));
+    }
+
 }

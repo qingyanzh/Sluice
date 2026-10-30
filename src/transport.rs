@@ -1,4 +1,5 @@
-//! Stream transports under VMess/VLESS/Trojan: TCP, optionally TLS, optionally WebSocket.
+//! Stream transports under VMess/VLESS/Trojan: TCP, optionally TLS/REALITY, optionally
+//! WebSocket, gRPC or XHTTP.
 
 use std::sync::Arc;
 
@@ -51,6 +52,67 @@ pub enum Layer {
     Ws(WsOpts),
     /// Xray/V2Ray "gun": the stream rides one gRPC call `/<service>/Tun` over HTTP/2.
     Grpc { service: String },
+    /// Xray XHTTP (SplitHTTP): the stream split over plain HTTP/2 requests.
+    Xhttp(XhttpOpts),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum XhttpMode {
+    /// Xray's client default: stream-one over REALITY, packet-up otherwise.
+    #[default]
+    Auto,
+    PacketUp,
+    StreamUp,
+    StreamOne,
+}
+
+impl XhttpMode {
+    pub fn parse(s: &str) -> Result<Self> {
+        Ok(match s {
+            "" | "auto" => XhttpMode::Auto,
+            "packet-up" => XhttpMode::PacketUp,
+            "stream-up" => XhttpMode::StreamUp,
+            "stream-one" => XhttpMode::StreamOne,
+            other => bail!("unknown xhttp mode {other:?}"),
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            XhttpMode::Auto => "auto",
+            XhttpMode::PacketUp => "packet-up",
+            XhttpMode::StreamUp => "stream-up",
+            XhttpMode::StreamOne => "stream-one",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XhttpOpts {
+    pub path: String,
+    /// `:authority`; defaults to the SNI or server name.
+    pub host: Option<String>,
+    pub mode: XhttpMode,
+    /// `x_padding` length range; the server rejects requests outside its own range.
+    pub padding: (u32, u32),
+}
+
+impl Default for XhttpOpts {
+    fn default() -> Self {
+        XhttpOpts { path: "/".into(), host: None, mode: XhttpMode::Auto, padding: (100, 1000) }
+    }
+}
+
+impl XhttpOpts {
+    /// Xray's `xPaddingBytes`: `"100-1000"` or a single length.
+    pub fn parse_padding(s: &str) -> Result<(u32, u32)> {
+        let (a, b) = s.split_once('-').unwrap_or((s, s));
+        let range = (a.trim().parse()?, b.trim().parse()?);
+        if range.0 > range.1 {
+            bail!("bad xhttp padding range {s:?}");
+        }
+        Ok(range)
+    }
 }
 
 pub struct Transport {
@@ -88,7 +150,7 @@ impl Transport {
         let default_host = sni.clone().unwrap_or_else(|| server.clone());
         let tls = tls && reality.is_none();
         // gRPC needs HTTP/2, which TLS servers only speak when the client offers ALPN h2.
-        let alpn: &[&[u8]] = if matches!(layer, Some(Layer::Grpc { .. })) { &[b"h2"] } else { &[] };
+        let alpn: &[&[u8]] = if matches!(layer, Some(Layer::Grpc { .. } | Layer::Xhttp(_))) { &[b"h2"] } else { &[] };
         let tls = if tls { Some(tls_client_config(&server, sni, skip_cert_verify, alpn)?) } else { None };
         Ok(Transport { server, port, tls, reality, layer, default_host })
     }
@@ -103,6 +165,10 @@ impl Transport {
         match &self.layer {
             Some(Layer::Ws(ws)) => websocket(stream, ws, ws.host.as_deref().unwrap_or(&self.default_host)).await,
             Some(Layer::Grpc { service }) => grpc(stream, service, &self.default_host, self.tls.is_some()).await,
+            Some(Layer::Xhttp(x)) => {
+                let secure = self.tls.is_some() || self.reality.is_some();
+                xhttp(stream, x, x.host.as_deref().unwrap_or(&self.default_host), secure, self.reality.is_some()).await
+            }
             None => Ok(stream),
         }
     }
@@ -244,6 +310,174 @@ async fn grpc(stream: BoxStream, service: &str, authority: &str, tls: bool) -> R
         .await;
         if let Err(e) = result {
             debug!("grpc stream ended: {e:#}");
+        }
+        let _ = iwr.shutdown().await;
+    });
+    Ok(Box::new(app))
+}
+
+/// Sends `data` on an HTTP/2 stream, waiting for flow-control credit; false once the stream is gone.
+async fn send_h2(send: &mut h2::SendStream<bytes::Bytes>, mut data: bytes::Bytes, end: bool) -> bool {
+    while !data.is_empty() {
+        send.reserve_capacity(data.len());
+        match std::future::poll_fn(|cx| send.poll_capacity(cx)).await {
+            Some(Ok(cap)) if cap > 0 => {
+                let chunk = data.split_to(cap.min(data.len()));
+                if send.send_data(chunk, false).is_err() {
+                    return false;
+                }
+            }
+            Some(Ok(_)) => continue,
+            _ => return false,
+        }
+    }
+    !end || send.send_data(bytes::Bytes::new(), true).is_ok()
+}
+
+/// Reads a response body to the end, returning flow-control credit as it goes.
+async fn drain_h2(response: h2::client::ResponseFuture) -> Result<http::StatusCode> {
+    let resp = response.await?;
+    let status = resp.status();
+    let mut body = resp.into_body();
+    while let Some(chunk) = body.data().await {
+        let _ = body.flow_control().release_capacity(chunk?.len());
+    }
+    Ok(status)
+}
+
+fn random_uuid() -> String {
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex::encode(b);
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// Path with a leading and trailing `/` (Xray appends session and seq as path segments),
+/// plus any query the user configured.
+fn xhttp_base(path: &str) -> (String, String) {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    let mut p = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    if !p.ends_with('/') {
+        p.push('/');
+    }
+    (p, query.to_string())
+}
+
+/// Opens an XHTTP session on one HTTP/2 connection and bridges it to a byte stream.
+/// Downlink is one long response (the stream-one POST or a GET on `<path><session>`);
+/// uplink is the stream-one/stream-up request body or numbered packet-up POSTs.
+async fn xhttp(stream: BoxStream, opts: &XhttpOpts, authority: &str, secure: bool, reality: bool) -> Result<BoxStream> {
+    let mode = match opts.mode {
+        XhttpMode::Auto if reality => XhttpMode::StreamOne,
+        XhttpMode::Auto => XhttpMode::PacketUp,
+        m => m,
+    };
+    let (client, conn) = h2::client::handshake(stream).await?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            debug!("xhttp connection closed: {e}");
+        }
+    });
+    let scheme = if secure { "https" } else { "http" };
+    let (base, query) = xhttp_base(&opts.path);
+    let authority = authority.to_string();
+    let padding = opts.padding;
+    let request = move |method: &str, path: &str, len: Option<usize>| {
+        let n = rand::Rng::gen_range(&mut rand::thread_rng(), padding.0..=padding.1) as usize;
+        let sep = if query.is_empty() { "" } else { "&" };
+        let mut req = http::Request::builder()
+            .method(method)
+            .uri(format!("{scheme}://{authority}{path}?{query}{sep}x_padding={}", "X".repeat(n)))
+            .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+        if let Some(len) = len {
+            req = req.header("content-length", len);
+        }
+        req.body(())
+    };
+    let session = format!("{base}{}", random_uuid());
+
+    let (app, inner) = tokio::io::duplex(64 * 1024);
+    let (mut ird, mut iwr) = tokio::io::split(inner);
+    let mut first = client.clone().ready().await?;
+    let (down, up) = if mode == XhttpMode::StreamOne {
+        let (resp, send) = first.send_request(request("POST", &base, None)?, false)?;
+        (resp, Some(send))
+    } else {
+        let (resp, _) = first.send_request(request("GET", &session, None)?, true)?;
+        let up = if mode == XhttpMode::StreamUp {
+            let (resp, send) = client.clone().ready().await?.send_request(request("POST", &session, None)?, false)?;
+            tokio::spawn(async move {
+                match drain_h2(resp).await {
+                    Ok(s) if s != 200 => debug!("xhttp stream-up refused: HTTP {s}"),
+                    _ => {}
+                }
+            });
+            Some(send)
+        } else {
+            None
+        };
+        (resp, up)
+    };
+
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; MAX_FRAME * 4];
+        let mut send = up;
+        let mut seq = 0u64;
+        loop {
+            let n = match ird.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let data = bytes::Bytes::copy_from_slice(&buf[..n]);
+            if let Some(send) = send.as_mut() {
+                if !send_h2(send, data, false).await {
+                    return;
+                }
+                continue;
+            }
+            // packet-up: one POST per chunk, in order; the server reassembles by seq.
+            let result: Result<()> = async {
+                let req = request("POST", &format!("{session}/{seq}"), Some(n))?;
+                let (resp, mut body) = client.clone().ready().await?.send_request(req, false)?;
+                if !send_h2(&mut body, data, true).await {
+                    bail!("upload stream reset");
+                }
+                let status = drain_h2(resp).await?;
+                if status != 200 {
+                    bail!("HTTP {status}");
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = result {
+                debug!("xhttp packet-up POST {seq} failed: {e:#}");
+                return;
+            }
+            seq += 1;
+        }
+        if let Some(mut send) = send {
+            let _ = send.send_data(bytes::Bytes::new(), true);
+        }
+    });
+    tokio::spawn(async move {
+        let result: Result<()> = async {
+            let resp = down.await?;
+            if resp.status() != 200 {
+                bail!("xhttp refused: HTTP {} (check xhttp path, host and mode)", resp.status());
+            }
+            let mut body = resp.into_body();
+            while let Some(chunk) = body.data().await {
+                let chunk = chunk?;
+                let _ = body.flow_control().release_capacity(chunk.len());
+                iwr.write_all(&chunk).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            debug!("xhttp downlink ended: {e:#}");
         }
         let _ = iwr.shutdown().await;
     });
@@ -429,6 +663,18 @@ mod tests {
             assert_eq!(take_gun_messages(&mut wire).unwrap(), vec![b"next".to_vec()]);
             assert!(wire.is_empty());
         }
+    }
+
+    #[test]
+    fn xhttp_helpers() {
+        assert_eq!(xhttp_base("xh"), ("/xh/".to_string(), String::new()));
+        assert_eq!(xhttp_base("/xh/?ed=1"), ("/xh/".to_string(), "ed=1".to_string()));
+        assert_eq!(XhttpOpts::parse_padding("100-1000").unwrap(), (100, 1000));
+        assert_eq!(XhttpOpts::parse_padding("64").unwrap(), (64, 64));
+        assert!(XhttpOpts::parse_padding("9-1").is_err());
+        assert_eq!(XhttpMode::parse("stream-up").unwrap().as_str(), "stream-up");
+        let id = random_uuid();
+        assert_eq!((id.len(), &id[14..15]), (36, "4"));
     }
 
     #[test]
