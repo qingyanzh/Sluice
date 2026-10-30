@@ -9,7 +9,7 @@ struct LogLine: Identifiable {
     let message: String
 }
 
-struct Connection: Identifiable {
+struct Connection: Decodable, Identifiable {
     let id: Int
     let time: String
     let proto: String
@@ -17,6 +17,41 @@ struct Connection: Identifiable {
     let policy: String
     let rule: String
     let outbound: String
+    let process: String?
+    let src: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, network, target, src, policy, rule, outbound, process
+        case timeMs = "time_ms"
+    }
+
+    var policyChain: String { policy == outbound ? policy : "\(policy) → \(outbound)" }
+
+    func matches(_ query: String) -> Bool {
+        query.isEmpty || [target, policy, outbound, process ?? ""].contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+}
+
+extension Connection {
+    private static let clock: DateFormatter = {
+        let clock = DateFormatter()
+        clock.dateFormat = "HH:mm:ss"
+        return clock
+    }()
+
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        id = try fields.decode(Int.self, forKey: .id)
+        let timeMs = try fields.decode(Int64.self, forKey: .timeMs)
+        time = Self.clock.string(from: Date(timeIntervalSince1970: Double(timeMs) / 1000))
+        proto = try fields.decode(String.self, forKey: .network).uppercased()
+        target = try fields.decode(String.self, forKey: .target)
+        src = try fields.decodeIfPresent(String.self, forKey: .src)
+        policy = try fields.decode(String.self, forKey: .policy)
+        rule = try fields.decode(String.self, forKey: .rule)
+        outbound = try fields.decode(String.self, forKey: .outbound)
+        process = try fields.decodeIfPresent(String.self, forKey: .process)
+    }
 }
 
 /// What the app reads from the config file itself (the core owns the rest).
@@ -88,20 +123,29 @@ final class Core: ObservableObject {
     @Published private(set) var traffic: Traffic?
     /// Last 60 one-second samples of (up, down) bytes per second, oldest first.
     @Published private(set) var rateHistory: [(up: Double, down: Double)] = []
+    @Published private(set) var stats: TrafficStats?
+    @Published private(set) var statsFallback = false
+    @Published private(set) var statsHistory: [TrafficRatePoint] = []
+    @Published private(set) var statsError: String?
     /// Outbound mode reported by the core: "rule", "direct" or "global".
     @Published private(set) var mode = "rule"
     @Published private(set) var testingGroups: Set<String> = []
+    @Published private(set) var testingTotal = 0
     @Published private(set) var reloading = false
+    @Published private(set) var restarting = false
+    @Published private(set) var profileNames: [String] = []
     /// A menu bar shortcut to a pane, consumed when the main window appears.
     @Published var requestedPane: Pane?
     @Published var autoStart: Bool {
-        didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
+        didSet { defaults.set(autoStart, forKey: "autoStart") }
     }
-    @Published var configPath: String {
-        didSet { UserDefaults.standard.set(configPath, forKey: "configPath") }
+    @Published private(set) var configPath: String {
+        didSet { defaults.set(configPath, forKey: "configPath") }
     }
 
+    private let defaults: UserDefaults
     private var process: Process?
+    private var profileStore: ProfileStore?
     /// Root core (enhanced mode), started by the helper or the admin prompt; followed via its log file.
     private var rootPID: Int32?
     private var rootViaHelper = false
@@ -112,12 +156,23 @@ final class Core: ObservableObject {
     private var pending = ""
     private var nextID = 0
     private let maxLines = 2000
+    // Prefer the API until the core explicitly reports 404.
+    private var usesConnectionAPI = true
+    private var clearedConnectionIDs: Set<Connection.ID> = []
+    private var trafficHistory = TrafficHistory()
+    private var lastTrafficSampleAt: Date?
 
     static let defaultConfigPath: String = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Sluice", isDirectory: true)
         return dir.appendingPathComponent("sluice.conf").path
     }()
+
+    static let profilesDirectory = URL(fileURLWithPath: defaultConfigPath)
+        .deletingLastPathComponent().appendingPathComponent("profiles", isDirectory: true)
+
+    var activeProfileName: String? { profileStore?.activeName }
+    var canChangeProfile: Bool { state != .starting && !reloading && !restarting }
 
     static let starterConfig = """
         # Sluice config created by the app. Edit it, then press Reload.
@@ -138,14 +193,24 @@ final class Core: ObservableObject {
         FINAL,Proxy
         """
 
-    init() {
-        configPath = UserDefaults.standard.string(forKey: "configPath") ?? Core.defaultConfigPath
-        autoStart = UserDefaults.standard.bool(forKey: "autoStart")
+    init(defaults: UserDefaults = .standard, profilesDirectory: URL? = nil) {
+        self.defaults = defaults
+        configPath = defaults.string(forKey: "configPath") ?? Core.defaultConfigPath
+        autoStart = defaults.bool(forKey: "autoStart")
         ensureConfigExists()
+        do {
+            let store = try ProfileStore(baseDirectory: profilesDirectory ?? Self.profilesDirectory, defaults: defaults,
+                                         migratingFrom: URL(fileURLWithPath: configPath))
+            profileStore = store
+            profileNames = try store.names()
+            configPath = store.url(for: store.activeName).path
+        } catch {
+            lastActionError = "无法载入配置列表：\(error.localizedDescription)"
+        }
         refreshSummary()
     }
 
-    var api: APIClient? { summary.apiPort.map(APIClient.init(port:)) }
+    var api: APIClient? { summary.apiPort.map { APIClient(port: $0) } }
 
     /// The core binary: bundled in the app, or $SLUICE_CORE, or the repo's release build.
     var coreBinary: URL? {
@@ -199,6 +264,9 @@ final class Core: ObservableObject {
             state = .failed("Sluice core binary not found. Build it with `cargo build --release`.")
             return
         }
+
+        usesConnectionAPI = true
+        resetStats()
 
         if summary.enhancedMode {
             startPrivileged(binary)
@@ -336,9 +404,12 @@ final class Core: ObservableObject {
     }
 
     func restart() {
+        guard !restarting else { return }
         guard isActive else { return start() }
+        restarting = true
         stop()
         Task {
+            defer { restarting = false }
             let deadline = Date().addingTimeInterval(15)
             while isActive && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
             if !isActive { start() }
@@ -376,6 +447,7 @@ final class Core: ObservableObject {
         mode = "rule"
         upRate = 0
         downRate = 0
+        resetStats()
         groups = []
         appendLog(level: "APP", message: "core exited with status \(code)")
         if stopping || code == 0 {
@@ -386,8 +458,20 @@ final class Core: ObservableObject {
         }
     }
 
-    private func sampleTraffic(_ api: APIClient, elapsed: Double) async {
+    private func resetStats() {
+        stats = nil
+        statsFallback = false
+        statsHistory = []
+        statsError = nil
+        trafficHistory = TrafficHistory()
+        lastTrafficSampleAt = nil
+    }
+
+    private func sampleTraffic(_ api: APIClient) async {
         guard let now = try? await api.traffic() else { return }
+        guard !Task.isCancelled else { return }
+        let time = Date()
+        let elapsed = lastTrafficSampleAt.map { time.timeIntervalSince($0) } ?? 0
         if let prev = traffic, elapsed > 0 {
             upRate = Double(now.up >= prev.up ? now.up - prev.up : 0) / elapsed
             downRate = Double(now.down >= prev.down ? now.down - prev.down : 0) / elapsed
@@ -395,11 +479,32 @@ final class Core: ObservableObject {
             if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
         }
         traffic = now
+        lastTrafficSampleAt = time
+        trafficHistory.record(now, at: time)
+        if statsFallback { statsHistory = trafficHistory.samples }
+    }
+
+    private func sampleStats(_ api: APIClient) async {
+        guard !statsFallback else { return }
+        do {
+            let fresh = try await api.stats()
+            guard !Task.isCancelled else { return }
+            stats = fresh
+            statsFallback = fresh == nil
+            if statsFallback { statsHistory = trafficHistory.samples }
+            statsError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            statsError = "统计刷新失败：\(error.localizedDescription)"
+        }
     }
 
     private func poll() async {
         var tick = 0
-        var last = Date()
+        var lastStatsPoll = Date.distantPast
+        var connectionsSupported = true
+        usesConnectionAPI = true
+        clearedConnectionIDs = []
         while !Task.isCancelled {
             if let pid = rootPID {
                 followLog()
@@ -415,8 +520,27 @@ final class Core: ObservableObject {
                 if let m = try? await api.mode() { mode = m }
             }
             if let api, state == .running {
-                await sampleTraffic(api, elapsed: Date().timeIntervalSince(last))
-                last = Date()
+                await sampleTraffic(api)
+                if Date().timeIntervalSince(lastStatsPoll) >= 1 {
+                    await sampleStats(api)
+                    lastStatsPoll = Date()
+                }
+                if connectionsSupported {
+                    do {
+                        let fresh = try await api.connections()
+                        guard !Task.isCancelled else { return }
+                        if let fresh {
+                            usesConnectionAPI = true
+                            connections = Array(fresh.filter { !clearedConnectionIDs.contains($0.id) }.suffix(maxLines))
+                        } else {
+                            connectionsSupported = false
+                            usesConnectionAPI = false
+                            connections = logs.compactMap { connection(from: $0) }
+                        }
+                    } catch {
+                        // Keep the last records on a transient API or decoding failure.
+                    }
+                }
             }
             tick += 1
             // Policies every 2 s, traffic every 1 s; faster while starting or following a root log.
@@ -440,14 +564,20 @@ final class Core: ObservableObject {
     }
 
     func select(group: String, option: String) {
+        guard state == .running,
+              groups.contains(where: { $0.group == group && $0.isSelectable && $0.options.contains(where: { $0.name == option }) }) else { return }
         perform("切换到 \(option) ") { try await $0.select(group: group, option: option) }
     }
 
     func test(group: String) {
         guard state == .running, let api, !testingGroups.contains(group) else { return }
         testingGroups.insert(group)
+        testingTotal += 1
         Task {
-            defer { testingGroups.remove(group) }
+            defer {
+                testingGroups.remove(group)
+                if testingGroups.isEmpty { testingTotal = 0 }
+            }
             do {
                 try await api.test(group: group)
                 if let fresh = try? await api.policies() { groups = fresh }
@@ -458,6 +588,8 @@ final class Core: ObservableObject {
     }
 
     func testAll() {
+        guard testingGroups.isEmpty else { return }
+        // Each test starts its own async request, so groups run concurrently.
         for g in groups { test(group: g.group) }
     }
 
@@ -497,6 +629,61 @@ final class Core: ObservableObject {
     }
 
     // MARK: config editing
+
+    private func profiles() throws -> ProfileStore {
+        guard let profileStore else { throw APIError(message: "配置目录不可用，请检查权限后重新打开应用。") }
+        return profileStore
+    }
+
+    func refreshProfiles() {
+        do { profileNames = try profiles().names() }
+        catch { lastActionError = "无法刷新配置列表：\(error.localizedDescription)" }
+    }
+
+    func createProfile(name: String, contents: String) throws {
+        try profiles().create(name: name, contents: contents)
+        refreshProfiles()
+    }
+
+    func duplicateProfile(_ name: String, as newName: String) throws {
+        try profiles().duplicate(name, as: newName)
+        refreshProfiles()
+    }
+
+    func renameProfile(_ name: String, to newName: String) throws {
+        let store = try profiles()
+        let wasActive = store.activeName == name
+        if wasActive { try requireProfileChange() }
+        try store.rename(name, to: newName)
+        if wasActive { applyProfilePath(store) }
+        refreshProfiles()
+    }
+
+    func deleteProfile(_ name: String) throws {
+        try profiles().delete(name)
+        refreshProfiles()
+    }
+
+    func switchProfile(to name: String) throws {
+        try requireProfileChange()
+        let store = try profiles()
+        guard name != store.activeName else { return }
+        try store.activate(name)
+        applyProfilePath(store)
+    }
+
+    private func requireProfileChange() throws {
+        guard canChangeProfile else { throw APIError(message: "内核正在启动或应用配置，请稍后再试。") }
+    }
+
+    private func applyProfilePath(_ store: ProfileStore) {
+        let path = store.url(for: store.activeName).path
+        guard configPath != path else { return }
+        configPath = path
+        refreshSummary()
+        // Reload has no path parameter: restart so `run` receives the new file.
+        if isActive { restart() }
+    }
 
     func readConfig() -> String {
         (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
@@ -675,7 +862,10 @@ final class Core: ObservableObject {
     }
 
     func clearLogs() { logs = [] }
-    func clearConnections() { connections = [] }
+    func clearConnections() {
+        if usesConnectionAPI { clearedConnectionIDs.formUnion(connections.map(\.id)) }
+        connections = []
+    }
 
     // MARK: output parsing
 
@@ -699,13 +889,17 @@ final class Core: ObservableObject {
         }
         let (time, level, message) = (String(m.1), String(m.2), String(m.3))
         appendLog(time: time, level: level, message: message)
-        if let c = message.wholeMatch(of: Core.connPattern) {
-            nextID += 1
-            connections.append(Connection(
-                id: nextID, time: Core.shortTime(time), proto: c.1 == nil ? "TCP" : "UDP",
-                target: String(c.2), policy: String(c.3), rule: String(c.4), outbound: String(c.5)))
+        if !usesConnectionAPI, let log = logs.last, let connection = connection(from: log) {
+            connections.append(connection)
             if connections.count > maxLines { connections.removeFirst(connections.count - maxLines) }
         }
+    }
+
+    private func connection(from log: LogLine) -> Connection? {
+        guard let c = log.message.wholeMatch(of: Core.connPattern) else { return nil }
+        return Connection(id: log.id, time: log.time, proto: c.1 == nil ? "TCP" : "UDP",
+                          target: String(c.2), policy: String(c.3), rule: String(c.4), outbound: String(c.5),
+                          process: nil, src: nil)
     }
 
     private func appendLog(time: String? = nil, level: String, message: String) {

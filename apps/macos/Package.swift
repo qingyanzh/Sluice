@@ -18,6 +18,6 @@ let package = Package(
         ),
         // Privileged launchd daemon that runs the core as root for enhanced mode (docs/helper.md).
         .executableTarget(name: "SluiceHelper", dependencies: ["SluiceHelperShared"], path: "Sources/SluiceHelper"),
-        .testTarget(name: "SluiceAppTests", dependencies: ["SluiceApp"]),
+        .testTarget(name: "SluiceAppTests", dependencies: ["SluiceApp"], resources: [.copy("Fixtures")]),
     ]
 )

@@ -59,6 +59,7 @@ struct NodesView: View {
         VStack(spacing: 0) {
             PaneHeader(title: "节点", subtitle: "\(records.filter { !$0.isSubscription }.count) 个节点 · \(records.filter(\.isSubscription).count) 个订阅") {
                 Button { refresh() } label: { Label("刷新列表", systemImage: "arrow.clockwise") }.labelStyle(.iconOnly)
+                TestAllLatencyButton()
                 Button { showAddNode = true } label: { Label("添加节点", systemImage: "plus") }
                 Button { showAddSub = true } label: { Label("添加订阅", systemImage: "link.badge.plus") }.glassButton(prominent: true)
             }
@@ -177,11 +178,15 @@ struct NodeDetailSheet: View {
                     row("更新间隔", node.interval)
                 } else {
                     row("传输方式", node.transport)
-                    row("最近延迟", latency.map { $0 < 0 ? "测试失败" : "\($0) ms" } ?? "尚未测试")
+                    HStack {
+                        Text("最近延迟").font(DS.label).foregroundStyle(DS.ink2)
+                        Spacer(minLength: 16)
+                        LatencyBadge(latency: latency)
+                    }
                 }
             }
             .padding(DS.cardPadding).glass()
-            Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : "连接参数可在配置页编辑，节点切换和延迟测试请前往策略页。")
+            Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : "连接参数可在配置页编辑，节点切换请前往策略页。")
                 .font(DS.small).foregroundStyle(DS.ink2)
             HStack {
                 Button("复制服务器") { copyText(node.endpoint) }.glassButton()

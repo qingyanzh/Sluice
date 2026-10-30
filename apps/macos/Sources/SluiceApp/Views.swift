@@ -4,7 +4,7 @@ import ServiceManagement
 import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
-    case activity, overview, requests, policy, nodes, rule, logs, profile
+    case activity, overview, requests, policy, nodes, rule, logs, dns, profile
     var id: String { rawValue }
 
     var title: String {
@@ -16,6 +16,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .nodes: "节点"
         case .rule: "规则"
         case .logs: "日志"
+        case .dns: "DNS 缓存"
         case .profile: "配置"
         }
     }
@@ -29,6 +30,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .nodes: "globe.asia.australia"
         case .rule: "line.3.horizontal.decrease.circle"
         case .logs: "doc.text"
+        case .dns: "network"
         case .profile: "curlybraces.square"
         }
     }
@@ -43,6 +45,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .nodes: "配置中的节点和订阅"
         case .rule: "自上而下匹配，命中即停止"
         case .logs: "内核输出"
+        case .dns: "缓存的域名解析与剩余有效期"
         case .profile: ""
         }
     }
@@ -51,11 +54,11 @@ enum Pane: String, CaseIterable, Identifiable {
     static let sections: [(String?, [Pane])] = [
         (nil, [.activity]),
         ("代理", [.requests, .policy, .nodes, .rule]),
-        ("工具", [.logs, .profile]),
+        ("工具", [.logs, .dns, .profile]),
     ]
     /// 设置 sits apart at the bottom of the sidebar, above the status footer.
     static let pinned: Pane = .overview
-    /// Sidebar order, which is also the ⌘1…⌘8 order.
+    /// Sidebar order, which is also the ⌘1…⌘9 order.
     static let ordered: [Pane] = sections.flatMap(\.1) + [pinned]
 }
 
@@ -190,7 +193,7 @@ struct MainView: View {
         HStack(spacing: 0) {
             Sidebar(pane: $pane)
                 .background {
-                    // ⌘1…⌘8 jump to panes in sidebar order.
+                    // ⌘1…⌘9 jump to panes in sidebar order.
                     ForEach(Array(Pane.ordered.enumerated()), id: \.element) { i, p in
                         Button("") { withAnimation(DS.spring) { pane = p } }
                             .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
@@ -219,6 +222,7 @@ struct MainView: View {
                 case .nodes: NodesView(intent: $nodesIntent)
                 case .rule: RuleView(pane: $pane)
                 case .logs: LogsView()
+                case .dns: DNSView()
                 case .profile: ConfigView(draft: configDraft)
                 }
                 }
@@ -477,17 +481,44 @@ struct ErrorBanner: View {
 }
 
 func latencyStyle(_ latency: Int?) -> (String, Color) {
-    guard let ms = latency else { return ("点击测试", .secondary) }
-    if ms < 0 { return ("失败", DS.fail) }
-    return ("\(ms) ms", ms < 200 ? DS.ok : ms < 500 ? DS.warn : DS.fail)
+    let color: Color
+    switch LatencyClassification(milliseconds: latency) {
+    case .untested: color = DS.ink3
+    case .good: color = DS.ok
+    case .ok: color = DS.warn
+    case .slow, .timeout: color = DS.fail
+    }
+    return (latencyText(latency), color)
 }
 
 struct LatencyBadge: View {
     let latency: Int?
     var body: some View {
         let (text, color) = latencyStyle(latency)
-        StatusBadge(text: latency == nil ? "未测试" : text, tone: latency == nil ? .secondary : color)
+        StatusBadge(text: text, tone: color)
             .monospacedDigit()
+    }
+}
+
+/// Both panes share the same test state, including progress across pane changes.
+struct TestAllLatencyButton: View {
+    @EnvironmentObject private var core: Core
+
+    var body: some View {
+        Button { core.testAll() } label: {
+            HStack(spacing: 6) {
+                if !core.testingGroups.isEmpty {
+                    ProgressView().controlSize(.small)
+                    Text("测试中… \(core.testingTotal - core.testingGroups.count)/\(core.testingTotal)")
+                        .monospacedDigit()
+                } else {
+                    Label("测试全部", systemImage: "speedometer")
+                }
+            }
+        }
+        .glassButton()
+        .disabled(core.state != .running || core.groups.isEmpty || !core.testingGroups.isEmpty)
+        .help("并发测试所有策略组的节点延迟")
     }
 }
 
@@ -1114,10 +1145,7 @@ struct PolicyView: View {
                 HStack {
                     SectionTitle(text: "策略组")
                     Spacer()
-                    Button(core.testingGroups.isEmpty ? "测试全部" : "测试中…") { core.testAll() }
-                        .glassButton()
-                        .controlSize(.small)
-                        .disabled(core.state != .running || core.groups.isEmpty || !core.testingGroups.isEmpty)
+                    TestAllLatencyButton().controlSize(.small)
                 }
                 if core.groups.isEmpty {
                     EmptyState(icon: "signpost.right",
@@ -1176,7 +1204,7 @@ struct GroupSection: View {
                 IconTile(symbol: kindIcon, size: 28)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(group.group).font(DS.heading).lineLimit(1)
-                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · 点击选项切换" : "\(Self.kindLabel(group.type)) · 自动选择")
+                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · 点击选项切换" : "\(Self.kindLabel(group.type)) · 自动 · 当前：\(group.selected)")
                         .font(DS.caption).foregroundStyle(DS.ink2)
                 }
                 Spacer(minLength: 8)
@@ -1199,7 +1227,7 @@ struct GroupSection: View {
     }
 }
 
-/// One option: availability dot, name, latency. The current choice is blue.
+/// A node's latency and current selection; automatic groups remain read-only.
 struct OptionChip: View {
     @EnvironmentObject var core: Core
     let group: PolicyGroup
@@ -1207,34 +1235,38 @@ struct OptionChip: View {
     @State private var hovering = false
 
     var body: some View {
-        let chosen = group.selected == option.name
-        let dot: Color = option.latencyMs.map { $0 < 0 ? DS.fail : latencyStyle($0).1 } ?? DS.off.opacity(0.5)
-        Button {
-            if !chosen { core.select(group: group.group, option: option.name) }
-        } label: {
-            HStack(spacing: 8) {
-                Circle().fill(dot).frame(width: 7, height: 7)
-                Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 4)
-                Text(option.latencyMs.map { $0 < 0 ? "失败" : "\($0) ms" } ?? "—")
-                    .font(DS.caption.monospacedDigit())
-                    .foregroundStyle(option.latencyMs.map { $0 < 0 ? DS.fail : DS.ink2 } ?? DS.ink3)
-            }
-            .padding(.horizontal, 12).frame(height: 40)
-            .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
-                        in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
-            .overlay {
-                if chosen {
-                    RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(DS.accent.opacity(0.35), lineWidth: 1)
-                }
-            }
-            .contentShape(Rectangle())
+        if group.isSelectable {
+            Button {
+                if group.selected != option.name { core.select(group: group.group, option: option.name) }
+            } label: { content }
+            .buttonStyle(PressableStyle())
+            .disabled(core.state != .running)
+            .help(group.selected == option.name ? "当前选择" : "切换到 \(option.name)")
+        } else {
+            content
+                .help("自动选择 · 当前：\(group.selected)")
         }
-        .buttonStyle(PressableStyle())
-        .disabled(!group.isSelectable || core.state != .running)
+    }
+
+    private var content: some View {
+        let chosen = group.selected == option.name
+        return HStack(spacing: 8) {
+            if chosen { Image(systemName: "checkmark").font(DS.caption).foregroundStyle(DS.accent) }
+            Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 4)
+            LatencyBadge(latency: option.latencyMs)
+        }
+        .padding(.horizontal, 12).frame(height: 40)
+        .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
+                    in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+        .overlay {
+            if chosen {
+                RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(DS.accent.opacity(0.35), lineWidth: 1)
+            }
+        }
+        .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(DS.spring, value: chosen)
-        .help(chosen ? "当前选择" : group.isSelectable ? "切换到 \(option.name)" : "这个策略组自动选择，不能手动切换")
     }
 }
 
@@ -1389,18 +1421,18 @@ struct RequestsView: View {
 
     var body: some View {
         let source = paused ? frozen : core.connections
+        let query = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         let rows = source.reversed().filter {
-            kind.admits($0.outbound)
-                && (filter.isEmpty || $0.target.localizedCaseInsensitiveContains(filter) || $0.outbound.localizedCaseInsensitiveContains(filter)
-                    || $0.policy.localizedCaseInsensitiveContains(filter))
+            kind.admits($0.outbound) && $0.matches(query)
         }
+        let showsProcess = source.contains { !($0.process ?? "").isEmpty }
         let filtering = kind != .all || !filter.isEmpty
         VStack(spacing: 0) {
             PaneHeader(title: "请求", subtitle: filtering ? "显示 \(rows.count) / \(source.count) 个请求" : "\(source.count) 个请求") {
                 GlassSegmented(options: [(OutboundKind.all, "全部", nil), (.proxy, "代理", nil), (.direct, "直连", nil), (.reject, "拒绝", nil)],
                                selection: $kind)
                     .frame(width: 250)
-                SearchField(prompt: "目标、策略或出站", text: $filter)
+                SearchField(prompt: "目标、进程、策略或出站", text: $filter)
                 Button {
                     if !paused { frozen = core.connections }
                     paused.toggle()
@@ -1410,29 +1442,40 @@ struct RequestsView: View {
                     .labelStyle(.iconOnly).disabled(source.isEmpty)
             }
             HStack(spacing: DS.gap) {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(Array(rows)) { c in
-                            RequestRow(connection: c, selected: c.id == selection) {
-                                withAnimation(DS.spring) { selection = c.id }
-                            }
-                            .contextMenu {
-                                Button("复制目标") { copyText(c.target) }
-                                Button("复制匹配规则") { copyText(c.rule) }
+                VStack(spacing: 0) {
+                    if showsProcess {
+                        HStack(spacing: 12) {
+                            Text("目标与路由").frame(maxWidth: .infinity, alignment: .leading)
+                            Text("进程").frame(width: 100, alignment: .leading)
+                        }
+                        .font(DS.caption).foregroundStyle(DS.ink2)
+                        .padding(.horizontal, 18).padding(.vertical, 12)
+                        Divider()
+                    }
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(rows)) { c in
+                                RequestRow(connection: c, selected: c.id == selection, showsProcess: showsProcess) {
+                                    withAnimation(DS.spring) { selection = c.id }
+                                }
+                                .contextMenu {
+                                    Button("复制目标") { copyText(c.target) }
+                                    Button("复制匹配规则") { copyText(c.rule) }
+                                }
                             }
                         }
+                        .padding(6)
                     }
-                    .padding(6)
-                }
-                .overlay {
-                    if rows.isEmpty {
-                        if !core.isActive && core.connections.isEmpty {
-                            EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                       detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
-                        } else {
-                            EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
-                                       detail: filtering ? "试试其他关键词，或清除筛选查看全部请求。" : "经过 Sluice 的连接会实时显示在这里。",
-                                       action: filtering ? ("清除筛选", { filter = ""; kind = .all }) : nil)
+                    .overlay {
+                        if rows.isEmpty {
+                            if !core.isActive && core.connections.isEmpty {
+                                EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
+                                           detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
+                            } else {
+                                EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
+                                           detail: filtering ? "试试其他关键词，或清除筛选查看全部请求。" : "经过 Sluice 的连接会实时显示在这里。",
+                                           action: filtering ? ("清除筛选", { filter = ""; kind = .all }) : nil)
+                            }
                         }
                     }
                 }
@@ -1469,6 +1512,7 @@ struct OutboundTag: View {
 struct RequestRow: View {
     let connection: Connection
     let selected: Bool
+    let showsProcess: Bool
     let action: () -> Void
     @State private var hovering = false
 
@@ -1489,6 +1533,12 @@ struct RequestRow: View {
                         Spacer(minLength: 4)
                         Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3).fixedSize()
                     }
+                }
+                if showsProcess {
+                    Text(connection.process ?? "").font(DS.small).foregroundStyle(DS.ink2)
+                        .lineLimit(1).truncationMode(.middle)
+                        .frame(width: 100, alignment: .leading)
+                        .help(connection.process ?? "")
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 12)
@@ -1637,12 +1687,14 @@ struct RequestDetail: View {
                         }
                     }
                     detailGroup("路由", [("规则", AnyView(Text(c.rule).textSelection(.enabled))),
-                                         ("策略", AnyView(Text(c.policy))),
+                                         ("策略链", AnyView(Text(c.policyChain).textSelection(.enabled))),
                                          ("出站", AnyView(OutboundTag(name: c.outbound)))])
                     detailGroup("请求", [("时间", AnyView(Text(c.time).monospacedDigit())),
+                                         ("进程", AnyView(Text(c.process ?? "—").textSelection(.enabled))),
+                                         ("来源", AnyView(Text(c.src ?? "—").textSelection(.enabled))),
                                          ("目标", AnyView(Text(c.target).textSelection(.enabled)))])
                 }
-                .padding(16)
+                .padding(20)
             }
             .id(c.id)
             .transition(.opacity)
@@ -1659,7 +1711,7 @@ struct RequestDetail: View {
                     HStack(alignment: .firstTextBaseline) {
                         Text(row.0).font(DS.small).foregroundStyle(DS.ink2)
                         Spacer(minLength: 12)
-                        row.1.font(DS.small).lineLimit(2).multilineTextAlignment(.trailing)
+                        row.1.font(DS.small).multilineTextAlignment(.trailing).fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.vertical, 8)
                     if i < rows.count - 1 { Divider().opacity(0.5) }
@@ -1983,13 +2035,16 @@ struct ConfigView: View {
     @EnvironmentObject var core: Core
     @ObservedObject var draft: ConfigDraft
     @State private var confirmRestore = false
-    @State private var confirmChoose = false
+    @State private var pendingSwitch: String?
+    @State private var pendingDelete: String?
+    @State private var profileEdit: ProfileEdit?
+    @State private var editorMode = "文本"
 
     var body: some View {
         VStack(spacing: 0) {
             let name = URL(fileURLWithPath: core.configPath).lastPathComponent
             PaneHeader(title: "配置", subtitle: draft.text == draft.saved ? "\(name) · 已保存" : "\(name) · 有未保存的修改") {
-                Button("选取…") { if draft.hasChanges { confirmChoose = true } else { choose() } }.disabled(draft.busy)
+                Button("从当前新建…") { profileEdit = .create }.disabled(draft.busy)
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }
             }
             if draft.changedOnDisk {
@@ -1998,8 +2053,28 @@ struct ConfigView: View {
                     Button("载入磁盘版本") { confirmRestore = true }.glassButton(prominent: true)
                 }.padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
-            ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
-                .glassPanel()
+            Picker("编辑方式", selection: $editorMode) {
+                Text("文本").tag("文本")
+                Text("规则").tag("规则")
+                Text("策略组").tag("策略组")
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360)
+            .padding(.horizontal, DS.gutter).padding(.bottom, 12)
+            HStack(alignment: .top, spacing: DS.gap) {
+                ConfigProfileList(busy: draft.busy, switchProfile: requestSwitch,
+                                  edit: { profileEdit = $0 }, delete: { pendingDelete = $0 })
+                Group {
+                    if editorMode == "文本" {
+                        ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
+                            .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+                            .glass()
+                    } else {
+                        StructuredConfigEditors(text: $draft.text, section: editorMode == "规则" ? "Rule" : "Proxy Group")
+                            .disabled(draft.busy)
+                    }
+                }
+            }
+            .padding(.horizontal, DS.gutter).padding(.bottom, 16)
             HStack {
                 if let (msg, ok) = draft.message {
                     if ok {
@@ -2015,21 +2090,56 @@ struct ConfigView: View {
                 Spacer()
                 Button("还原") { confirmRestore = true }.disabled(draft.busy || (!draft.hasChanges && !draft.changedOnDisk)).help(draft.text == draft.saved ? "没有修改可还原" : "放弃修改，恢复到磁盘上的版本")
                 Button(draft.busy ? "检查中…" : "检查") { run(save: false) }.disabled(draft.busy)
-                Button(draft.busy ? "处理中…" : core.state == .running ? "保存并应用" : "保存") { run(save: true) }.keyboardShortcut("s").disabled(draft.busy || draft.text == draft.saved || draft.changedOnDisk)
+                Button(draft.busy ? "处理中…" : core.state == .running ? "保存并应用" : "保存") { run(save: true) }.keyboardShortcut("s").disabled(draft.busy || !core.canChangeProfile || draft.text == draft.saved || draft.changedOnDisk)
                     .help(draft.text == draft.saved ? "没有修改需要保存" : "检查通过后保存，并让运行中的内核重新加载 (⌘S)")
                     .glassButton(prominent: true)
             }
             .glassButton()
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .onAppear(perform: load)
+        .onAppear { core.refreshProfiles(); load() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            core.refreshProfiles()
+            if !draft.busy { load() }
+        }
         // Validation feedback belongs to the submitted version of the text.
         .onChange(of: draft.text) { if !draft.busy { draft.message = nil } }
         .confirmationDialog("放弃当前未保存的修改？", isPresented: $confirmRestore) {
             Button("载入磁盘版本", role: .destructive) { draft.restore(core.readConfig()) }
         }
-        .confirmationDialog("切换配置文件会放弃当前草稿", isPresented: $confirmChoose) {
-            Button("放弃草稿并选取…", role: .destructive, action: choose)
+        .confirmationDialog("切换配置会放弃当前未保存的修改", isPresented: Binding(
+            get: { pendingSwitch != nil }, set: { if !$0 { pendingSwitch = nil } })) {
+            if let name = pendingSwitch {
+                Button("放弃修改并切换到「\(name)」", role: .destructive) { switchProfile(name) }
+                Button("复制草稿并切换") { copyText(draft.text); switchProfile(name) }
+            }
+        }
+        .confirmationDialog("删除「\(pendingDelete ?? "")」？", isPresented: Binding(
+            get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
+            if let name = pendingDelete {
+                Button("删除配置", role: .destructive) {
+                    do { try core.deleteProfile(name) }
+                    catch { core.lastActionError = error.localizedDescription }
+                    pendingDelete = nil
+                }
+            }
+        } message: {
+            Text("配置文件将从本地永久删除。")
+        }
+        .sheet(item: $profileEdit) { action in
+            ProfileNameSheet(action: action) { name in
+                switch action {
+                case .create:
+                    try core.createProfile(name: name, contents: draft.text)
+                case .duplicate(let source):
+                    try core.duplicateProfile(source, as: name)
+                case .rename(let source):
+                    let active = core.activeProfileName == source
+                    try core.renameProfile(source, to: name)
+                    // Renaming the active file preserves its unsaved editor contents.
+                    if active { draft.path = core.configPath }
+                }
+            }
         }
     }
 
@@ -2059,16 +2169,20 @@ struct ConfigView: View {
         }
     }
 
-    private func choose() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "选择 Sluice 配置文件"
-        if panel.runModal() == .OK, let url = panel.url {
-            core.configPath = url.path
-            core.refreshSummary()
+    private func requestSwitch(_ name: String) {
+        guard name != core.activeProfileName else { return }
+        if draft.hasChanges { pendingSwitch = name } else { switchProfile(name) }
+    }
+
+    private func switchProfile(_ name: String) {
+        do {
+            try core.switchProfile(to: name)
+            draft.message = nil
             load()
+        } catch {
+            core.lastActionError = error.localizedDescription
         }
+        pendingSwitch = nil
     }
 }
 
