@@ -137,6 +137,7 @@ struct Sidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
+        .help("\(p.title)  ⌘\((Pane.sections.flatMap(\.1).firstIndex(of: p) ?? 0) + 1)")
         .onHover { inside in withAnimation(.easeOut(duration: 0.15)) { hovered = inside ? p : (hovered == p ? nil : hovered) } }
     }
 }
@@ -175,6 +176,14 @@ struct MainView: View {
     var body: some View {
         HStack(spacing: 0) {
             Sidebar(pane: $pane)
+                .background {
+                    // ⌘1…⌘8 jump to panes in sidebar order.
+                    ForEach(Array(Pane.sections.flatMap(\.1).enumerated()), id: \.element) { i, p in
+                        Button("") { withAnimation(DS.spring) { pane = p } }
+                            .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
+                            .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
+                    }
+                }
             VStack(spacing: 0) {
                 if let err = core.lastActionError {
                     ErrorBanner(message: err) { core.lastActionError = nil }
@@ -406,13 +415,22 @@ struct ErrorBanner: View {
     let message: String
     let dismiss: () -> Void
     var body: some View {
-        HStack(alignment: .top) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-            Text(message).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(.borderless)
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(Color.red.gradient, in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
+            Text(message).font(DS.label).textSelection(.enabled).lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: dismiss) { Image(systemName: "xmark") }
+                .buttonStyle(RoundIconStyle())
+                .accessibilityLabel("关闭")
         }
         .padding(10)
-        .background(.red.opacity(0.1))
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5))
+        .padding(.horizontal, DS.gutter).padding(.top, 8)
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 }
 
@@ -1225,13 +1243,15 @@ struct GroupCard: View {
     let group: PolicyGroup
     @State private var showing = false
 
-    private var kindLabel: String {
-        switch group.type {
+    private var kindLabel: String { Self.kindLabel(group.type) }
+
+    static func kindLabel(_ type: String) -> String {
+        switch type {
         case "select": "手动选择策略组"
         case "url-test": "自动测试策略组"
         case "fallback": "故障转移策略组"
         case "load-balance": "负载均衡策略组"
-        default: group.type
+        default: type
         }
     }
 
@@ -1285,17 +1305,22 @@ struct GroupOptions: View {
         let g = core.groups.first { $0.group == group.group } ?? group
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(g.group).font(DS.heading)
-                Text(g.type).font(DS.small).foregroundStyle(DS.ink2)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(g.group).font(DS.heading)
+                    Text(GroupCard.kindLabel(g.type)).font(DS.caption).foregroundStyle(DS.ink2)
+                }
                 Spacer()
-                Button("测试") { core.test(group: g.group) }.glassButton().controlSize(.small).disabled(g.isSelectable)
+                if !g.isSelectable {
+                    Button("测试") { core.test(group: g.group) }.glassButton().controlSize(.small)
+                }
             }
-            .padding(10)
+            .padding(.horizontal, 14).padding(.vertical, 12)
             Divider()
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(g.options, id: \.name) { o in OptionRow(group: g, option: o) }
                 }
+                .padding(.vertical, 4)
             }
             .frame(maxHeight: 360)
         }
@@ -1314,13 +1339,16 @@ struct OptionRow: View {
             if !chosen { core.select(group: group.group, option: option.name) }
         } label: {
             HStack {
-                Image(systemName: "checkmark").opacity(chosen ? 1 : 0).scaleEffect(chosen ? 1 : 0.5)
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold))
+                    .opacity(chosen ? 1 : 0).scaleEffect(chosen ? 1 : 0.5)
                     .foregroundStyle(DS.accent).frame(width: 14).animation(DS.spring, value: chosen)
-                Text(option.name)
+                Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular))
                 Spacer()
                 LatencyBadge(latency: option.latencyMs)
             }
-            .padding(.horizontal, 10).padding(.vertical, 6)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(chosen ? DS.accent.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .padding(.horizontal, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
@@ -1427,6 +1455,70 @@ struct AddCard: View {
     }
 }
 
+/// Header shared by every sheet: an accent tile, a title and one line on what to do.
+struct SheetHeader: View {
+    let icon: String
+    let title: String
+    let detail: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            IconTile(symbol: icon, on: true, size: 36)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 17, weight: .bold))
+                Text(detail).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+/// A labelled input on a soft well, used inside sheets.
+struct SheetField: View {
+    let label: String
+    let prompt: String
+    @Binding var text: String
+    var multiline = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).font(DS.caption).foregroundStyle(DS.ink2)
+            Group {
+                if multiline {
+                    TextField(prompt, text: $text, axis: .vertical).lineLimit(4...8)
+                        .font(.system(size: 12.5, design: .monospaced))
+                } else {
+                    TextField(prompt, text: $text)
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(DS.label)
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        }
+    }
+}
+
+/// Sheet footer: an error line if any, then cancel and the primary action.
+struct SheetFooter: View {
+    let error: String?
+    let primary: String
+    let enabled: Bool
+    let cancel: () -> Void
+    let action: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(DS.small).foregroundStyle(.red).textSelection(.enabled)
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("取消", action: cancel).keyboardShortcut(.cancelAction).glassButton()
+                Button(primary, action: action).disabled(!enabled).glassButton(prominent: true)
+            }
+        }
+    }
+}
+
 struct AddNodeSheet: View {
     @EnvironmentObject var core: Core
     @Environment(\.dismiss) private var dismiss
@@ -1435,28 +1527,21 @@ struct AddNodeSheet: View {
     @State private var busy = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.gap) {
-            Text("添加节点").font(.system(size: 20, weight: .semibold))
-            Text("粘贴分享链接（ss://、vmess://、vless://、trojan://、hysteria2://）或代理行，例如 `HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=…`。")
-                .foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
-            TextField("分享链接或代理行", text: $input, axis: .vertical)
-                .lineLimit(3...6).textFieldStyle(.roundedBorder).font(.body.monospaced())
-            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(busy ? "检查中…" : "添加") {
-                    busy = true
-                    Task {
-                        error = await core.addNode(input)
-                        busy = false
-                        if error == nil { dismiss() }
-                    }
+        VStack(alignment: .leading, spacing: 18) {
+            SheetHeader(icon: "server.rack", title: "添加节点",
+                        detail: "粘贴分享链接（ss、vmess、vless、trojan、hysteria2），或一行 Surge 风格的代理配置。")
+            SheetField(label: "分享链接或代理行", prompt: "例如 HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=…",
+                       text: $input, multiline: true)
+            SheetFooter(error: error, primary: busy ? "检查中…" : "添加", enabled: !busy && !input.isEmpty, cancel: { dismiss() }) {
+                busy = true
+                Task {
+                    error = await core.addNode(input)
+                    busy = false
+                    if error == nil { dismiss() }
                 }
-                .keyboardShortcut(.defaultAction).disabled(busy || input.isEmpty)
             }
         }
-        .padding(20).frame(width: 520)
+        .padding(22).frame(width: 520)
     }
 }
 
@@ -1470,30 +1555,23 @@ struct AddSubscriptionSheet: View {
     @State private var busy = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.gap) {
-            Text("添加订阅").font(.system(size: 20, weight: .semibold))
-            Form {
-                TextField("名称", text: $name, prompt: Text("Subscription"))
-                TextField("URL", text: $url, prompt: Text("https://…"))
-                TextField("名称过滤（正则，可选）", text: $filter, prompt: Text("例如 香港|HK"))
+        VStack(alignment: .leading, spacing: 18) {
+            SheetHeader(icon: "link", title: "添加订阅", detail: "保存配置前会先下载订阅并检查其中的节点。")
+            SheetField(label: "订阅地址", prompt: "https://…", text: $url)
+            HStack(spacing: 12) {
+                SheetField(label: "名称", prompt: "Subscription", text: $name)
+                SheetField(label: "名称过滤（正则，可选）", prompt: "例如 香港|HK", text: $filter)
             }
-            Text("保存配置前会先下载并检查节点。").font(DS.small).foregroundStyle(DS.ink2)
-            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(busy ? "下载中…" : "添加") {
-                    busy = true
-                    Task {
-                        error = await core.addSubscription(name: name, url: url, filter: filter)
-                        busy = false
-                        if error == nil { dismiss() }
-                    }
+            SheetFooter(error: error, primary: busy ? "下载中…" : "添加", enabled: !busy && !url.isEmpty, cancel: { dismiss() }) {
+                busy = true
+                Task {
+                    error = await core.addSubscription(name: name, url: url, filter: filter)
+                    busy = false
+                    if error == nil { dismiss() }
                 }
-                .keyboardShortcut(.defaultAction).disabled(busy || url.isEmpty)
             }
         }
-        .padding(20).frame(width: 520)
+        .padding(22).frame(width: 520)
     }
 }
 
@@ -1786,14 +1864,23 @@ struct LogsView: View {
     @EnvironmentObject var core: Core
     @State private var filter = ""
     @State private var follow = true
+    @State private var problemsOnly = false
 
     var body: some View {
-        let lines = core.logs.filter { filter.isEmpty || $0.message.localizedCaseInsensitiveContains(filter) || $0.level.localizedCaseInsensitiveContains(filter) }
+        let problems = core.logs.filter { $0.level == "WARN" || $0.level == "ERROR" }.count
+        let lines = core.logs.filter {
+            (!problemsOnly || $0.level == "WARN" || $0.level == "ERROR")
+                && (filter.isEmpty || $0.message.localizedCaseInsensitiveContains(filter) || $0.level.localizedCaseInsensitiveContains(filter))
+        }
         VStack(spacing: 0) {
-            PaneHeader(title: "日志", subtitle: Pane.logs.subtitle) {
+            PaneHeader(title: "日志", subtitle: problems == 0 ? "内核输出 · 没有警告" : "内核输出 · \(problems) 条警告或错误") {
+                GlassSegmented(options: [(false, "全部", nil), (true, "问题", "exclamationmark.triangle")], selection: $problemsOnly)
+                    .frame(width: 170)
                 SearchField(prompt: "搜索", text: $filter)
-                Toggle(isOn: $follow) { Label("跟随", systemImage: "arrow.down.to.line") }.toggleStyle(.button)
-                Button { core.clearLogs() } label: { Label("清除", systemImage: "trash") }
+                Toggle(isOn: $follow) { Label("跟随最新", systemImage: "arrow.down.to.line") }.toggleStyle(.button)
+                    .labelStyle(.iconOnly).help(follow ? "正在跟随最新日志" : "跟随最新日志")
+                Button { core.clearLogs() } label: { Label("清除日志", systemImage: "trash") }
+                    .labelStyle(.iconOnly).help("清除日志")
             }
             ScrollViewReader { proxy in
                 List(lines) { l in
@@ -1804,8 +1891,13 @@ struct LogsView: View {
                             .background(color(l.level).opacity(0.10), in: Capsule())
                             .frame(width: 52, alignment: .leading)
                         Text(l.message).textSelection(.enabled)
+                            .foregroundStyle(l.level == "ERROR" ? Color.red : Color.primary)
                     }
                     .font(.system(.callout, design: .monospaced))
+                    .listRowBackground(
+                        (l.level == "ERROR" || l.level == "WARN")
+                            ? RoundedRectangle(cornerRadius: 6, style: .continuous).fill(color(l.level).opacity(0.08)).padding(.horizontal, 6)
+                            : nil)
                     .id(l.id)
                 }
                 .onChange(of: core.logs.count) {
