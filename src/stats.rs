@@ -250,8 +250,12 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// Both stream tests read the process-wide counters, so they must not overlap.
+    static COUNTERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn counts_both_directions() {
+        let _serial = COUNTERS.lock().await;
         let (a, mut b) = tokio::io::duplex(1024);
         let (up0, down0, active0) = snapshot();
         let mut s = counted(Box::new(a));
@@ -287,6 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_stream_is_listed_counted_and_closable() {
+        let _serial = COUNTERS.lock().await;
         let (a, mut b) = tokio::io::duplex(1024);
         let meta = crate::live::ConnMeta { network: "tcp", target: "stats-test:1".into(), policy: "StatsP".into(), outbound: "StatsN".into(), ..Default::default() };
         let mut s = counted_live(Box::new(a), meta);

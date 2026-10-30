@@ -132,6 +132,7 @@ impl Reloader {
         self.reload_from(&path, reason).await
     }
 
+    /// The config file this reloader reads (it changes with `switch_profile`).
     pub fn path(&self) -> String {
         self.path.lock().unwrap().clone()
     }

@@ -39,6 +39,9 @@ jobs:
       # v2ray-plugin is not in Homebrew; build the upstream server from source.
       - run: go install github.com/shadowsocks/v2ray-plugin@latest && echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: bash scripts/ci/interop.sh
+      - name: Diagnostics export
+        if: always()
+        run: bash scripts/ci/diag.sh
       - if: always()
         uses: actions/upload-artifact@v4
         with:

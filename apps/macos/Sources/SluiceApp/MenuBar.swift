@@ -137,6 +137,8 @@ struct MenuBarContent: View {
             .keyboardShortcut("0")
         Button("查看请求", systemImage: "arrow.up.arrow.down.circle") { showWindow(.requests) }
         Button("编辑当前配置", systemImage: "curlybraces.square") { showWindow(.profile) }
+        Button("导出诊断信息…", systemImage: "stethoscope") { core.exportDiagnostics() }
+            .disabled(core.exportingDiagnostics)
 
         Divider()
         Button("退出 Sluice", systemImage: "power") { NSApp.terminate(nil) }

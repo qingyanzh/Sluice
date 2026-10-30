@@ -2,6 +2,7 @@ mod api;
 mod clash;
 mod config;
 mod conns;
+mod diag;
 mod dns;
 mod hysteria2;
 mod inbound;
@@ -47,7 +48,8 @@ usage:
   sluice check <config.conf>                 validate the config
   sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses
   sluice convert <share-link>                print a share link as a [Proxy] line
-  sluice mitm gen-ca [--force]               create the HTTPS decryption CA (not installed)";
+  sluice mitm gen-ca [--force]               create the HTTPS decryption CA (not installed)
+  sluice diag export <out.zip> [config.conf] write a redacted diagnostics bundle";
 
 /// Resolves a name through the egress path (bound interface + upstream DNS).
 async fn egress_self_test(upstream: &[SocketAddr]) -> Result<()> {
@@ -127,6 +129,7 @@ async fn start_tun(
 
 #[tokio::main]
 async fn main() {
+    diag::install_panic_hook();
     if let Err(e) = run().await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
@@ -158,14 +161,14 @@ async fn run() -> Result<()> {
         }
         ["mitm", "gen-ca"] => mitm::gen_ca(false)?,
         ["mitm", "gen-ca", "--force"] => mitm::gen_ca(true)?,
+        ["diag", "export", out, rest @ ..] if rest.len() <= 1 => {
+            let path = diag::export(std::path::Path::new(out), rest.first().copied())?;
+            println!("{}", path.display());
+        }
         ["run", path] => {
             let cfg = read_config(path)?;
-            let level = cfg.general.loglevel.as_deref().unwrap_or("info");
-            let logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(format!("sluice={level}")))
-                .format_target(false)
-                .build();
-            log::set_max_level(logger.filter());
-            log::set_boxed_logger(Box::new(live::EventLogger(logger)))?;
+            diag::set_crash_config(path);
+            diag::init_logging(cfg.general.loglevel.as_deref().unwrap_or("info"));
             sysnet::raise_fd_limit();
             let (cfg, router) = build(cfg, path, false).await?;
             let reloader = reload::Reloader::start(router, &cfg, path);
