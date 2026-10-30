@@ -4,23 +4,7 @@
 # See E2ELaunch.swift for the inert-in-normal-use launch controls. Requires a logged-in
 # WindowServer session with screen capture available; no Accessibility permission.
 set -euo pipefail
-cd "$(dirname "$0")/../.."
-if [[ ${GITHUB_ACTIONS:-} != true ]]; then
-  echo 'e2e_screens.sh only runs on GitHub Actions' >&2
-  exit 1
-fi
-if [[ $# != 2 ]]; then
-  echo "usage: $0 API_HOST:PORT WORK_DIR" >&2
-  exit 1
-fi
-api=$1
-mkdir -p "$2/screenshots" "$2/app"
-work=$(cd "$2" && pwd)
-shots="$work/screenshots"
-app=dist/Sluice.app
-binary=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-executable="$PWD/$app/Contents/MacOS/$binary"
-[[ -x $executable ]] || { echo "missing app binary: $executable" >&2; exit 1; }
+stage='validate arguments and CI environment'
 app_pid=''
 stop_app() {
   if [[ -n $app_pid ]]; then
@@ -34,13 +18,49 @@ stop_app() {
     app_pid=''
   fi
 }
-trap stop_app EXIT
+finish() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ $status != 0 ]]; then
+    echo "FAIL screens hook: $stage (exit $status); see the error above and workdir/app logs if created" >&2
+  fi
+  stop_app
+  exit "$status"
+}
+trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+cd "$(dirname "$0")/../.."
+if [[ ${GITHUB_ACTIONS:-} != true ]]; then
+  echo 'e2e_screens.sh only runs on GitHub Actions' >&2
+  exit 1
+fi
+if [[ $# != 2 ]]; then
+  echo "usage: $0 API_HOST:PORT WORK_DIR" >&2
+  exit 1
+fi
+api=$1
+stage='prepare screenshot directories'
+mkdir -p "$2/screenshots" "$2/app"
+work=$(cd "$2" && pwd)
+shots="$work/screenshots"
+app=dist/Sluice.app
+stage="locate built app at $app"
+if [[ ! -d $app ]]; then
+  echo "Missing $app; run bash scripts/build-app.sh before the screens hook" >&2
+  exit 1
+fi
+if ! binary=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist"); then
+  echo "Cannot read CFBundleExecutable from $app/Contents/Info.plist" >&2
+  exit 1
+fi
+executable="$PWD/$app/Contents/MacOS/$binary"
+[[ -x $executable ]] || { echo "missing app binary: $executable" >&2; exit 1; }
 
 # Select the contract's main fixture via the API: the editor hook may have left the
 # core on alt.conf. Read real node names instead of assuming fixture-specific names.
 # Save raw API evidence alongside screenshots; no synthetic UI fixtures are generated.
+stage="prepare profile, node latency tests and API evidence; diagnostics: $work/app"
 python3 - "$api" "$work" <<'PY'
 import concurrent.futures
 import json
@@ -122,6 +142,7 @@ config=$(cat "$work/app/active-config-path")
 
 # Compile once. CGWindowList does not require Accessibility permission. Restrict by
 # PID and the app's readiness window ID so menu extras/other apps cannot be selected.
+stage="compile window lookup helper; source: $work/app/window-id.swift"
 cat > "$work/app/window-id.swift" <<'SWIFT'
 import CoreGraphics
 import Foundation
@@ -148,6 +169,7 @@ for pane in "${panes[@]}"; do
   name=$(printf '%02d-%s' "$index" "$pane")
   ready="$work/app/$name-ready.json"
   png="$shots/$name.png"
+  stage="capture $pane; diagnostics: $work/app/$name.log"
   rm -f "$ready" "$png"
   echo "screenshot: $pane"
   SLUICE_E2E=1 SLUICE_E2E_NODE_TESTS="$work/app/node-tests.json" \
@@ -161,7 +183,7 @@ for pane in "${panes[@]}"; do
     sleep 0.5
   done
   if [[ ! -s $ready ]] || ! kill -0 "$app_pid" 2>/dev/null; then
-    echo "FAIL: $pane did not report populated UI readiness" >&2
+    echo "FAIL: $pane did not report populated UI readiness; see $work/app/$name.log" >&2
     failures=$((failures + 1))
     # Keep a diagnostic capture even if the app failed to load.
     screencapture -x "$shots/$name-failed.png" 2>> "$work/app/$name.log" || true
@@ -193,6 +215,7 @@ subprocess.run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', str(path)], che
                stdout=subprocess.DEVNULL)
 PY
   then
+    echo "FAIL: $pane screenshot validation failed: $png; see the error above and $work/app/$name.log" >&2
     failures=$((failures + 1))
   fi
   stop_app
@@ -203,6 +226,7 @@ PY
   fi
 done
 if [[ $failures != 0 ]]; then
+  stage="validate screenshots: $failures checks failed; diagnostics: $work/app"
   echo "$failures screenshot checks failed; see $work/app" >&2
   exit 1
 fi

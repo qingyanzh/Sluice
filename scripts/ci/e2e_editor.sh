@@ -2,6 +2,17 @@
 # Structured editor save/reload round-trip. Called with the core and traffic still running.
 # Network operations are deliberately restricted to GitHub Actions.
 set -euo pipefail
+stage='validate arguments and CI environment'
+report_exit() {
+    local status=$?
+    if [[ $status != 0 ]]; then
+        echo "FAIL editor hook: $stage (exit $status); see the error above and workdir/editor/editor.log if created" >&2
+    fi
+    exit "$status"
+}
+trap report_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if [[ $# != 2 ]]; then
     echo "usage: $0 <api-addr> <workdir>" >&2
     exit 2
@@ -10,8 +21,17 @@ if [[ ${GITHUB_ACTIONS:-} != true ]]; then
     echo "e2e_editor.sh only runs on GitHub Actions; use swift test for offline editor checks." >&2
     exit 2
 fi
+stage='prepare editor logs and prerequisites'
 cd "$(dirname "$0")/../.."
 mkdir -p "$2/editor"
+for tool in python3 swift; do
+    command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }
+done
+if [[ ! -x target/release/sluice ]]; then
+    echo 'Missing executable target/release/sluice; build the Rust core before running this hook' >&2
+    exit 1
+fi
+stage="structured editor save/reload/restore round trip; diagnostics: $2/editor"
 python3 - "$1" "$2" <<'PY' 2>&1 | tee "$2/editor/editor.log"
 import json
 import os

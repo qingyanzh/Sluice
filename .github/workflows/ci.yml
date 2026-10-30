@@ -26,6 +26,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # The app and editor tests use the macOS 26 SDK (glassEffect).
+      - name: Select Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v4
@@ -37,9 +43,18 @@ jobs:
       # build-app.sh also builds the Rust core and Swift helper, resolves Sparkle,
       # embeds the framework and ad-hoc signs the complete app bundle.
       - name: Build app
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p ci-logs/e2e/screenshots
-          bash scripts/build-app.sh 2>&1 | tee ci-logs/e2e/build-app.log
+          if ! bash scripts/build-app.sh 2>&1 | tee ci-logs/e2e/build-app.log; then
+            echo '::error::App build failed; see ci-logs/e2e/build-app.log'
+            exit 1
+          fi
+          if [[ ! -x dist/Sluice.app/Contents/MacOS/Sluice ]]; then
+            echo '::error::App build did not produce dist/Sluice.app/Contents/MacOS/Sluice'
+            exit 1
+          fi
       - run: bash scripts/ci/e2e.sh
       - if: always()
         uses: actions/upload-artifact@v4

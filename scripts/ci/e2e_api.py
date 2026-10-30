@@ -129,7 +129,8 @@ class Checks:
         self.closed_id = None
         self.transcript = (work / "api-exchanges.jsonl").open("w")
 
-    def call(self, method, path, **query):
+    def call(self, method, endpoint, **query):
+        path = endpoint
         if query:
             path += "?" + urllib.parse.urlencode(query)
         conn = http.client.HTTPConnection(self.api, timeout=12)
