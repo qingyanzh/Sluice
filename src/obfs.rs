@@ -1,5 +1,5 @@
 //! Shadowsocks SIP003 plugins, done in-process: simple-obfs (`obfs-local`, http or tls) and
-//! v2ray-plugin (WebSocket, optionally TLS, no mux).
+//! v2ray-plugin (WebSocket, optionally TLS, one-session mux.cool as its servers expect by default).
 //!
 //! simple-obfs `http` sends the first data behind a fake WebSocket upgrade request; `tls` puts it
 //! in the session ticket of a fake TLS 1.2 ClientHello and frames the rest as application data.
@@ -18,7 +18,8 @@ const MAX_RECORD: usize = 16 * 1024;
 pub enum SsPlugin {
     /// simple-obfs; `uri` is the HTTP request path.
     Obfs { tls: bool, host: String, uri: String },
-    V2ray { tls: bool, host: String, path: String, skip_cert_verify: bool },
+    /// `mux`: wrap the stream in mux.cool, which v2ray-plugin servers require unless run with `mux=0`.
+    V2ray { tls: bool, host: String, path: String, skip_cert_verify: bool, mux: bool },
 }
 
 impl SsPlugin {
@@ -50,6 +51,7 @@ impl SsPlugin {
                     host: get("host").unwrap_or_else(|| "cloudfront.com".into()),
                     path: get("path").unwrap_or_else(|| "/".into()),
                     skip_cert_verify: on("skip-cert-verify") || on("allowinsecure"),
+                    mux: get("mux").is_none_or(|m| m != "0" && m != "false"),
                 }
             }
             other => bail!("ss plugin {other:?} not supported"),
@@ -62,8 +64,11 @@ impl SsPlugin {
             SsPlugin::Obfs { tls, host, uri } => {
                 ("obfs-local", format!("obfs={};obfs-host={host};obfs-uri={uri}", if *tls { "tls" } else { "http" }))
             }
-            SsPlugin::V2ray { tls, host, path, skip_cert_verify } => {
+            SsPlugin::V2ray { tls, host, path, skip_cert_verify, mux } => {
                 let mut o = format!("host={host};path={path}");
+                if !*mux {
+                    o.push_str(";mux=0");
+                }
                 if *tls {
                     o.push_str(";tls");
                 }
@@ -237,6 +242,80 @@ pub fn simple_obfs(stream: BoxStream, tls: bool, host: &str, uri: &str, port: u1
     Box::new(app)
 }
 
+fn mux_frame(meta: &[u8], data: Option<&[u8]>) -> Vec<u8> {
+    let mut out = (meta.len() as u16).to_be_bytes().to_vec();
+    out.extend_from_slice(meta);
+    if let Some(d) = data {
+        out.extend_from_slice(&(d.len() as u16).to_be_bytes());
+        out.extend_from_slice(d);
+    }
+    out
+}
+
+/// Carries one TCP session (id 1) over mux.cool, as v2ray-plugin's client does. The server's
+/// dokodemo forwards to its Shadowsocks server whatever destination we name.
+pub fn mux_cool(stream: BoxStream, port: u16) -> BoxStream {
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    let (app, inner) = tokio::io::duplex(64 * 1024);
+    let (mut ird, mut iwr) = tokio::io::split(inner);
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; MAX_RECORD];
+        let mut first = true;
+        loop {
+            let n = match ird.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let frame = if first {
+                let p = port.to_be_bytes();
+                mux_frame(&[0, 1, 1, 1, 1, p[0], p[1], 1, 127, 0, 0, 1], Some(&buf[..n]))
+            } else {
+                mux_frame(&[0, 1, 2, 1], Some(&buf[..n]))
+            };
+            first = false;
+            if wr.write_all(&frame).await.is_err() {
+                return;
+            }
+        }
+        if !first {
+            let _ = wr.write_all(&mux_frame(&[0, 1, 3, 0], None)).await;
+        }
+        let _ = wr.shutdown().await;
+    });
+    tokio::spawn(async move {
+        let r: Result<()> = async {
+            loop {
+                let mut l = [0u8; 2];
+                match rd.read_exact(&mut l).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                    Err(e) => return Err(e.into()),
+                }
+                let mut meta = vec![0u8; u16::from_be_bytes(l) as usize];
+                rd.read_exact(&mut meta).await?;
+                if meta.len() < 4 {
+                    bail!("mux.cool: short frame metadata");
+                }
+                if meta[3] & 1 != 0 {
+                    rd.read_exact(&mut l).await?;
+                    let mut data = vec![0u8; u16::from_be_bytes(l) as usize];
+                    rd.read_exact(&mut data).await?;
+                    iwr.write_all(&data).await?;
+                }
+                if meta[2] == 3 {
+                    return Ok(());
+                }
+            }
+        }
+        .await;
+        if let Err(e) = r {
+            debug!("v2ray-plugin: {e:#}");
+        }
+        let _ = iwr.shutdown().await;
+    });
+    Box::new(app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,7 +325,8 @@ mod tests {
         let p = SsPlugin::parse("obfs-local", "obfs=tls;obfs-host=www.bing.com").unwrap();
         assert_eq!(p, SsPlugin::Obfs { tls: true, host: "www.bing.com".into(), uri: "/".into() });
         let v = SsPlugin::parse("v2ray-plugin", "tls;host=a.com;path=/ws;mux=0").unwrap();
-        assert_eq!(v, SsPlugin::V2ray { tls: true, host: "a.com".into(), path: "/ws".into(), skip_cert_verify: false });
+        assert_eq!(v, SsPlugin::V2ray { tls: true, host: "a.com".into(), path: "/ws".into(), skip_cert_verify: false, mux: false });
+        assert!(matches!(SsPlugin::parse("v2ray-plugin", "").unwrap(), SsPlugin::V2ray { mux: true, .. }));
         for p in [p, v] {
             let (n, o) = p.to_sip003();
             assert_eq!(SsPlugin::parse(n, &o).unwrap(), p);

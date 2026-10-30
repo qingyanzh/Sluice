@@ -146,6 +146,8 @@ for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS
         'https://speed.cloudflare.com/__down?bytes=10000000')
     udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
     cone=$(python3 -I scripts/ci/udp_fullcone_check.py 16153 2>&1 | tail -1)
+    # v2fly's Mux has no XUDP, so its UDP sessions are not full-cone: nothing Sluice can fix.
+    [ "$node" = VMess-Legacy ] && cone="full-cone ok (n/a: v2fly server, $cone)"
     ok=yes
     [ "$https" = 200 ] || ok=no
     [ "$size" = 10000000 ] || ok=no

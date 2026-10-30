@@ -217,7 +217,7 @@ impl SsServer {
         let method = Method::parse(method)?;
         let key = evp_bytes_to_key(password.as_bytes(), method.key_len());
         let ws = match &plugin {
-            Some(SsPlugin::V2ray { tls, host, path, skip_cert_verify }) => {
+            Some(SsPlugin::V2ray { tls, host, path, skip_cert_verify, .. }) => {
                 let layer = Layer::Ws(WsOpts { path: path.clone(), host: Some(host.clone()), headers: Vec::new() });
                 Some(Transport::new(server.clone(), port, *tls, Some(host.clone()), *skip_cert_verify, Some(layer))?)
             }
@@ -228,7 +228,11 @@ impl SsServer {
 
     async fn connect_stream(&self) -> Result<BoxStream> {
         if let Some(ws) = &self.ws {
-            return ws.connect().await;
+            let s = ws.connect().await?;
+            return Ok(match self.plugin {
+                Some(SsPlugin::V2ray { mux: true, .. }) => crate::obfs::mux_cool(s, self.port),
+                _ => s,
+            });
         }
         let tcp: BoxStream = Box::new(connect_tcp(&self.server, self.port).await?);
         Ok(match &self.plugin {
