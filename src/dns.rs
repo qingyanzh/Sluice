@@ -484,6 +484,7 @@ async fn doh_exchange(up: &Upstream, host: &str, port: u16, path: &str, msg: &[u
         .uri(format!("https://{authority}{path}"))
         .header("content-type", "application/dns-message")
         .header("accept", "application/dns-message")
+        .header("content-length", msg.len())
         .body(())?;
     let (resp, mut body) = send.send_request(req, false)?;
     body.send_data(Bytes::copy_from_slice(msg), true)?;
