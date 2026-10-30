@@ -10,6 +10,10 @@
 //!   GET  /v1/traffic                        total bytes up/down and open connections
 //!   GET  /v1/dns                            cached DNS answers with their remaining TTL
 //!   POST /v1/dns/flush                      empty the DNS cache
+//!   GET  /v1/connections                    recent routing decisions, newest last
+//!
+//! `/v1/route` also takes `process=`, `src=<ip:port>` and `proto=` to test the
+//! PROCESS-NAME, SRC-IP and PROTOCOL rules.
 
 use std::sync::Arc;
 
@@ -19,6 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::reload::Reloader;
+use crate::rule::{ConnInfo, Proto};
 use crate::util::Target;
 
 fn json_str(s: &str) -> String {
@@ -51,6 +56,21 @@ pub fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn json_opt(s: Option<&str>) -> String {
+    s.map_or("null".to_string(), json_str)
+}
+
+/// Client facts for `/v1/route`; with no `process=`, PROCESS-NAME rules see no process.
+fn route_ctx(query: &str) -> ConnInfo {
+    let proto = query_param(query, "proto").and_then(|p| Proto::parse(&p).ok()).unwrap_or_default();
+    let src = query_param(query, "src").and_then(|s| s.parse().ok());
+    let ctx = ConnInfo::new(proto, src, None, 0);
+    match query_param(query, "process") {
+        Some(p) => ctx.with_process(&p),
+        None => ctx,
+    }
 }
 
 fn query_param(query: &str, key: &str) -> Option<String> {
@@ -147,16 +167,37 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
             Ok(summary) => ("200 OK", format!("{{\"reloaded\":true,\"summary\":{}}}", json_str(&summary))),
             Err(e) => ("400 Bad Request", format!("{{\"error\":{}}}", json_str(&format!("{e:#}")))),
         },
+        ("GET", "/v1/connections") => {
+            let items: Vec<String> = crate::conns::recent()
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{{\"id\":{},\"time_ms\":{},\"network\":\"{}\",\"target\":{},\"src\":{},\"rule\":{},\"policy\":{},\"outbound\":{},\"process\":{}}}",
+                        c.id,
+                        c.time_ms,
+                        c.network,
+                        json_str(&c.target),
+                        json_opt(c.src.as_deref()),
+                        json_str(&c.rule),
+                        json_str(&c.policy),
+                        json_str(&c.outbound),
+                        json_opt(c.process.as_deref())
+                    )
+                })
+                .collect();
+            ("200 OK", format!("[{}]", items.join(",")))
+        }
         ("GET", "/v1/route") => match query_param(query, "target").map(|t| Target::parse_authority(&t, 443)) {
-            Some(Ok(t)) => match router.decide(&t).await {
+            Some(Ok(t)) => match router.decide_with(&t, &route_ctx(query)).await {
                 Ok(d) => (
                     "200 OK",
                     format!(
-                        "{{\"target\":{},\"rule\":{},\"policy\":{},\"outbound\":{}}}",
+                        "{{\"target\":{},\"rule\":{},\"policy\":{},\"outbound\":{},\"process\":{}}}",
                         json_str(&t.to_string()),
                         json_str(&d.rule),
                         json_str(&d.policy),
-                        json_str(&d.outbound)
+                        json_str(&d.outbound),
+                        json_opt(d.process.as_deref())
                     ),
                 ),
                 Err(e) => ("500 Internal Server Error", format!("{{\"error\":{}}}", json_str(&e.to_string()))),

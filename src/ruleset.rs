@@ -13,7 +13,7 @@ use log::{info, warn};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::rule::Cidr;
+use crate::rule::{Cidr, Matcher};
 use crate::trojan::tls_client;
 use crate::util::{connect_tcp, BoxStream};
 
@@ -31,6 +31,8 @@ pub struct SetData {
     suffix: HashSet<String>,
     keyword: Vec<String>,
     cidr: Vec<Cidr>,
+    /// Lines of the other types (ports, processes, logical rules...), checked in order.
+    others: Arc<Vec<Matcher>>,
 }
 
 impl SetData {
@@ -61,9 +63,9 @@ impl SetData {
     }
 
     fn add_rule(&mut self, line: &str) -> bool {
-        let mut parts = line.split(',').map(str::trim);
-        let (Some(kind), Some(value)) = (parts.next(), parts.next()) else { return false };
-        let value = value.to_ascii_lowercase();
+        let parts = crate::rule::split_top(line);
+        let (Some(&kind), Some(&raw)) = (parts.first(), parts.get(1)) else { return false };
+        let value = raw.to_ascii_lowercase();
         match kind.to_ascii_uppercase().as_str() {
             "DOMAIN" => {
                 self.exact.insert(value);
@@ -76,13 +78,21 @@ impl SetData {
                 Ok(c) => self.cidr.push(c),
                 Err(_) => return false,
             },
-            _ => return false,
+            // Lines may carry a policy that the set's rule overrides; only `no-resolve` counts.
+            _ => match Matcher::parse(kind, raw, &parts[2..], true) {
+                Ok(m) => Arc::make_mut(&mut self.others).push(m),
+                Err(_) => return false,
+            },
         }
         true
     }
 
     pub fn len(&self) -> usize {
-        self.exact.len() + self.suffix.len() + self.keyword.len() + self.cidr.len()
+        self.exact.len() + self.suffix.len() + self.keyword.len() + self.cidr.len() + self.others.len()
+    }
+
+    pub fn others(&self) -> Arc<Vec<Matcher>> {
+        self.others.clone()
     }
 
     pub fn has_ip_rules(&self) -> bool {
@@ -318,6 +328,15 @@ mod tests {
         assert!(d.match_domain("google.com") && d.match_domain("mail.google.com") && !d.match_domain("notgoogle.com"));
         assert!(d.match_domain("x.ads.net"));
         assert!(d.match_ip("10.2.3.4".parse().unwrap()) && !d.match_ip("11.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn extended_types_in_rule_list() {
+        let text = "PROCESS-NAME,curl\nDST-PORT,22\nAND,((DOMAIN,a.com),(PROTOCOL,UDP))\nURL-REGEX,^http://x\nBOGUS,1\n";
+        let (d, skipped) = SetData::parse(text, SetKind::Rules);
+        assert_eq!((d.len(), skipped), (4, 1));
+        assert!(matches!(d.others()[0], Matcher::ProcessName(ref n) if n == "curl"));
+        assert!(matches!(d.others()[2], Matcher::And(_)));
     }
 
     #[test]

@@ -11,6 +11,8 @@ pub struct General {
     pub socks5_listen: Option<String>,
     pub api_listen: Option<String>,
     pub geoip_db: Option<String>,
+    /// MaxMind ASN database (e.g. GeoLite2-ASN.mmdb) for IP-ASN rules.
+    pub asn_db: Option<String>,
     pub loglevel: Option<String>,
     pub enhanced_mode: bool,
     pub tun_mtu: Option<u16>,
@@ -383,6 +385,7 @@ impl Config {
                         "socks5-listen" => g.socks5_listen = Some(listen_addr(v)),
                         "api-listen" => g.api_listen = Some(listen_addr(v)),
                         "geoip-db" => g.geoip_db = Some(v.to_string()),
+                        "asn-db" => g.asn_db = Some(v.to_string()),
                         "loglevel" => g.loglevel = Some(v.to_string()),
                         "enhanced-mode" => g.enhanced_mode = matches!(v, "true" | "1"),
                         "tun-mtu" => g.tun_mtu = Some(v.parse().map_err(|_| anyhow!("bad tun-mtu")).with_context(ctx)?),
