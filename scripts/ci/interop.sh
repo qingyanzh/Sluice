@@ -88,9 +88,26 @@ ssserver -s 127.0.0.1:18389 -m chacha20-ietf-poly1305 -k ss -U > "$work/ss2.log"
 xray run -c "$work/xray.json" > "$work/xray.log" 2>&1 &
 hysteria server -c "$work/hy.yaml" > "$work/hy.log" 2>&1 &
 hysteria server -c "$work/hy-obfs.yaml" > "$work/hy-obfs.log" 2>&1 &
+cat > "$work/xray-client.json" <<EOF
+{"log":{"loglevel":"warning"},
+"inbounds":[{"listen":"127.0.0.1","port":10808,"protocol":"socks","settings":{"udp":true}}],
+"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"127.0.0.1","port":19008,"users":[{"id":"$uuid","encryption":"none"}]}]},
+ "streamSettings":{"network":"tcp","security":"reality","realitySettings":{"serverName":"www.microsoft.com","fingerprint":"chrome","publicKey":"$reality_pub","shortId":"0123abcd"}}}]}
+EOF
+xray run -c "$work/xray-client.json" > "$work/xray-client.log" 2>&1 &
 sleep 2
 RUST_LOG=sluice=info,sluice::vision=debug ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
 for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:16170/v1/policies && break; sleep 0.5; done
+
+# Diagnostic: Xray's own REALITY client vs Sluice against the same server (www.microsoft.com target).
+curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=VLESS-REALITY" > /dev/null
+for who in xray:10808 sluice:16153; do
+    ok=0
+    for _ in 1 2 3 4 5 6; do
+        [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:${who#*:} https://example.com/)" = 200 ] && ok=$((ok + 1))
+    done
+    echo "REALITY control ${who%%:*}: $ok/6 ok"
+done
 
 fails=0
 printf '%-20s %-6s %-12s %s\n' NODE HTTPS DOWNLOAD UDP
