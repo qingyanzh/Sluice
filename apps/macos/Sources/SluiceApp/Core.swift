@@ -89,6 +89,8 @@ final class Core: ObservableObject {
     @Published private(set) var rateHistory: [(up: Double, down: Double)] = []
     /// Outbound mode reported by the core: "rule", "direct" or "global".
     @Published private(set) var mode = "rule"
+    @Published private(set) var testingGroups: Set<String> = []
+    @Published private(set) var reloading = false
     @Published var autoStart: Bool {
         didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
     }
@@ -346,8 +348,8 @@ final class Core: ObservableObject {
     private func sampleTraffic(_ api: APIClient, elapsed: Double) async {
         guard let now = try? await api.traffic() else { return }
         if let prev = traffic, elapsed > 0 {
-            upRate = Double(now.up &- prev.up) / elapsed
-            downRate = Double(now.down &- prev.down) / elapsed
+            upRate = Double(now.up >= prev.up ? now.up - prev.up : 0) / elapsed
+            downRate = Double(now.down >= prev.down ? now.down - prev.down : 0) / elapsed
             rateHistory.append((upRate, downRate))
             if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
         }
@@ -401,11 +403,21 @@ final class Core: ObservableObject {
     }
 
     func test(group: String) {
-        perform("测试 \(group) ") { try await $0.test(group: group) }
+        guard state == .running, let api, !testingGroups.contains(group) else { return }
+        testingGroups.insert(group)
+        Task {
+            defer { testingGroups.remove(group) }
+            do {
+                try await api.test(group: group)
+                if let fresh = try? await api.policies() { groups = fresh }
+            } catch {
+                lastActionError = "测试 \(group) 失败：\(error.localizedDescription)"
+            }
+        }
     }
 
     func testAll() {
-        for g in groups where !g.isSelectable { test(group: g.group) }
+        for g in groups { test(group: g.group) }
     }
 
     func setMode(_ m: String) {
@@ -422,8 +434,20 @@ final class Core: ObservableObject {
     }
 
     func reload() {
+        guard state == .running, !reloading else { return }
+        Task {
+            do { try await reloadAndWait(); lastActionError = nil }
+            catch { lastActionError = "重载配置失败：\(error.localizedDescription)" }
+        }
+    }
+
+    private func reloadAndWait() async throws {
+        guard let api else { throw APIError(message: "未配置控制 API") }
+        reloading = true
+        defer { reloading = false }
+        try await api.reload()
         refreshSummary()
-        perform("重载配置") { try await $0.reload() }
+        if let fresh = try? await api.policies() { groups = fresh }
     }
 
     func route(_ target: String) async throws -> RouteResult {
@@ -461,15 +485,23 @@ final class Core: ObservableObject {
 
     /// Validates, saves and (if running) reloads. Returns an error message on failure.
     @discardableResult
-    func saveConfig(_ text: String) async -> String? {
+    func saveConfig(_ text: String, expected: String? = nil) async -> String? {
+        let destination = configPath
         if let err = await validate(text) { return err }
+        guard configPath == destination else { return "当前配置文件已切换，请重新保存。" }
+        if let expected, readConfig() != expected {
+            return "配置文件已被其他操作修改，没有覆盖。请先载入磁盘版本，或复制当前草稿保留修改。"
+        }
         do {
             try text.write(toFile: configPath, atomically: true, encoding: .utf8)
         } catch {
             return error.localizedDescription
         }
         refreshSummary()
-        if state == .running { reload() }
+        if state == .running {
+            do { try await reloadAndWait() }
+            catch { return "配置已保存，但应用失败。请重试载入配置。\n\(error.localizedDescription)" }
+        }
         return nil
     }
 
@@ -529,6 +561,7 @@ final class Core: ObservableObject {
     /// keeping the core's message as the detail.
     static func explain(_ error: String?, as headline: String) -> String? {
         guard let error else { return nil }
+        if error.hasPrefix("配置已保存") { return error }
         let detail = error.split(separator: "\n", maxSplits: 1).dropFirst().first.map(String.init) ?? error
         return headline + "\n" + detail
     }

@@ -96,6 +96,24 @@ is kept for the primary button.
   the core's own message folds under 详细信息; format errors show a correct
   example with a copy button (`ErrorText`).
 
+## Browsing and editing
+
+- Pane headers move their controls onto a second row when the window is narrow.
+- Search fields use ⌘F to focus and Esc to clear and leave the field. Empty
+  filtered lists offer a way to clear the filter.
+- Nodes show only names, protocol and server metadata. Details never display
+  passwords or subscription URL tokens; subscriptions and standalone nodes can
+  be filtered separately.
+- Policy tests show a pending state and reject duplicate clicks. Manual groups
+  can be tested along with automatic groups.
+- Request updates can be paused for inspection without pausing network traffic.
+  Logs can be exported with the current filter, and following uses the final
+  event ID so it still works once the 2000-row retention limit is reached.
+- Configuration drafts belong to the window and survive pane navigation.
+  External edits are detected before saving; restoring or changing files asks
+  before discarding a draft. Saved and applied are separate outcomes.
+- The system's Reduce Motion preference disables interface transitions.
+
 ## Appearance
 
 The app follows the system appearance by default; 设置 › 外观 can pin it to
