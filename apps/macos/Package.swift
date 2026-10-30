@@ -9,6 +9,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "SluiceHelperShared", path: "Sources/SluiceHelperShared"),
+        .target(name: "SluiceCoreHash", path: "Sources/SluiceCoreHash"),
         .executableTarget(
             name: "SluiceApp",
             dependencies: ["SluiceHelperShared", .product(name: "Sparkle", package: "Sparkle")],
@@ -17,7 +18,8 @@ let package = Package(
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         // Privileged launchd daemon that runs the core as root for enhanced mode (docs/helper.md).
-        .executableTarget(name: "SluiceHelper", dependencies: ["SluiceHelperShared"], path: "Sources/SluiceHelper"),
+        .executableTarget(name: "SluiceHelper", dependencies: ["SluiceHelperShared", "SluiceCoreHash"], path: "Sources/SluiceHelper"),
+        .testTarget(name: "SluiceHelperTests", dependencies: ["SluiceHelper"]),
         .testTarget(name: "SluiceAppTests", dependencies: ["SluiceApp"], resources: [.copy("Fixtures")]),
     ]
 )

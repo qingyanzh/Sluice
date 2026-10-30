@@ -4,6 +4,7 @@
 # click), then drives it over XPC with `SluiceHelper client`:
 #   1. handshake runs as root; a different executable is rejected
 #   2. start/stop the core without TUN
+#      and reject a substituted core
 #   3. enhanced mode through the helper, then "crash" the app: the helper must stop the core
 #      and routes/DNS must be restored
 # Needs: ./target/release/sluice and apps/macos/.build/release/SluiceHelper.
@@ -23,6 +24,14 @@ fail() { echo "FAIL  $1"; fails=$((fails + 1)); }
 # NTP reachability varies between runners; the tun job covers it.
 export SLUICE_CHECK_NTP=0
 check() { if eval "$2"; then pass "$1"; else fail "$1"; fi; }
+
+# Patching the helper invalidates its signature; sign it again before launchd loads it.
+if ! scripts/record-core-cdhash.sh "$helper" "$core" || ! codesign -f -s - "$helper"; then
+  echo "failed to embed core cdhashes and sign helper"
+  exec 1>&3 2>&1
+  cat "$out"
+  exit 1
+fi
 
 sudo tee "$plist" > /dev/null <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -54,6 +63,27 @@ check "core API up" "curl -s -m 2 -o /dev/null http://127.0.0.1:6170/v1/policies
 check "core runs as root" "[ \"\$(ps -o user= -p \$(pgrep -x sluice))\" = root ]"
 "$helper" client stop
 check "core stopped" "! pgrep -x sluice > /dev/null"
+
+echo "=================== substituted core"
+# Keep the original signed bytes and restore them even if the script is interrupted.
+cp -p "$core" "$work/core-original"
+restore_core() { cp -p "$work/core-original" "$core"; }
+trap restore_core EXIT
+if cp /usr/bin/true "$core"; then
+  rejected=$("$helper" client start "$work/plain.conf" 2>&1)
+  result=$?
+  echo "$rejected"
+  if [[ $result != 0 && $rejected == *"refused core:"* ]]; then
+    pass "substituted core is refused"
+  else
+    fail "substituted core is refused"
+    "$helper" client stop
+  fi
+else
+  fail "substitute core for rejection check"
+fi
+restore_core
+trap - EXIT
 
 echo "=================== enhanced mode, app crash"
 # The output can't reach the job log while the TUN is up; a watchdog guarantees it comes down.

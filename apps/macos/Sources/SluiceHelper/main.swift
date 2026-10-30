@@ -20,6 +20,8 @@ let allowedClient = env["SLUICE_HELPER_CLIENT"] ?? selfDir.appendingPathComponen
 
 /// Where the core's output goes; overridable only through the daemon's own plist.
 let coreLog = env["SLUICE_HELPER_LOG"] ?? SluiceHelperInfo.logPath
+/// Configured by launchd's plist, never by an XPC caller.
+let coreStageDirectory = env["SLUICE_HELPER_STAGE_DIR"] ?? "/Library/Application Support/Sluice/Helper"
 
 func log(_ s: String) { FileHandle.standardError.write("SluiceHelper: \(s)\n".data(using: .utf8)!) }
 
@@ -61,9 +63,15 @@ final class CoreRunner: NSObject, SluiceHelperProtocol {
             if let p = self.process, p.isRunning {
                 return reply(p.processIdentifier, coreLog, "the core is already running")
             }
-            guard FileManager.default.isExecutableFile(atPath: coreBinary) else {
-                return reply(0, "", "core binary not found at \(coreBinary)")
+            let stagedCore: URL
+            do {
+                stagedCore = try stageCore(from: coreBinary, in: coreStageDirectory, teamID: ownTeamID())
+            } catch {
+                log("refused core: \(error.localizedDescription)")
+                return reply(0, "", "refused core: \(error.localizedDescription)")
             }
+            var launched = false
+            defer { if !launched { try? FileManager.default.removeItem(at: stagedCore.deletingLastPathComponent()) } }
             let logURL = URL(fileURLWithPath: coreLog)
             let fm = FileManager.default
             try? fm.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true,
@@ -74,21 +82,23 @@ final class CoreRunner: NSObject, SluiceHelperProtocol {
                   let out = FileHandle(forWritingAtPath: logURL.path) else {
                 return reply(0, "", "can't write \(logURL.path)")
             }
+            defer { try? out.close() }
             let p = Process()
-            p.executableURL = URL(fileURLWithPath: coreBinary)
+            p.executableURL = stagedCore
             p.arguments = ["run", config]
             p.currentDirectoryURL = URL(fileURLWithPath: config).deletingLastPathComponent()
             p.standardInput = FileHandle.nullDevice
             p.standardOutput = out
             p.standardError = out
             p.terminationHandler = { proc in
+                try? FileManager.default.removeItem(at: stagedCore.deletingLastPathComponent())
                 log("core \(proc.processIdentifier) exited with \(proc.terminationStatus)")
                 self.queue.async {
                     if self.process === proc { self.process = nil; self.appWatch?.cancel(); self.appWatch = nil }
                 }
             }
             do { try p.run() } catch { return reply(0, "", "couldn't launch the core: \(error.localizedDescription)") }
-            try? out.close()
+            launched = true
             self.process = p
             self.watch(appPID)
             log("started core \(p.processIdentifier) for app \(appPID) with \(config)")

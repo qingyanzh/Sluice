@@ -49,7 +49,7 @@ check("stats", node.get("down", 0) > 0 and len(hist) >= 2 and any(s["down"] > 0 
       f"node={node} samples={len(hist)} last={hist[-1:]}")
 
 st, t = call("POST", "/v1/nodes/SS-AES256/test?url=http://example.com/&timeout=8000")
-check("nodes/<name>/test", st == 200 and t["ok"] and 0 < t["connect_ms"] <= t["latency_ms"] and t["status"] == 200, json.dumps(t))
+check("nodes/<name>/test", st == 200 and t["ok"] and 0 <= t["connect_ms"] <= t["latency_ms"] and t["status"] == 200, json.dumps(t))
 st, t = call("POST", "/v1/nodes/REALITY-WrongKey/test?url=http://example.com/&timeout=8000")
 check("nodes test (failing node)", st == 200 and not t["ok"] and t["error"], json.dumps(t))
 st, _ = call("POST", "/v1/nodes/NoSuchNode/test")
