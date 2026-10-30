@@ -155,6 +155,266 @@ pub fn parse(text: &str) -> Result<(Nodes, Vec<String>)> {
 mod tests {
     use super::*;
 
+    fn assert_parses_and_roundtrips(yaml: &str, expected: ProxyDef) {
+        let (nodes, skipped) = parse(yaml).unwrap();
+        assert!(skipped.is_empty(), "{yaml}: {skipped:?}");
+        assert_eq!(nodes.len(), 1, "{yaml}");
+        let (name, actual) = &nodes[0];
+        assert_eq!(name, "Test");
+        // ProxyDef/Layer lack PartialEq; Debug includes all their fields.
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{yaml}");
+        let line = actual.to_line(name);
+        let (back_name, back) = crate::config::parse_proxy(&line).unwrap();
+        assert_eq!(&back_name, name);
+        assert_eq!(format!("{back:?}"), format!("{expected:?}"), "{line}");
+    }
+
+    #[test]
+    fn every_stream_proxy_and_transport() {
+        let mut transports = vec![
+            (String::new(), None),
+            ("network: tcp".into(), None),
+            ("network: ws".into(), Some(Layer::Ws(WsOpts { path: "/".into(), host: None, headers: vec![] }))),
+            (
+                "network: ws, ws-opts: {path: /socket, headers: {host: cdn.example}}".into(),
+                Some(Layer::Ws(WsOpts { path: "/socket".into(), host: Some("cdn.example".into()), headers: vec![] })),
+            ),
+            ("network: grpc".into(), Some(Layer::Grpc { service: String::new() })),
+            ("network: grpc, grpc-opts: {grpc-service-name: tunnel}".into(), Some(Layer::Grpc { service: "tunnel".into() })),
+            ("network: xhttp".into(), Some(Layer::Xhttp(XhttpOpts::default()))),
+        ];
+        for mode in [XhttpMode::Auto, XhttpMode::PacketUp, XhttpMode::StreamUp, XhttpMode::StreamOne] {
+            transports.push((
+                format!("network: xhttp, xhttp-opts: {{path: /upload, host: cdn.example, mode: {}, x-padding-bytes: 12-24}}", mode.as_str()),
+                Some(Layer::Xhttp(XhttpOpts { path: "/upload".into(), host: Some("cdn.example".into()), mode, padding: (12, 24) })),
+            ));
+        }
+        for (transport, layer) in transports {
+            for tls in [false, true] {
+                let common = format!("name: Test, server: proxy.example, port: '443', tls: {tls}, servername: tls.example, skip-cert-verify: '1'");
+                for (kind, credentials, expected) in [
+                    ("vmess", "uuid: test-uuid, alterId: '0', cipher: chacha20-poly1305", ProxyDef::Vmess {
+                        server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), method: "chacha20-poly1305".into(),
+                        tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                    }),
+                    ("vless", "uuid: test-uuid", ProxyDef::Vless {
+                        server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), tls,
+                        sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(), reality: None, flow: None,
+                    }),
+                    ("trojan", "password: secret", ProxyDef::Trojan {
+                        server: "proxy.example".into(), port: 443, password: "secret".into(),
+                        sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                    }),
+                ] {
+                    let suffix = if transport.is_empty() { String::new() } else { format!(", {transport}") };
+                    assert_parses_and_roundtrips(&format!("proxies:\n  - {{{common}, type: {kind}, {credentials}{suffix}}}"), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shadowsocks_and_hysteria2_roundtrip() {
+        assert_parses_and_roundtrips(
+            "proxies:\n  - {name: Test, type: ss, server: '::1', port: 8388, cipher: aes-256-gcm, password: 'p@ss:word=1'}",
+            ProxyDef::Shadowsocks { server: "::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word=1".into() },
+        );
+        for (opts, obfs, ports, hop_interval) in [
+            ("", None, None, None),
+            (", obfs: none", None, None, None),
+            (", obfs: salamander, obfs-password: mask, ports: '443,5000-5002', hop-interval: '15'", Some("mask".into()), Some("443,5000-5002".into()), Some(15)),
+        ] {
+            assert_parses_and_roundtrips(
+                &format!("proxies:\n  - {{name: Test, type: hysteria2, server: h.example, port: 8443, password: secret, sni: tls.example, skip-cert-verify: true{opts}}}"),
+                ProxyDef::Hysteria2 {
+                    server: "h.example".into(), port: 8443, password: "secret".into(), sni: Some("tls.example".into()),
+                    skip_cert_verify: true, obfs, ports, hop_interval,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn vmess_defaults_and_cipher_aliases() {
+        for cipher in ["", ", cipher: none", ", cipher: zero", ", cipher: auto"] {
+            assert_parses_and_roundtrips(
+                &format!("proxies:\n  - {{name: Test, type: vmess, server: h, port: 80, uuid: u{cipher}}}"),
+                ProxyDef::Vmess {
+                    server: "h".into(), port: 80, uuid: "u".into(), method: "auto".into(),
+                    tls: false, sni: None, skip_cert_verify: false, layer: None,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn reality_and_both_vision_flows() {
+        let public_key = "9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4";
+        for flow in ["xtls-rprx-vision", "xtls-rprx-vision-udp443"] {
+            for short_id in ["", ", short-id: abcd"] {
+                assert_parses_and_roundtrips(
+                    &format!("proxies:\n  - {{name: Test, type: vless, server: r.example, port: 443, uuid: u, sni: www.example.com, flow: {flow}, reality-opts: {{public-key: {public_key}{short_id}}}}}"),
+                    ProxyDef::Vless {
+                        server: "r.example".into(), port: 443, uuid: "u".into(), tls: false,
+                        sni: Some("www.example.com".into()), skip_cert_verify: false, layer: None,
+                        reality: Some(crate::config::RealityDef { public_key: public_key.into(), short_id: if short_id.is_empty() { "" } else { "abcd" }.into() }),
+                        flow: Some(flow.into()),
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bad_nodes_are_skipped_without_losing_good_nodes() {
+        for (bad, reason) in [
+            ("type: ss, cipher: aes-128-gcm", "missing password"),
+            ("type: vmess", "missing uuid"),
+            ("type: vless", "missing uuid"),
+            ("type: trojan", "missing password"),
+            ("type: hysteria2", "missing password"),
+            ("type: socks5", "not supported"),
+            ("type: ss, cipher: aes-128-gcm, password: p, plugin: obfs", "ss plugins not supported"),
+            ("type: vmess, uuid: u, alterId: 1", "legacy vmess"),
+            ("type: trojan, password: p, network: kcp", "transport"),
+            ("type: trojan, password: p, network: xhttp, xhttp-opts: {mode: invalid}", "unknown xhttp mode"),
+            ("type: trojan, password: p, network: xhttp, xhttp-opts: {x-padding-bytes: 20-10}", "bad xhttp padding range"),
+            ("type: vless, uuid: u, flow: unsupported", "VLESS flow"),
+            ("type: vless, uuid: u, reality-opts: {public-key: bad}", "bad REALITY public key"),
+            ("type: hysteria2, password: p, obfs: salamander", "missing obfs-password"),
+            ("type: hysteria2, password: p, obfs: unknown", "hysteria2 obfs"),
+            ("type: hysteria2, password: p, ports: 5-3", "bad port range"),
+            ("type: hysteria2, password: p, hop-interval: bad", "bad hop-interval"),
+        ] {
+            let yaml = format!("proxies:\n  - {{name: Bad, server: h, port: 443, {bad}}}\n  - {{name: Good, type: ss, server: h, port: 1, cipher: aes-128-gcm, password: p}}");
+            let (nodes, skipped) = parse(&yaml).unwrap();
+            assert_eq!(nodes.len(), 1, "{bad}: {nodes:?}");
+            assert_eq!(nodes[0].0, "Good");
+            assert_eq!(skipped.len(), 1, "{bad}: {skipped:?}");
+            assert!(skipped[0].contains(reason), "{bad}: {skipped:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_documents_and_required_fields() {
+        for yaml in ["proxies: [", "proxies: {}", "rules: []"] {
+            assert!(parse(yaml).is_err(), "{yaml}");
+        }
+        let (nodes, skipped) = parse("proxies: []").unwrap();
+        assert!(nodes.is_empty() && skipped.is_empty());
+        for (fields, reason) in [
+            ("type: trojan, server: h, port: 443, password: p", "missing name"),
+            ("name: Bad, type: trojan, port: 443, password: p", "missing server"),
+            ("name: Bad, type: trojan, server: h, password: p", "missing port"),
+            ("name: Bad, type: trojan, server: h, port: 65536, password: p", "bad port"),
+        ] {
+            let (nodes, skipped) = parse(&format!("proxies:\n  - {{{fields}}}")).unwrap();
+            assert!(nodes.is_empty());
+            assert_eq!(skipped, [reason]);
+        }
+    }
+
+    #[test]
+    fn detects_top_level_proxy_lists() {
+        for yaml in ["proxies:\n", "# comment\nproxies: []\n", "proxies:   \n", "---\nproxies: [{name: Test}]\n"] {
+            assert!(looks_like(yaml), "{yaml:?}");
+        }
+        for yaml in ["", "# proxies:\n", "proxy-groups: []\n", "nested:\n  proxies:\n", "proxies-other: []\n"] {
+            assert!(!looks_like(yaml), "{yaml:?}");
+        }
+    }
+
+    #[test]
+    fn flags_accept_yaml_booleans_numbers_and_strings() {
+        for (value, expected) in [("true", true), ("1", true), ("'true'", true), ("'1'", true), ("false", false), ("0", false), ("'false'", false), ("null", false)] {
+            let yaml = format!("proxies:\n  - {{name: Test, type: vmess, server: h, port: 443, uuid: u, tls: {value}, skip-cert-verify: {value}}}");
+            assert_parses_and_roundtrips(&yaml, ProxyDef::Vmess {
+                server: "h".into(), port: 443, uuid: "u".into(), method: "auto".into(), tls: expected,
+                sni: None, skip_cert_verify: expected, layer: None,
+            });
+        }
+    }
+
+    #[test]
+    fn sni_alias_precedence_and_empty_optional_fields() {
+        for (fields, sni) in [
+            ("", None),
+            (", sni: fallback.example", Some("fallback.example")),
+            (", servername: preferred.example, sni: fallback.example", Some("preferred.example")),
+            (", servername: '', sni: fallback.example", Some("fallback.example")),
+            (", servername: '', sni: null, flow: ''", None),
+        ] {
+            assert_parses_and_roundtrips(
+                &format!("proxies:\n  - {{name: Test, type: vless, server: h, port: 443, uuid: u{fields}}}"),
+                ProxyDef::Vless {
+                    server: "h".into(), port: 443, uuid: "u".into(), tls: false, sni: sni.map(String::from),
+                    skip_cert_verify: false, layer: None, reality: None, flow: None,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_host_header_precedence_and_xhttp_scalar_padding() {
+        for (opts, host) in [
+            ("path: '', headers: {Host: preferred.example, host: fallback.example}", Some("preferred.example")),
+            ("headers: {Host: '', host: fallback.example}", Some("fallback.example")),
+            ("headers: {}", None),
+        ] {
+            assert_parses_and_roundtrips(
+                &format!("proxies:\n  - {{name: Test, type: trojan, server: h, port: 443, password: p, network: ws, ws-opts: {{{opts}}}}}"),
+                ProxyDef::Trojan {
+                    server: "h".into(), port: 443, password: "p".into(), sni: None, skip_cert_verify: false,
+                    layer: Some(Layer::Ws(WsOpts { path: "/".into(), host: host.map(String::from), headers: vec![] })),
+                },
+            );
+        }
+        for padding in ["16", "'16'", "'16-16'"] {
+            assert_parses_and_roundtrips(
+                &format!("proxies:\n  - {{name: Test, type: trojan, server: h, port: 443, password: p, network: xhttp, xhttp-opts: {{x-padding-bytes: {padding}}}}}"),
+                ProxyDef::Trojan {
+                    server: "h".into(), port: 443, password: "p".into(), sni: None, skip_cert_verify: false,
+                    layer: Some(Layer::Xhttp(XhttpOpts { padding: (16, 16), ..Default::default() })),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_nodes_and_required_scalar_fields_are_skipped_in_order() {
+        let yaml = r#"proxies:
+  - null
+  - []
+  - {name: '', server: h, port: 443, type: trojan, password: p}
+  - {name: NoType, server: h, port: 443, password: p}
+  - {name: NoCipher, server: h, port: 443, type: ss, password: p}
+  - {name: BadPassword, server: h, port: 443, type: trojan, password: []}
+  - {name: BadPort, server: h, port: -1, type: trojan, password: p}
+  - {name: First, server: h, port: 1, type: trojan, password: p}
+  - {name: Second, server: h, port: 65535, type: trojan, password: p}
+"#;
+        let (nodes, skipped) = parse(yaml).unwrap();
+        assert_eq!(nodes.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["First", "Second"]);
+        assert_eq!(skipped, ["missing name", "missing name", "missing name", "missing type", "missing cipher", "missing password", "bad port"]);
+    }
+
+    #[test]
+    fn reality_rejects_invalid_short_ids_and_missing_sni() {
+        let key = "9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4";
+        for (fields, reason) in [
+            ("reality-opts: {}".into(), "missing public-key"),
+            ("sni: www.example.com, reality-opts: {public-key: YQ}".into(), "must be 32 bytes"),
+            (format!("reality-opts: {{public-key: {key}}}"), "needs sni"),
+            (format!("sni: www.example.com, reality-opts: {{public-key: {key}, short-id: a}}"), "even length"),
+            (format!("sni: www.example.com, reality-opts: {{public-key: {key}, short-id: zz}}"), "bad REALITY short id"),
+        ] {
+            let (nodes, skipped) = parse(&format!("proxies:\n  - {{name: Bad, type: vless, server: h, port: 443, uuid: u, {fields}}}")).unwrap();
+            assert!(nodes.is_empty(), "{fields}");
+            assert_eq!(skipped.len(), 1);
+            assert!(skipped[0].contains(reason), "{fields}: {skipped:?}");
+        }
+    }
+
     const SAMPLE: &str = r#"
 port: 7890
 proxies:

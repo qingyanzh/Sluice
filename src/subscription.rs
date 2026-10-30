@@ -348,6 +348,335 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
 
+    fn assert_link_roundtrip(link: &str, expected: ProxyDef) {
+        let (name, actual) = parse_link(link).unwrap_or_else(|e| panic!("{link}: {e:#}"));
+        assert_eq!(name.as_deref(), Some("Test node"), "{link}");
+        // ProxyDef/Layer lack PartialEq; Debug includes all their fields.
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{link}");
+        let line = actual.to_line(name.as_deref().unwrap());
+        let (back_name, back) = parse_proxy(&line).unwrap();
+        assert_eq!(back_name, "Test node");
+        assert_eq!(format!("{back:?}"), format!("{expected:?}"), "{line}");
+    }
+
+    #[test]
+    fn all_stream_proxy_transports_roundtrip() {
+        let mut transports = vec![
+            ("".to_string(), "tcp", "", None),
+            ("&type=tcp".into(), "tcp", "", None),
+            ("&type=ws".into(), "ws", "", Some(Layer::Ws(WsOpts { path: "/".into(), host: None, headers: vec![] }))),
+            (
+                "&type=ws&path=%2Fsocket&host=cdn.example".into(), "ws", "/socket",
+                Some(Layer::Ws(WsOpts { path: "/socket".into(), host: Some("cdn.example".into()), headers: vec![] })),
+            ),
+            ("&type=grpc".into(), "grpc", "", Some(Layer::Grpc { service: String::new() })),
+            ("&type=grpc&serviceName=tunnel".into(), "grpc", "tunnel", Some(Layer::Grpc { service: "tunnel".into() })),
+            ("&type=xhttp".into(), "xhttp", "", Some(Layer::Xhttp(XhttpOpts::default()))),
+        ];
+        for net in ["xhttp", "splithttp"] {
+            for mode in [XhttpMode::Auto, XhttpMode::PacketUp, XhttpMode::StreamUp, XhttpMode::StreamOne] {
+                transports.push((
+                    format!("&type={net}&path=%2Fupload&host=cdn.example&mode={}", mode.as_str()), net, "/upload",
+                    Some(Layer::Xhttp(XhttpOpts { path: "/upload".into(), host: Some("cdn.example".into()), mode, ..Default::default() })),
+                ));
+            }
+        }
+        for (query, net, path, layer) in transports {
+            for tls in [false, true] {
+                let security = if tls { "tls" } else { "none" };
+                let suffix = format!("?security={security}&sni=tls.example&allowInsecure=1{query}#Test%20node");
+                assert_link_roundtrip(
+                    &format!("vless://test-uuid@proxy.example:443{suffix}"),
+                    ProxyDef::Vless {
+                        server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), tls,
+                        sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(), reality: None, flow: None,
+                    },
+                );
+                assert_link_roundtrip(
+                    &format!("trojan://p%40ss%3Aword@proxy.example:443{suffix}"),
+                    ProxyDef::Trojan {
+                        server: "proxy.example".into(), port: 443, password: "p@ss:word".into(),
+                        sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                    },
+                );
+                let (host, mode) = match &layer {
+                    Some(Layer::Ws(w)) => (w.host.as_deref(), "none"),
+                    Some(Layer::Xhttp(x)) => (x.host.as_deref(), x.mode.as_str()),
+                    _ => (None, "none"),
+                };
+                let json = serde_json::json!({
+                    "ps": "Test node", "add": "proxy.example", "port": 443, "id": "test-uuid", "aid": 0,
+                    "scy": "aes-128-gcm", "tls": if tls { "tls" } else { "" }, "sni": "tls.example",
+                    "allowInsecure": "true", "net": net, "path": path, "host": host, "type": mode,
+                });
+                assert_link_roundtrip(
+                    &format!("vmess://{}", STANDARD.encode(json.to_string())),
+                    ProxyDef::Vmess {
+                        server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), method: "aes-128-gcm".into(),
+                        tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shadowsocks_encodings_and_ipv6_roundtrip() {
+        use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+        let expected = ProxyDef::Shadowsocks {
+            server: "::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word".into(),
+        };
+        for creds in [STANDARD.encode("aes-256-gcm:p@ss:word"), STANDARD_NO_PAD.encode("aes-256-gcm:p@ss:word"), URL_SAFE_NO_PAD.encode("aes-256-gcm:p@ss:word"), "aes-256-gcm:p%40ss%3Aword".into()] {
+            assert_link_roundtrip(&format!("ss://{creds}@[::1]:8388#Test%20node"), expected.clone());
+        }
+        let legacy = STANDARD.encode("aes-256-gcm:p@ss:word@[::1]:8388");
+        assert_link_roundtrip(&format!("SS://{legacy}#Test%20node"), expected);
+    }
+
+    #[test]
+    fn hysteria2_aliases_and_options_roundtrip() {
+        for scheme in ["hy2", "hysteria2"] {
+            for (query, obfs, ports) in [
+                ("", None, None),
+                ("&obfs=none", None, None),
+                ("&obfs=salamander&obfs-password=mask&mport=443%2C5000-5002", Some("mask".into()), Some("443,5000-5002".into())),
+            ] {
+                assert_link_roundtrip(
+                    &format!("{scheme}://p%40ss@[::1]:8443/?sni=tls.example&insecure=true{query}#Test%20node"),
+                    ProxyDef::Hysteria2 {
+                        server: "::1".into(), port: 8443, password: "p@ss".into(), sni: Some("tls.example".into()),
+                        skip_cert_verify: true, obfs, ports, hop_interval: None,
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vmess_defaults_numeric_fields_and_security_aliases() {
+        for cipher in [None, Some("none"), Some("zero"), Some("auto")] {
+            for insecure in [serde_json::json!({"allowInsecure": 1}), serde_json::json!({"verify_cert": "false"})] {
+                let mut json = serde_json::json!({"ps": "Test node", "add": "h", "port": "80", "id": "u", "host": "cdn.example"});
+                if let Some(cipher) = cipher { json["scy"] = cipher.into(); }
+                for (key, value) in insecure.as_object().unwrap() { json[key] = value.clone(); }
+                assert_link_roundtrip(
+                    &format!("vmess://{}", STANDARD.encode(json.to_string())),
+                    ProxyDef::Vmess {
+                        server: "h".into(), port: 80, uuid: "u".into(), method: "auto".into(), tls: false,
+                        sni: Some("cdn.example".into()), skip_cert_verify: true, layer: None,
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn xhttp_padding_forms_and_trojan_peer_alias() {
+        for (extra, padding) in [
+            ("%7B%22xPaddingBytes%22%3A%2210-20%22%7D", (10, 20)),
+            ("%7B%22xPaddingBytes%22%3A16%7D", (16, 16)),
+            ("%7B%22xPaddingBytes%22%3A%7B%22from%22%3A10%2C%22to%22%3A20%7D%7D", (10, 20)),
+        ] {
+            assert_link_roundtrip(
+                &format!("trojan://p@h:443?peer=tls.example&type=splithttp&extra={extra}#Test%20node"),
+                ProxyDef::Trojan {
+                    server: "h".into(), port: 443, password: "p".into(), sni: Some("tls.example".into()), skip_cert_verify: false,
+                    layer: Some(Layer::Xhttp(XhttpOpts { padding, ..Default::default() })),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_formats_preserve_nodes_and_skip_errors() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let text = "# comment\n\ntrojan://pw@h:443\nunsupported://h:1\nSS = ss, h, 8388, encrypt-method=aes-128-gcm, password=p\nvless://u@h:80#\n";
+        let expected = parse(text);
+        assert_eq!(expected.0.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["node 1", "SS", "node 3"]);
+        assert_eq!(expected.1, ["unsupported:// not supported"]);
+        for encoded in [STANDARD.encode(text), URL_SAFE_NO_PAD.encode(text)] {
+            let wrapped = format!(" {}\n{} \n", &encoded[..20], &encoded[20..]);
+            let actual = parse(&wrapped);
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        }
+        let yaml = "proxies:\n  - {name: YAML, type: trojan, server: h, port: 443, password: p}\n";
+        assert_eq!(format!("{:?}", parse(yaml)), format!("{:?}", crate::clash::parse(yaml).unwrap()));
+        let (nodes, skipped) = parse("proxies: [");
+        assert!(nodes.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("Clash YAML"));
+        assert!(parse("").0.is_empty());
+    }
+
+    #[test]
+    fn malformed_links_are_rejected() {
+        for (link, reason) in [
+            ("not a link", "not a link"),
+            ("socks5://h:1", "not supported"),
+            ("ss://not-base64", "bad ss link"),
+            ("ss://method@h:1", "bad ss credentials"),
+            ("ss://aes-128-gcm:p@h:1?plugin=obfs", "ss plugins not supported"),
+            ("vless://h:443", "vless link without uuid"),
+            ("trojan://h:443", "trojan link without password"),
+            ("hy2://h:443", "hysteria2 link without password"),
+            ("trojan://p@h", "missing port"),
+            ("trojan://p@[::1:443", "bad host"),
+            ("trojan://p@h:65536", "bad port"),
+            ("vless://u@h:443?type=kcp", "transport"),
+            ("trojan://p@h:443?type=xhttp&mode=unknown", "unknown xhttp mode"),
+            ("vless://u@h:443?flow=unsupported", "VLESS flow"),
+            ("vless://u@h:443?security=reality", "REALITY link without pbk"),
+            ("hy2://p@h:443?obfs=salamander", "salamander without obfs-password"),
+            ("hy2://p@h:443?obfs=unknown", "hysteria2 obfs"),
+            ("hy2://p@h:443?mport=5-3", "bad port range"),
+            ("vmess://!", "bad vmess base64"),
+        ] {
+            let err = parse_link(link).unwrap_err();
+            assert!(format!("{err:#}").contains(reason), "{link}: {err:#}");
+        }
+        for (json, reason) in [
+            (r#"{"add":"h","port":443,"id":"u","aid":1}"#, "legacy vmess"),
+            (r#"{"port":443,"id":"u"}"#, "without address"),
+            (r#"{"add":"h","id":"u"}"#, "without port"),
+            (r#"{"add":"h","port":443}"#, "without id"),
+            (r#"{"add":"h","port":443,"id":"u","net":"kcp"}"#, "transport"),
+        ] {
+            let err = parse_link(&format!("vmess://{}", STANDARD.encode(json))).unwrap_err();
+            assert!(format!("{err:#}").contains(reason), "{json}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn base64_alphabets_padding_whitespace_and_invalid_data() {
+        use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+        // These bytes exercise both alphabet-specific characters (+/ and -_).
+        let bytes = [0xfb, 0xff];
+        for encoded in [STANDARD.encode(bytes), STANDARD_NO_PAD.encode(bytes), URL_SAFE.encode(bytes), URL_SAFE_NO_PAD.encode(bytes)] {
+            let wrapped = format!(" \t{}\n{}\r\n", &encoded[..1], &encoded[1..]);
+            assert_eq!(b64(&wrapped), Some(bytes.to_vec()));
+            assert_eq!(b64_str(&wrapped), None, "decoded bytes are not UTF-8");
+        }
+        assert_eq!(b64_str(&STANDARD.encode("節點")), Some("節點".into()));
+        for invalid in ["!", "a", "a=b", "%%%%"] {
+            assert_eq!(b64(invalid), None, "{invalid}");
+        }
+        for text in ["", " \n\t", "not base64!"] {
+            let (nodes, skipped) = parse(text);
+            assert!(nodes.is_empty() && skipped.is_empty(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn link_components_decode_ipv6_credentials_names_and_queries() {
+        let link = split_link("p%40ss%3Aword@[2001:db8::1]:65535/?SNI=old&SnI=tls.example&path=%2Fa%3Fb%3Dc&ignored#Test%20node").unwrap();
+        assert_eq!(link.user.as_deref(), Some("p@ss:word"));
+        assert_eq!((link.host.as_str(), link.port), ("2001:db8::1", 65535));
+        assert_eq!(link.name.as_deref(), Some("Test node"));
+        assert_eq!(link.query.len(), 2);
+        assert_eq!(link.query["sni"], "tls.example");
+        assert_eq!(link.query["path"], "/a?b=c");
+        for suffix in ["", "#"] {
+            let link = split_link(&format!("h:1{suffix}")).unwrap();
+            assert!(link.user.is_none() && link.name.is_none() && link.query.is_empty());
+        }
+    }
+
+    #[test]
+    fn security_flags_and_empty_optional_values() {
+        for (flag, expected) in [("1", true), ("true", true), ("0", false), ("false", false), ("", false)] {
+            let (_, def) = parse_link(&format!("VLESS://u@h:443?security=tls&allowInsecure={flag}&sni=&flow=&type=ws&host=")).unwrap();
+            assert!(matches!(def, ProxyDef::Vless {
+                tls: true, skip_cert_verify, sni: None, flow: None,
+                layer: Some(Layer::Ws(WsOpts { host: None, .. })), ..
+            } if skip_cert_verify == expected), "{flag}");
+            let (_, def) = parse_link(&format!("TROJAN://p@h:443?allowInsecure={flag}")).unwrap();
+            assert!(matches!(def, ProxyDef::Trojan { skip_cert_verify, sni: None, layer: None, .. } if skip_cert_verify == expected));
+            let (_, def) = parse_link(&format!("HY2://p@h:443?insecure={flag}&sni=&mport=&obfs=")).unwrap();
+            assert!(matches!(def, ProxyDef::Hysteria2 {
+                skip_cert_verify, sni: None, obfs: None, ports: None, hop_interval: None, ..
+            } if skip_cert_verify == expected));
+        }
+    }
+
+    #[test]
+    fn malformed_vmess_fields_and_json_are_rejected() {
+        for json in ["not JSON", "null", "[]", "{}",
+            r#"{"add":"h","port":-1,"id":"u"}"#,
+            r#"{"add":"h","port":65536,"id":"u"}"#,
+            r#"{"add":"h","port":"bad","id":"u"}"#,
+            r#"{"add":"","port":443,"id":"u"}"#,
+            r#"{"add":"h","port":443,"id":""}"#,
+            r#"{"add":"h","port":443,"id":"u","net":"xhttp","type":"bad"}"#,
+        ] {
+            assert!(parse_link(&format!("vmess://{}", STANDARD.encode(json))).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn reality_requires_valid_key_short_id_and_sni() {
+        let key = "9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4";
+        for (query, reason) in [
+            ("pbk=YQ&sni=www.example.com".into(), "must be 32 bytes"),
+            (format!("pbk={key}"), "needs sni"),
+            (format!("pbk={key}&sni=www.example.com&sid=a"), "even length"),
+            (format!("pbk={key}&sni=www.example.com&sid=001122334455667788"), "even length"),
+            (format!("pbk={key}&sni=www.example.com&sid=zz"), "bad REALITY short id"),
+        ] {
+            let err = parse_link(&format!("vless://u@h:443?security=reality&{query}")).unwrap_err();
+            assert!(format!("{err:#}").contains(reason), "{query}: {err:#}");
+        }
+        assert_link_roundtrip(
+            &format!("vless://u@h:443?security=reality&pbk={key}&sni=www.example.com#Test%20node"),
+            ProxyDef::Vless {
+                server: "h".into(), port: 443, uuid: "u".into(), tls: false,
+                sni: Some("www.example.com".into()), skip_cert_verify: false, layer: None, flow: None,
+                reality: Some(crate::config::RealityDef { public_key: key.into(), short_id: String::new() }),
+            },
+        );
+    }
+
+    #[test]
+    fn xhttp_padding_defaults_and_invalid_scalar_ranges() {
+        for extra in ["not-json", "{}", r#"{"xPaddingBytes":null}"#] {
+            let (_, def) = parse_link(&format!("trojan://p@h:443?type=xhttp&extra={extra}")).unwrap();
+            assert!(matches!(def, ProxyDef::Trojan { layer: Some(Layer::Xhttp(x)), .. } if x == XhttpOpts::default()));
+        }
+        for extra in [r#"{"xPaddingBytes":"20-10"}"#, r#"{"xPaddingBytes":-1}"#, r#"{"xPaddingBytes":4294967296}"#] {
+            assert!(parse_link(&format!("vless://u@h:443?type=xhttp&extra={extra}")).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn invalid_nodes_do_not_hide_neighbors_or_consume_generated_names() {
+        let text = "trojan://p@first:443\nss://!\nvless://h:443\nvmess://!\nhy2://p@h:443?mport=0\nBad = trojan, h, 443\ntrojan://p@last:443";
+        let (nodes, skipped) = parse(text);
+        assert_eq!(nodes.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["node 1", "node 2"]);
+        assert_eq!(skipped.len(), 5);
+        assert!(matches!(&nodes[0].1, ProxyDef::Trojan { server, .. } if server == "first"));
+        assert!(matches!(&nodes[1].1, ProxyDef::Trojan { server, .. } if server == "last"));
+    }
+
+    #[test]
+    #[ignore = "Known bug: parse_ss truncates legacy standard base64 at '/' before decoding"]
+    fn legacy_shadowsocks_base64_can_contain_slashes() {
+        let encoded = STANDARD.encode("aes-128-gcm:pa?@h:8388");
+        assert!(encoded.contains('/'));
+        assert_link_roundtrip(
+            &format!("ss://{encoded}#Test%20node"),
+            ProxyDef::Shadowsocks { server: "h".into(), port: 8388, method: "aes-128-gcm".into(), password: "pa?".into() },
+        );
+    }
+
+    #[test]
+    #[ignore = "Known bug: XHTTP object padding bypasses range validation and truncates u64 to u32"]
+    fn xhttp_object_padding_rejects_reversed_and_overflowing_ranges() {
+        let accepted: Vec<_> = [
+            r#"{"xPaddingBytes":{"from":20,"to":10}}"#,
+            r#"{"xPaddingBytes":{"from":4294967296,"to":4294967297}}"#,
+        ].into_iter().filter(|extra| parse_link(&format!("vless://u@h:443?type=xhttp&extra={extra}")).is_ok()).collect();
+        assert!(accepted.is_empty(), "invalid padding accepted: {accepted:?}");
+    }
+
     #[test]
     fn to_line_roundtrips() {
         let text = format!(
