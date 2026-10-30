@@ -132,12 +132,13 @@ final class Core: ObservableObject {
     /// A menu bar shortcut to a pane, consumed when the main window appears.
     @Published var requestedPane: Pane?
     @Published var autoStart: Bool {
-        didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
+        didSet { defaults.set(autoStart, forKey: "autoStart") }
     }
     @Published private(set) var configPath: String {
-        didSet { UserDefaults.standard.set(configPath, forKey: "configPath") }
+        didSet { defaults.set(configPath, forKey: "configPath") }
     }
 
+    private let defaults: UserDefaults
     private var process: Process?
     private var profileStore: ProfileStore?
     /// Root core started through the admin prompt (enhanced mode); followed via its log file.
@@ -183,12 +184,13 @@ final class Core: ObservableObject {
         FINAL,Proxy
         """
 
-    init() {
-        configPath = UserDefaults.standard.string(forKey: "configPath") ?? Core.defaultConfigPath
-        autoStart = UserDefaults.standard.bool(forKey: "autoStart")
+    init(defaults: UserDefaults = .standard, profilesDirectory: URL? = nil) {
+        self.defaults = defaults
+        configPath = defaults.string(forKey: "configPath") ?? Core.defaultConfigPath
+        autoStart = defaults.bool(forKey: "autoStart")
         ensureConfigExists()
         do {
-            let store = try ProfileStore(baseDirectory: Self.profilesDirectory,
+            let store = try ProfileStore(baseDirectory: profilesDirectory ?? Self.profilesDirectory, defaults: defaults,
                                          migratingFrom: URL(fileURLWithPath: configPath))
             profileStore = store
             profileNames = try store.names()

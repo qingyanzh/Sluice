@@ -21,19 +21,25 @@ final class ProfileStore {
         }
     }
 
-    init(baseDirectory: URL, defaults: UserDefaults = .standard, migratingFrom source: URL) throws {
+    /// By default, migrate the legacy `sluice.conf` beside the profiles directory.
+    init(baseDirectory: URL, defaults: UserDefaults = .standard, migratingFrom source: URL? = nil) throws {
         self.baseDirectory = baseDirectory
         self.defaults = defaults
         activeName = ""
         try files.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
         if try names().isEmpty {
             try validateAvailableName("Default")
-            // Copy, never move: the original configuration remains available.
-            try files.copyItem(at: source, to: url(for: "Default"))
+            let source = source ?? baseDirectory.deletingLastPathComponent().appendingPathComponent("sluice.conf")
+            // Copy the bytes rather than the file entry, so even a legacy symlink
+            // becomes an independent profile. The original is never modified.
+            try Data(contentsOf: source).write(to: url(for: "Default"), options: .withoutOverwriting)
         }
         let available = try names()
         let saved = defaults.string(forKey: Self.activeNameKey)
-        activeName = available.first(where: { $0 == saved }) ?? available[0]
+        guard let selected = available.first(where: { $0 == saved }) ?? available.first else {
+            throw StoreError.missingProfile
+        }
+        activeName = selected
         defaults.set(activeName, forKey: Self.activeNameKey)
     }
 
@@ -105,7 +111,8 @@ final class ProfileStore {
 
     func activate(_ name: String) throws {
         let source = try existingURL(name)
-        _ = try Data(contentsOf: source)
+        // The editor and core both require a readable UTF-8 configuration.
+        _ = try String(contentsOf: source, encoding: .utf8)
         activeName = name
         defaults.set(name, forKey: Self.activeNameKey)
     }

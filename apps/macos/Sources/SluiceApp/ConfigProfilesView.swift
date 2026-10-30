@@ -37,9 +37,23 @@ struct ConfigProfileList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("本地配置").font(DS.heading)
+            HStack {
+                Text("本地配置").font(DS.heading)
+                Spacer()
+                Button { core.refreshProfiles() } label: {
+                    Image(systemName: "arrow.clockwise").font(DS.label)
+                }
+                .buttonStyle(.plain).foregroundStyle(DS.ink2)
+                .disabled(busy).help("刷新配置列表")
+                .accessibilityLabel("刷新配置列表")
+            }
             ScrollView {
                 VStack(spacing: 4) {
+                    if core.profileNames.isEmpty {
+                        Text("没有可用的本地配置。请检查配置文件夹后刷新列表。")
+                            .font(DS.small).foregroundStyle(DS.ink2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     ForEach(core.profileNames, id: \.self) { name in
                         let active = name == core.activeProfileName
                         HStack(spacing: 6) {
@@ -82,8 +96,9 @@ struct ConfigProfileList: View {
             Text("切换运行中的配置会重新启动内核。")
                 .font(DS.small).foregroundStyle(DS.ink2)
         }
-        .frame(width: 220).frame(maxHeight: .infinity, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .top)
         .card()
+        .frame(width: 260)
     }
 }
 

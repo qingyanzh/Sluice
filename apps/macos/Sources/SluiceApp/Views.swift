@@ -2056,7 +2056,8 @@ struct ConfigView: View {
                 ConfigProfileList(busy: draft.busy, switchProfile: requestSwitch,
                                   edit: { profileEdit = $0 }, delete: { pendingDelete = $0 })
                 ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
-                    .glassPanel()
+                    .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+                    .glass()
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, 16)
             HStack {
@@ -2082,6 +2083,10 @@ struct ConfigView: View {
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .onAppear { core.refreshProfiles(); load() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            core.refreshProfiles()
+            if !draft.busy { load() }
+        }
         // Validation feedback belongs to the submitted version of the text.
         .onChange(of: draft.text) { if !draft.busy { draft.message = nil } }
         .confirmationDialog("放弃当前未保存的修改？", isPresented: $confirmRestore) {

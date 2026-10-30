@@ -30,12 +30,12 @@ final class ProfileStoreTests: XCTestCase {
         let store = try makeStore()
         XCTAssertEqual(try store.names(), ["Default"])
         XCTAssertEqual(store.activeName, "Default")
-        XCTAssertEqual(try Data(contentsOf: store.url(for: "Default")), Data(contentsOf: source))
+        XCTAssertEqual(try Data(contentsOf: store.url(for: "Default")), try Data(contentsOf: source))
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
         try "changed original".write(to: source, atomically: true, encoding: .utf8)
         let reopened = try makeStore()
         XCTAssertEqual(try reopened.names(), ["Default"])
-        XCTAssertNotEqual(try Data(contentsOf: reopened.url(for: "Default")), Data(contentsOf: source))
+        XCTAssertNotEqual(try Data(contentsOf: reopened.url(for: "Default")), try Data(contentsOf: source))
     }
 
     func testCreateAndDuplicatePreserveContentsAndActiveSelection() throws {
@@ -149,5 +149,41 @@ final class ProfileStoreTests: XCTestCase {
         let store = try makeStore()
         try FileManager.default.removeItem(at: source)
         XCTAssertEqual(try makeStore().activeName, store.activeName)
+    }
+
+    func testDefaultMigrationSourceIsBesideProfilesDirectory() throws {
+        let legacy = directory.appendingPathComponent("sluice.conf")
+        try FileManager.default.copyItem(at: source, to: legacy)
+        let store = try ProfileStore(baseDirectory: directory.appendingPathComponent("profiles"), defaults: defaults)
+        XCTAssertEqual(store.activeName, "Default")
+        XCTAssertEqual(try Data(contentsOf: store.url(for: "Default")), try Data(contentsOf: legacy))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
+    func testMigrationOfSymlinkCreatesIndependentRegularProfile() throws {
+        let link = directory.appendingPathComponent("legacy.conf")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: source)
+        let store = try ProfileStore(baseDirectory: directory.appendingPathComponent("profiles"),
+                                     defaults: defaults, migratingFrom: link)
+        XCTAssertEqual(try store.names(), ["Default"])
+        let contents = try Data(contentsOf: source)
+        try "external change".write(to: source, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try Data(contentsOf: store.url(for: "Default")), contents)
+        XCTAssertTrue(try link.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+    }
+
+    func testUnreadableTextDoesNotReplaceActiveSelection() throws {
+        let store = try makeStore()
+        try Data([0xFF, 0xFE, 0xFF]).write(to: store.url(for: "Invalid"))
+        XCTAssertThrowsError(try store.activate("Invalid"))
+        XCTAssertEqual(store.activeName, "Default")
+        XCTAssertEqual(defaults.string(forKey: ProfileStore.activeNameKey), "Default")
+    }
+
+    func testFailedMigrationDoesNotPersistSelectionOrCreateEmptyProfile() throws {
+        try FileManager.default.removeItem(at: source)
+        XCTAssertThrowsError(try makeStore())
+        XCTAssertNil(defaults.string(forKey: ProfileStore.activeNameKey))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.appendingPathComponent("profiles").path), [])
     }
 }
