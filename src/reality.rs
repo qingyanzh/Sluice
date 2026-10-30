@@ -292,6 +292,9 @@ fn client_hello(random: &[u8; 32], key_share: &[u8; 32], mlkem_ek: &[u8], server
     ext(&mut exts, 0x0005, &[1, 0, 0, 0, 0]);
     ext(&mut exts, 0x000d, &u16_list(&[0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601]));
     ext(&mut exts, 0x0012, &[]);
+    // compress_certificate (brotli), as Chrome: keeps the target's certificate flight small
+    // enough for the REALITY server to mirror (it gives up past 17 KB).
+    ext(&mut exts, 0x001b, &[2, 0x00, 0x02]);
     let mut shares = Vec::new();
     shares.extend_from_slice(&g3.to_be_bytes());
     shares.extend_from_slice(&[0, 1, 0]);
