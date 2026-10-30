@@ -101,7 +101,7 @@ macOS 应用通过 `127.0.0.1` 上的 API 管理内核，应保留示例中的 `
 
 ### 在应用中导入
 
-打开“节点”→“添加节点”，粘贴**一个**分享链接或**一行**代理定义，再点击“添加”。当前可识别 `ss://`、`vmess://`、`vless://`、`trojan://`、`hysteria2://`（也接受 `hy2://`）。具体参数仍需在内核支持范围内，例如 Shadowsocks 插件不受支持。
+打开“节点”→“添加节点”，粘贴**一个**分享链接或**一行**代理定义，再点击“添加”。当前可识别 `ss://`、`vmess://`、`vless://`、`trojan://`、`anytls://`、`hysteria2://`（也接受 `hy2://`）。具体参数仍需在内核支持范围内，例如 Shadowsocks 插件不受支持。
 
 应用会转换并检查输入，保存到 `[Proxy]`，并尝试加入 `FINAL` 指向的 `select` 组。默认配置中的这个组就是 `Proxy`。如果你把 `FINAL` 改成了节点、`DIRECT` 或其他类型的组，需要自行在配置中安排引用。新增节点不会自动取代当前选择；到“策略”中选择它。
 
@@ -112,6 +112,17 @@ macOS 应用通过 `127.0.0.1` 上的 API 管理内核，应保留示例中的 `
 ```
 
 输出是一行可放进 `[Proxy]` 的定义，不会自动修改配置文件。
+
+### AnyTLS
+
+支持 AnyTLS v2（anytls-go、sing-box、mihomo），使用 TLS、流复用与填充；空闲会话最多保留 4 个，30 秒后关闭。UDP 使用 sing-box UoT v2，每个目标地址独立建立流。
+
+```ini
+[Proxy]
+AnyTLS = anytls, proxy.example.com, 443, password=change-me, sni=proxy.example.com, udp=true
+```
+
+可选 `skip-cert-verify=true`、`alpn=h2|http/1.1`；默认校验证书、不发送 ALPN，并启用 UDP。`udp=false` 禁用 UDP。`tfo` 会保留配置值，但当前仍使用普通 TCP 连接。Clash YAML 的 `type: anytls` 也可导入，`client-fingerprint` 接受但忽略（使用 rustls）。分享链接示例：`anytls://password@proxy.example.com:443?sni=proxy.example.com&insecure=1#Name`，其中 `insecure=1` 表示跳过证书验证，密码和名称可使用百分号编码。
 
 ### 手动编辑配置
 
@@ -155,7 +166,7 @@ Spread = load-balance, HK-SS, JP-Trojan
 订阅导入支持：
 
 - 分享链接列表，明文或整体 Base64 编码。
-- Surge 风格的代理行。
+- Surge 风格的代理行，或完整的 Surge 托管配置（仅导入 `[Proxy]` 段，跳过内置策略和不支持的类型）。
 - 含 `proxies:` 的 Clash / Mihomo YAML 节点列表；这不代表支持其整个配置文件中的规则及所有扩展。
 
 手写配置还可以使用本地订阅文件。以下是订阅组的配置片段，将 `policy-path` 替换为实际地址，并把组加入 `Proxy`：
@@ -168,7 +179,11 @@ Airport = url-test, policy-path=https://example.com/your-subscription, policy-re
 
 这是示例 URL，不能直接获取真实节点。`policy-regex-filter` 可省略，表示保留全部节点；`policy-path` 也可写本地文件路径，相对路径以配置文件所在目录为基准。应用的“添加订阅”表单只接受 HTTP/HTTPS 地址，本地路径请在“配置”中编辑。
 
-`update-interval` 单位为秒，默认 86400，最小 60。内核运行期间会按订阅更新间隔触发重新载入。相同来源的组共享导入节点，也可以使用不同过滤条件。不支持或格式有误的订阅条目会被跳过并记录原因；过滤后若组没有任何可用选项，内核会放入 `REJECT`，不会自动直连。保存成功只表示配置可加载；仍需到“策略”确认实际导入了哪些节点。
+默认请求 User-Agent 为 `clash.meta mihomo/1.18.10 Sluice/<版本>`。如服务商要求，可在“添加订阅”的可选 User-Agent 栏填写，或在订阅组添加 `user-agent="自定义值"`。下载支持最多 5 次重定向、chunked、gzip/deflate；HTTP 错误会显示状态码及响应正文摘要。
+
+控制 API `GET /v1/subscriptions` 返回各订阅的组名、地址、流量用量（字节）、总量、到期时间、服务端建议更新间隔（小时）、最后成功下载时间、下载错误及过滤后节点数。时间使用 Unix 秒，未提供的信息为 `null`；用量元数据随磁盘缓存保存。服务端建议间隔仅展示，实际更新仍使用配置中的 `update-interval`。
+
+`update-interval` 单位为秒，默认 86400，最小 60。内核运行期间会按订阅更新间隔触发重新载入。相同来源及 User-Agent 的组共享导入节点，也可以使用不同过滤条件。不支持或格式有误的订阅条目会被跳过并记录原因；过滤后若组没有任何可用选项，内核会放入 `REJECT`，不会自动直连。保存成功只表示配置可加载；仍需到“策略”确认实际导入了哪些节点。
 
 “节点”页显示配置中的独立节点和订阅入口；订阅展开后的节点在“策略”页查看和选择。要修改订阅地址、过滤条件，或删除节点和订阅，在“配置”中编辑相应定义，并同步删除组和规则中对它们的引用，再检查和保存。
 

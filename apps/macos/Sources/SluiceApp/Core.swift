@@ -1073,13 +1073,18 @@ final class Core: ObservableObject {
     }
 
     /// Adds a subscription as its own `select` group fed by `policy-path`.
-    func addSubscription(name: String, url: String, filter: String) async -> String? {
+    func addSubscription(name: String, url: String, filter: String, userAgent: String = "") async -> String? {
         let url = url.trimmingCharacters(in: .whitespaces)
         guard url.hasPrefix("http://") || url.hasPrefix("https://") else { return "订阅地址需要以 http:// 或 https:// 开头。" }
         var text = readConfig()
         let group = uniqueName(name.trimmingCharacters(in: .whitespaces).isEmpty ? "Subscription" : name, in: text)
         var line = "\(group) = select, policy-path=\(url)"
         if !filter.trimmingCharacters(in: .whitespaces).isEmpty { line += ", policy-regex-filter=\(filter)" }
+        let userAgent = userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !userAgent.contains("\r"), !userAgent.contains("\n"), !userAgent.contains("\"") else {
+            return "User-Agent 不能包含换行或双引号。"
+        }
+        if !userAgent.isEmpty { line += ", user-agent=\"\(userAgent)\"" }
         text = ConfigText.insert(line, into: "Proxy Group", of: text)
         text = ConfigText.addToFinalGroup(group, in: text)
         return Core.explain(await saveConfig(text), as: "订阅没有添加，配置没有改动。请确认地址可以访问，且内容是节点列表。")

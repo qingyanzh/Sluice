@@ -1043,8 +1043,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolver_static_hosts_win() {
-        let mut cfg = Config::default();
-        cfg.hosts = vec![("static.test".into(), "10.9.8.7".into())];
+        let cfg = Config { hosts: vec![("static.test".into(), "10.9.8.7".into())], ..Config::default() };
         let r = Resolver::new(&cfg).unwrap();
         assert_eq!(r.lookup_v4("Static.Test").await.unwrap(), vec![v("10.9.8.7")]);
         assert!(r.is_configured());

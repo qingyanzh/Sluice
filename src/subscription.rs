@@ -8,11 +8,23 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
 use log::{info, warn};
+use serde::Serialize;
 
 use crate::api::percent_decode;
 use crate::config::{parse_proxy, Config, ProxyDef};
 use crate::ruleset::fetch;
 use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
+
+/// One entry per (group, source), shared with control API readers by the reloader.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscriptionInfo {
+    pub group: String,
+    pub url: String,
+    #[serde(flatten)]
+    pub metadata: crate::ruleset::FetchMetadata,
+    pub last_error: Option<String>,
+    pub node_count: usize,
+}
 
 fn b64(s: &str) -> Option<Vec<u8>> {
     use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -213,6 +225,26 @@ fn parse_trojan(body: &str) -> Result<(Option<String>, ProxyDef)> {
     Ok((l.name, def))
 }
 
+fn parse_anytls(body: &str) -> Result<(Option<String>, ProxyDef)> {
+    let mut l = split_link(body)?;
+    // URI userinfo uses percent escaping, not form encoding: a literal '+' is a password byte.
+    if let Some((user, _)) = body.split(['?', '#']).next().unwrap_or_default().rsplit_once('@') {
+        l.user = Some(percent_decode(&user.replace('+', "%2B")));
+    }
+    if l.host.is_empty() { bail!("anytls link without host"); }
+    let q = &l.query;
+    let def = ProxyDef::AnyTls {
+        server: l.host, port: l.port,
+        password: l.user.ok_or_else(|| anyhow!("anytls link without password"))?,
+        sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
+        skip_cert_verify: truthy(q.get("insecure")) || truthy(q.get("allowinsecure")),
+        tfo: truthy(q.get("tfo")),
+        alpn: q.get("alpn").map_or_else(Vec::new, |s| s.split([',', '|']).filter(|s| !s.is_empty()).map(str::to_string).collect()),
+        udp: !matches!(q.get("udp").map(String::as_str), Some("false" | "0")),
+    };
+    Ok((l.name, def))
+}
+
 fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
     // `host:20000-50000` / `host:443,8443` is a port-hopping spec; the first port stands in
     // as the plain port so split_link can parse the rest.
@@ -259,6 +291,7 @@ pub fn parse_link(line: &str) -> Result<(Option<String>, ProxyDef)> {
         "vmess" => parse_vmess(body),
         "vless" => parse_vless(body),
         "trojan" => parse_trojan(body),
+        "anytls" => parse_anytls(body),
         "hysteria2" | "hy2" => parse_hy2(body),
         other => bail!("{other}:// not supported"),
     }
@@ -270,22 +303,37 @@ pub fn parse(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>) {
         return crate::clash::parse(text).unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")]));
     }
     let decoded;
-    let text = if text.contains("://") || text.contains(" = ") {
+    let text = text.trim_start_matches('\u{feff}');
+    let text = if text.contains("://") || text.contains(',') || text.trim_start().starts_with("#!MANAGED-CONFIG") || text.lines().any(|l| l.trim().eq_ignore_ascii_case("[Proxy]")) {
         text
     } else {
         decoded = b64_str(text).unwrap_or_default();
         &decoded
     };
+    let profile = text.starts_with("#!MANAGED-CONFIG") || text.lines().any(|l| l.trim().eq_ignore_ascii_case("[Proxy]"));
+    let mut in_proxy = !profile;
     let (mut nodes, mut skipped) = (Vec::new(), Vec::new());
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-        let parsed = if line.contains("://") {
+    for line in text.lines().map(str::trim) {
+        if profile && line.starts_with('[') && line.ends_with(']') {
+            in_proxy = line.eq_ignore_ascii_case("[Proxy]");
+            continue;
+        }
+        if !in_proxy || line.is_empty() || line.starts_with(['#', ';']) || line.starts_with("//") { continue; }
+        if let Some((_, value)) = line.split_once('=') {
+            let kind = value.split(',').next().unwrap_or_default().trim();
+            if matches!(kind.to_ascii_lowercase().as_str(), "direct" | "reject" | "reject-tinygif" | "reject-drop") { continue; }
+        }
+        let parsed = if !profile && line.contains("://") {
             parse_link(line).map(|(name, def)| (name.unwrap_or_else(|| format!("node {}", nodes.len() + 1)), def))
         } else {
             parse_proxy(line)
         };
         match parsed {
             Ok(n) => nodes.push(n),
-            Err(e) => skipped.push(format!("{e:#}")),
+            Err(e) => {
+                warn!("subscription entry skipped: {e:#}");
+                skipped.push(format!("{e:#}"));
+            }
         }
     }
     (nodes, skipped)
@@ -298,18 +346,21 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
     taken.extend(cfg.groups.iter().map(|g| g.name.clone()));
     taken.extend(["DIRECT".to_string(), "REJECT".to_string()]);
     // Groups sharing a subscription share its proxies: source -> final proxy names.
-    let mut imported: HashMap<String, Vec<String>> = HashMap::new();
+    let mut imported = HashMap::new();
+    cfg.subscriptions.clear();
     for gi in 0..cfg.groups.len() {
         let Some(source) = cfg.groups[gi].policy_path.clone() else { continue };
+        let user_agent = cfg.groups[gi].user_agent.clone();
+        let key = (source.clone(), user_agent.clone());
         let mut note = String::new();
-        if !imported.contains_key(&source) {
+        if !imported.contains_key(&key) {
             let max_age = Duration::from_secs(cfg.groups[gi].update_interval_secs);
-            let text = match fetch(&source, base, max_age).await {
-                Ok((text, _)) => text,
+            let (text, metadata, last_error) = match fetch(&source, base, max_age, user_agent.as_deref()).await {
+                Ok(result) => (result.text, result.metadata, result.last_error),
                 Err(e) if strict => return Err(e.context(format!("subscription for group {:?}", cfg.groups[gi].name))),
                 Err(e) => {
                     warn!("subscription for group {:?}: {e:#}", cfg.groups[gi].name);
-                    String::new()
+                    (String::new(), Default::default(), Some(format!("{e:#}")))
                 }
             };
             let (nodes, skipped) = parse(&text);
@@ -325,13 +376,16 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
                 cfg.proxies.push((unique.clone(), def));
                 names.push(unique);
             }
-            imported.insert(source.clone(), names);
+            imported.insert(key.clone(), (names, metadata, last_error));
         }
         let filter = cfg.groups[gi].policy_filter.as_deref().map(regex::Regex::new).transpose()?;
-        let picked: Vec<String> =
-            imported[&source].iter().filter(|n| filter.as_ref().is_none_or(|re| re.is_match(n))).cloned().collect();
+        let (names, metadata, last_error) = &imported[&key];
+        let picked: Vec<String> = names.iter().filter(|n| filter.as_ref().is_none_or(|re| re.is_match(n))).cloned().collect();
         let g = &mut cfg.groups[gi];
         info!("group {}: {} nodes from {source}{note}", g.name, picked.len());
+        cfg.subscriptions.push(SubscriptionInfo {
+            group: g.name.clone(), url: source.clone(), metadata: metadata.clone(), last_error: last_error.clone(), node_count: picked.len(),
+        });
         g.options.extend(picked);
         if g.options.is_empty() {
             warn!("group {} has no usable nodes; it will REJECT", g.name);
@@ -361,6 +415,38 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
 
+    #[test]
+    fn surge_managed_profile_extracts_only_proxies() {
+        let body = "[General]\nhttp-listen = 8080\n[Proxy]\n# comment\n; comment\n// comment\n\nDIRECT = direct\nREJECT = reject\nBad = future-protocol, h, 443\nHK = trojan, h, 443, password=p\nJP = ss, h, 8388, encrypt-method=aes-128-gcm, password=p\n[Proxy Group]\nAuto = select, HK, JP\n[Rule]\nFINAL,Auto\n";
+        for prefix in ["", "#!MANAGED-CONFIG https://example.invalid/sub interval=86400\n"] {
+            let text = format!("{prefix}{body}");
+            for text in [text.clone(), STANDARD.encode(text)] {
+                let (nodes, skipped) = parse(&text);
+                assert_eq!(nodes.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["HK", "JP"]);
+                assert_eq!(skipped.len(), 1);
+                assert!(skipped[0].contains("unsupported proxy type"));
+            }
+        }
+        let (nodes, skipped) = parse("#!MANAGED-CONFIG https://example.invalid\n[Rule]\nFINAL,DIRECT\n");
+        assert!(nodes.is_empty() && skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expansion_tracks_each_group_and_failed_subscription() {
+        let dir = std::env::temp_dir().join(format!("sluice-sub-expand-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nodes.txt"), "[Proxy]\nHK = trojan, h, 443, password=p\nJP = trojan, h, 443, password=p\n[Rule]\nFINAL,DIRECT\n").unwrap();
+        let mut cfg = Config::parse("[Proxy Group]\nAll = select, policy-path=nodes.txt\nHKOnly = select, policy-path=nodes.txt, policy-regex-filter=HK\nMissing = select, policy-path=missing.txt\n").unwrap();
+        expand(&mut cfg, &dir, false).await.unwrap();
+        assert_eq!(cfg.proxies.len(), 2);
+        assert_eq!(cfg.subscriptions.iter().map(|s| (s.group.as_str(), s.node_count)).collect::<Vec<_>>(), [("All", 2), ("HKOnly", 1), ("Missing", 0)]);
+        assert_eq!(cfg.subscriptions[0].url, "nodes.txt");
+        assert!(cfg.subscriptions[0].last_error.is_none());
+        assert!(cfg.subscriptions[2].last_error.as_ref().unwrap().contains("missing.txt"));
+        assert_eq!(cfg.groups[2].options, ["REJECT"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn assert_link_roundtrip(link: &str, expected: ProxyDef) {
         let (name, actual) = parse_link(link).unwrap_or_else(|e| panic!("{link}: {e:#}"));
         assert_eq!(name.as_deref(), Some("Test node"), "{link}");
@@ -370,6 +456,22 @@ mod tests {
         let (back_name, back) = parse_proxy(&line).unwrap();
         assert_eq!(back_name, "Test node");
         assert_eq!(format!("{back:?}"), format!("{expected:?}"), "{line}");
+    }
+
+    #[test]
+    fn anytls_share_links_roundtrip() {
+        assert_link_roundtrip("anytls://p%40ss%3Aword%25@[::1]:443?sni=tls%2Eexample&insecure=1&alpn=h2%2Chttp%2F1.1&udp=0&tfo=1#Test%20node", ProxyDef::AnyTls {
+            server: "::1".into(), port: 443, password: "p@ss:word%".into(), sni: Some("tls.example".into()),
+            skip_cert_verify: true, tfo: true, alpn: vec!["h2".into(), "http/1.1".into()], udp: false,
+        });
+        assert_link_roundtrip("anytls://secret@h:8443#Test%20node", ProxyDef::AnyTls {
+            server: "h".into(), port: 8443, password: "secret".into(), sni: None,
+            skip_cert_verify: false, tfo: false, alpn: vec![], udp: true,
+        });
+        assert!(parse_link("anytls://h:443").is_err());
+        assert!(parse_link("anytls://p@:443").is_err());
+        let (_, def) = parse_link("anytls://a+b%2Bc@h:443").unwrap();
+        assert!(matches!(def, ProxyDef::AnyTls { password, .. } if password == "a+b+c"));
     }
 
     #[test]

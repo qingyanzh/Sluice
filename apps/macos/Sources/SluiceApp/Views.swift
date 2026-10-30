@@ -1398,6 +1398,7 @@ struct AddSubscriptionSheet: View {
     @State private var name = ""
     @State private var url = ""
     @State private var filter = ""
+    @State private var userAgent = ""
     @State private var error: String?
     @State private var busy = false
 
@@ -1409,10 +1410,11 @@ struct AddSubscriptionSheet: View {
                 SheetField(label: "名称", prompt: "Subscription", text: $name)
                 SheetField(label: "名称过滤（正则，可选）", prompt: "例如 香港|HK", text: $filter)
             }
+            SheetField(label: "User-Agent（可选）", prompt: "留空使用默认值", text: $userAgent)
             SheetFooter(error: error, primary: busy ? "下载中…" : "添加", enabled: !busy && !url.isEmpty, cancel: { dismiss() }) {
                 busy = true
                 Task {
-                    error = await core.addSubscription(name: name, url: url, filter: filter)
+                    error = await core.addSubscription(name: name, url: url, filter: filter, userAgent: userAgent)
                     busy = false
                     if error == nil { dismiss() }
                 }

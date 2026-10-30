@@ -32,6 +32,10 @@ pub struct General {
 pub enum ProxyDef {
     Shadowsocks { server: String, port: u16, method: String, password: String, plugin: Option<SsPlugin> },
     Trojan { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, layer: Option<Layer> },
+    AnyTls {
+        server: String, port: u16, password: String, sni: Option<String>,
+        skip_cert_verify: bool, tfo: bool, alpn: Vec<String>, udp: bool,
+    },
     Vless {
         server: String,
         port: u16,
@@ -133,6 +137,13 @@ impl ProxyDef {
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 layer_bits(&mut parts, layer);
             }
+            ProxyDef::AnyTls { server, port, password, sni, skip_cert_verify, tfo, alpn, udp } => {
+                parts.extend(["anytls".into(), server.clone(), port.to_string(), format!("password={password}")]);
+                tls_bits(&mut parts, sni, *skip_cert_verify);
+                if *tfo { parts.push("tfo=true".into()); }
+                if !alpn.is_empty() { parts.push(format!("alpn={}", alpn.join("|"))); }
+                parts.push(format!("udp={udp}"));
+            }
             ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer, reality, flow } => {
                 parts.extend(["vless".into(), server.clone(), port.to_string(), format!("uuid={uuid}")]);
                 if let Some(f) = flow {
@@ -208,12 +219,39 @@ pub struct GroupDef {
     pub interval_secs: u64,
     /// Subscription URL or file whose nodes are appended to `options`.
     pub policy_path: Option<String>,
+    pub user_agent: Option<String>,
     /// Only subscription nodes whose name matches this regex are kept.
     pub policy_filter: Option<String>,
     pub update_interval_secs: u64,
 }
 
 pub const DEFAULT_TEST_URL: &str = "http://www.gstatic.com/generate_204";
+
+impl GroupDef {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn to_line(&self) -> String {
+        let kind = match self.kind {
+            GroupKind::Select => "select",
+            GroupKind::UrlTest { .. } => "url-test",
+            GroupKind::Fallback => "fallback",
+            GroupKind::LoadBalance => "load-balance",
+        };
+        let mut parts = vec![kind.to_string()];
+        parts.extend(self.options.iter().cloned());
+        parts.push(format!("url=\"{}\"", self.url));
+        parts.push(format!("interval={}", self.interval_secs));
+        if let GroupKind::UrlTest { tolerance_ms } = self.kind {
+            parts.push(format!("tolerance={tolerance_ms}"));
+        }
+        for (key, value) in [("policy-path", &self.policy_path), ("user-agent", &self.user_agent), ("policy-regex-filter", &self.policy_filter)] {
+            if let Some(value) = value {
+                parts.push(format!("{key}=\"{value}\""));
+            }
+        }
+        parts.push(format!("update-interval={}", self.update_interval_secs));
+        format!("{} = {}", self.name, parts.join(", "))
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Config {
@@ -225,6 +263,7 @@ pub struct Config {
     pub hosts: Vec<(String, String)>,
     pub mitm: crate::mitm::MitmConfig,
     pub rewrites: crate::rewrite::Rewrites,
+    pub subscriptions: Vec<crate::subscription::SubscriptionInfo>,
 }
 
 fn split_kv(line: &str) -> Result<(&str, &str)> {
@@ -303,6 +342,15 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
             layer: layer.clone(),
         },
+        "anytls" => ProxyDef::AnyTls {
+            server, port,
+            password: take("password").ok_or_else(|| anyhow!("anytls needs password"))?,
+            sni: take("sni"),
+            skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
+            tfo: matches!(take("tfo").as_deref(), Some("true" | "1")),
+            alpn: take("alpn").map_or_else(Vec::new, |s| s.split('|').filter(|s| !s.is_empty()).map(str::to_string).collect()),
+            udp: !matches!(take("udp").as_deref(), Some("false" | "0")),
+        },
         "vless" => ProxyDef::Vless {
             server,
             port,
@@ -356,7 +404,11 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
 
 fn parse_group(line: &str) -> Result<GroupDef> {
     let (name, rest) = split_kv(line)?;
-    let mut parts = rest.split(',').map(str::trim).filter(|p| !p.is_empty());
+    let mut quoted = false;
+    let mut parts = rest.split(|c| {
+        if c == '"' { quoted = !quoted; }
+        c == ',' && !quoted
+    }).map(str::trim).filter(|p| !p.is_empty());
     let kind = parts.next().ok_or_else(|| anyhow!("empty group"))?.to_ascii_lowercase();
     let (mut options, mut params) = (Vec::new(), HashMap::new());
     for p in parts {
@@ -378,6 +430,10 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         other => bail!("unsupported group type {other:?} (supported: select, url-test, fallback, load-balance)"),
     };
     let policy_path = params.get("policy-path").cloned();
+    let user_agent = params.get("user-agent").cloned();
+    if let Some(value) = &user_agent {
+        http::HeaderValue::from_str(value).context("bad user-agent")?;
+    }
     if options.is_empty() && policy_path.is_none() {
         bail!("group {name:?} has no options");
     }
@@ -391,6 +447,7 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         url: params.get("url").cloned().unwrap_or_else(|| DEFAULT_TEST_URL.to_string()),
         interval_secs: num("interval", 600)?.max(10),
         policy_path,
+        user_agent,
         policy_filter: params.get("policy-regex-filter").cloned(),
         update_interval_secs: num("update-interval", 86400)?.max(60),
     })
@@ -460,6 +517,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anytls_roundtrip_and_defaults() {
+        for options in ["", ", sni=tls.example, skip-cert-verify=true, tfo=true, alpn=h2|http/1.1, udp=false"] {
+            let (name, def) = parse_proxy(&format!("Test = anytls, ::1, 443, password=p@ss:word{options}")).unwrap();
+            let (_, back) = parse_proxy(&def.to_line(&name)).unwrap();
+            assert_proxy_eq(&def, &back);
+            assert!(matches!(def, ProxyDef::AnyTls { udp, .. } if udp == options.is_empty()));
+        }
+        assert!(parse_proxy("Test = anytls, h, 443").unwrap_err().to_string().contains("password"));
+    }
 
     // ProxyDef and Layer do not implement PartialEq; compare every field via Debug.
     fn assert_proxy_eq(actual: &ProxyDef, expected: &ProxyDef) {
@@ -701,6 +769,19 @@ mod tests {
             assert!(message.contains("line 3"), "{message}");
             assert!(message.contains(reason), "{body}: {message}");
         }
+    }
+
+    #[test]
+    fn subscription_user_agent_roundtrip() {
+        for agent in [None, Some("Surge/5.0"), Some("Custom agent/1.0 (a, b) token=123")] {
+            let mut line = "Sub = url-test, DIRECT, policy-path=https://example.invalid/sub, policy-regex-filter=HK|JP, tolerance=50".to_string();
+            if let Some(agent) = agent { line.push_str(&format!(", user-agent=\"{agent}\"")); }
+            let original = parse_group(&line).unwrap();
+            assert_eq!(original.user_agent.as_deref(), agent);
+            let back = parse_group(&original.to_line()).unwrap();
+            assert_eq!(format!("{original:?}"), format!("{back:?}"));
+        }
+        assert!(parse_group("Sub = select, policy-path=nodes.txt, user-agent=bad\rvalue").is_err());
     }
 
     #[test]

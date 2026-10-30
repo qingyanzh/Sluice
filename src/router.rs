@@ -27,6 +27,7 @@ pub enum Outbound {
     Reject,
     Shadowsocks(SsServer),
     Trojan(TrojanServer),
+    AnyTls(crate::anytls::AnyTlsServer),
     Vless(VlessServer),
     Vmess(VmessServer),
     Hysteria2(Hy2Server),
@@ -130,6 +131,10 @@ impl Router {
             let ob = match def.clone() {
                 ProxyDef::Shadowsocks { server, port, method, password, plugin } => {
                     Outbound::Shadowsocks(SsServer::new(server, port, &method, &password, plugin)?)
+                }
+                ProxyDef::AnyTls { server, port, password, sni, skip_cert_verify, tfo, alpn, udp } => {
+                    let transport = Transport::anytls(server, port, sni, skip_cert_verify, &alpn, tfo)?;
+                    Outbound::AnyTls(crate::anytls::AnyTlsServer::new(transport, &password, udp))
                 }
                 ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, layer } => {
                     Outbound::Trojan(TrojanServer::new(Transport::new(server, port, true, sni, skip_cert_verify, layer)?, &password))
@@ -464,6 +469,7 @@ impl Router {
             Outbound::Direct => crate::udp::direct(),
             Outbound::Shadowsocks(s) => s.open_udp().await?,
             Outbound::Trojan(t) => t.open_udp(first).await?,
+            Outbound::AnyTls(a) => a.open_udp().await?,
             Outbound::Vless(v) => v.open_udp(first),
             Outbound::Vmess(v) => v.open_udp(first),
             Outbound::Hysteria2(h) => h.open_udp().await?,
@@ -497,6 +503,7 @@ impl Router {
             Outbound::Direct => Box::new(connect_tcp(&target.host_str(), target.port).await?),
             Outbound::Shadowsocks(s) => s.connect(target).await?,
             Outbound::Trojan(t) => t.connect(target).await?,
+            Outbound::AnyTls(a) => a.connect(target).await?,
             Outbound::Vless(v) => v.connect(target).await?,
             Outbound::Vmess(v) => v.connect(target).await?,
             Outbound::Hysteria2(h) => h.connect(target).await?,

@@ -99,6 +99,7 @@ pub fn sibling_profiles(path: &str) -> Vec<String> {
 
 pub struct Reloader {
     pub handle: Arc<RouterHandle>,
+    pub subscriptions: RwLock<Vec<subscription::SubscriptionInfo>>,
     /// The active config file; `switch_profile` changes it.
     path: Mutex<String>,
     fixed: Fixed,
@@ -121,6 +122,7 @@ impl Reloader {
         crate::dns::set_router(handle.clone());
         Arc::new(Reloader {
             handle,
+            subscriptions: RwLock::new(cfg.subscriptions.clone()),
             path: Mutex::new(path.to_string()),
             fixed: Fixed::of(&cfg.general),
             lock: tokio::sync::Mutex::new(()),
@@ -163,6 +165,7 @@ impl Reloader {
         router.inherit_state(&self.handle.current());
         activate(&router, &cfg);
         *self.handle.0.write().unwrap() = router;
+        *self.subscriptions.write().unwrap() = cfg.subscriptions.clone();
         *self.last.lock().unwrap() = Instant::now();
         *self.subscription_every.lock().unwrap() = subscription_interval(&cfg);
         let summary = format!("{} proxies, {} groups, {} rules", cfg.proxies.len(), cfg.groups.len(), cfg.rules.len());

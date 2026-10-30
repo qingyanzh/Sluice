@@ -79,6 +79,7 @@ jobs:
           path: target/release
       - run: chmod +x target/release/sluice
       - run: brew install shadowsocks-rust xray hysteria simple-obfs v2ray
+      - run: brew install sing-box
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -169,4 +170,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mitm-logs
+          path: ci-logs
+
+  subscription:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: brew install sing-box
+      - run: bash scripts/ci/subscription.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: subscription-logs
           path: ci-logs

@@ -172,6 +172,14 @@ final class StructuredConfigTests: XCTestCase {
         XCTAssertFalse(duplicate.parameters.contains { $0.lowercased().hasPrefix("interval") })
     }
 
+    func testSubscriptionUserAgentSurvivesGroupEdits() throws {
+        var group = try XCTUnwrap(StructuredConfig.Group(line: "Airport = select, policy-path=https://example.test/sub, user-agent=\"Custom/1.0 (a, b)\""))
+        XCTAssertEqual(group.parameter("user-agent"), "Custom/1.0 (a, b)")
+        XCTAssertTrue(group.members.isEmpty)
+        group.name = "Renamed"
+        XCTAssertEqual(StructuredConfig.Group(line: group.serialised), group)
+    }
+
     func testGroupEditChangesOnlyItsLineAndRetainsSubscriptionParameters() throws {
         let original = "Auto = url-test, A, B, url=\"https://old.test\", interval=60, tolerance=50, policy-path=./airport.txt, policy-regex-filter=HK|JP, update-interval=900, future=yes"
         let text = "[Proxy]\nA=ss,h,1\n[Proxy Group]\n# keep\n\t\(original)\r\n; keep too\nOther = select, DIRECT\n[Rule]\nFINAL,Auto"

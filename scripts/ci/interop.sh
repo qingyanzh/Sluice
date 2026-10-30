@@ -105,6 +105,30 @@ P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS
 FINAL,P
 EOF
 
+# AnyTLS uses the same certificate and checks as the other interop servers. Extend
+# the generated config here so the existing node list stays independent.
+cat > "$work/anytls.json" <<EOF
+{"log":{"level":"warn"},
+ "inbounds":[{"type":"anytls","listen":"127.0.0.1","listen_port":19460,
+   "users":[{"password":"anytls-ci"}],
+   "tls":{"enabled":true,"certificate_path":"$work/cert.pem","key_path":"$work/key.pem"}}],
+ "outbounds":[{"type":"direct"}]}
+EOF
+python3 - "$work/sluice.conf" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("[Proxy Group]\n", "AnyTLS = anytls, 127.0.0.1, 19460, password=anytls-ci, sni=test.local, skip-cert-verify=true, udp=true\n[Proxy Group]\n", 1)
+lines = text.splitlines()
+for i, line in enumerate(lines):
+    if line.startswith("P = select,"):
+        lines[i] = line + ", AnyTLS"
+path.write_text("\n".join(lines) + "\n")
+PY
+sing-box run -c "$work/anytls.json" > "$work/anytls.log" 2>&1 &
+
 ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U > "$work/ss1.log" 2>&1 &
 ssserver -s 127.0.0.1:18389 -m chacha20-ietf-poly1305 -k ss -U > "$work/ss2.log" 2>&1 &
 # Plugin nodes: the plugin server takes TCP, a UDP-only ssserver the same port (as ss-server does).
@@ -174,6 +198,23 @@ for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS
         [ "$hops" -ge 2 ] && [ "$conns" = 1 ] || ok=no
         echo "Hy2-Hopping: $hops hops on $conns QUIC connection(s)"
     fi
+    [ $ok = yes ] || fails=$((fails + 1))
+    printf '%-20s %-6s %-12s %s / %s %s\n' "$node" "$https" "$size" "$udp" "$cone" "$([ $ok = yes ] && echo PASS || echo FAIL)"
+done
+
+# Exercise AnyTLS separately with the same HTTPS, 10 MB and UDP checks above.
+for node in AnyTLS; do
+    curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
+    https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
+    size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \
+        'https://speed.cloudflare.com/__down?bytes=10000000')
+    udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
+    cone=$(python3 -I scripts/ci/udp_fullcone_check.py 16153 2>&1 | tail -1)
+    ok=yes
+    [ "$https" = 200 ] || ok=no
+    [ "$size" = 10000000 ] || ok=no
+    [[ "$udp" == "replies 23/23"* ]] || ok=no
+    [[ "$cone" == "full-cone ok"* ]] || ok=no
     [ $ok = yes ] || fails=$((fails + 1))
     printf '%-20s %-6s %-12s %s / %s %s\n' "$node" "$https" "$size" "$udp" "$cone" "$([ $ok = yes ] && echo PASS || echo FAIL)"
 done
