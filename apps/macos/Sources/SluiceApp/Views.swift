@@ -22,14 +22,14 @@ enum Pane: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .activity: "waveform.path.ecg.rectangle"
+        case .activity: "waveform.path.ecg"
         case .overview: "square.grid.2x2"
-        case .requests: "list.bullet.rectangle"
-        case .policy: "arrow.triangle.branch"
-        case .nodes: "server.rack"
-        case .rule: "list.number"
+        case .requests: "arrow.left.arrow.right"
+        case .policy: "point.topleft.down.to.point.bottomright.curvepath"
+        case .nodes: "globe.asia.australia"
+        case .rule: "list.bullet.rectangle"
         case .logs: "text.alignleft"
-        case .profile: "doc.text"
+        case .profile: "slider.horizontal.3"
         }
     }
 
@@ -207,6 +207,56 @@ struct StatusDot: View {
     }
 }
 
+/// The hero status mark: a soft tinted disc holding a symbol, with a breathing
+/// ring while running.
+struct StatusOrb: View {
+    let state: Core.State
+    private var color: Color {
+        switch state {
+        case .running: .green
+        case .starting: .orange
+        case .stopped: .secondary
+        case .failed: .red
+        }
+    }
+    private var symbol: String {
+        switch state {
+        case .running: "checkmark"
+        case .starting: "ellipsis"
+        case .stopped: "pause.fill"
+        case .failed: "exclamationmark"
+        }
+    }
+    var body: some View {
+        ZStack {
+            Circle().fill(color.opacity(0.12))
+            if state == .running {
+                Circle().strokeBorder(color.opacity(0.35), lineWidth: 1.5)
+                    .phaseAnimator([1.0, 1.35]) { v, k in v.scaleEffect(k).opacity(1.6 - k) } animation: { _ in .easeInOut(duration: 1.6) }
+            }
+            Image(systemName: symbol).font(.system(size: 15, weight: .bold)).foregroundStyle(color)
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .frame(width: 44, height: 44)
+        .animation(DS.spring, value: symbol)
+    }
+}
+
+/// The one status chip used everywhere: a dot and a short label in a tinted capsule.
+struct StatusBadge: View {
+    let text: String
+    var tone: Color = .secondary
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(tone).frame(width: 6, height: 6)
+            Text(text).font(DS.caption).lineLimit(1).truncationMode(.middle)
+        }
+        .foregroundStyle(tone == .secondary ? Color.secondary : tone)
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(tone.opacity(tone == .secondary ? 0.08 : 0.10), in: Capsule())
+    }
+}
+
 /// Toolbar capsule with a status dot, like Surge's System Proxy / Enhanced Mode buttons.
 struct TogglePill: View {
     let title: String
@@ -308,9 +358,8 @@ struct LatencyBadge: View {
     let latency: Int?
     var body: some View {
         let (text, color) = latencyStyle(latency)
-        Text(latency == nil ? "–" : text).font(DS.caption.monospacedDigit()).foregroundStyle(color)
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(color.opacity(0.12), in: Capsule())
+        StatusBadge(text: latency == nil ? "未测试" : text, tone: latency == nil ? .secondary : color)
+            .monospacedDigit()
     }
 }
 
@@ -614,21 +663,16 @@ struct ActivityView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.gap) {
-                infoRow
+                hero
                 HStack(alignment: .top, spacing: DS.gap) {
-                    statusCard.frame(maxWidth: .infinity)
-                    RateCard(title: "上传", rate: core.upRate, series: core.rateHistory.map(\.up), color: .secondary)
+                    TrafficCard(up: core.upRate, down: core.downRate, history: core.rateHistory)
                         .frame(maxWidth: .infinity)
-                    RateCard(title: "下载", rate: core.downRate, series: core.rateHistory.map(\.down), color: .accentColor)
-                        .frame(maxWidth: .infinity)
+                        .layoutPriority(1)
+                    connectionsCard.frame(width: 260)
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 HStack(alignment: .top, spacing: DS.gap) {
-                    VStack(spacing: DS.gap) {
-                        connectionsCard
-                        totalCard
-                    }
-                    .frame(maxWidth: .infinity)
+                    totalCard.frame(maxWidth: .infinity)
                     topCard.frame(maxWidth: .infinity)
                 }
             }
@@ -637,49 +681,59 @@ struct ActivityView: View {
         .paneHeader { PaneHeader(title: "活动") }
     }
 
-    private var infoRow: some View {
-        HStack(alignment: .top) {
-            info("状态", core.state.label)
-            info("配置", URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent)
-            info("出站模式", OutboundMode(rawValue: core.mode)?.title ?? core.mode)
-            info("HTTP / SOCKS5 端口", [core.summary.httpListen, core.summary.socksListen].map { $0.map(port) ?? "–" }.joined(separator: " / "))
-        }
-    }
-
     private func port(_ listen: String) -> String { String(listen.split(separator: ":").last ?? "") }
 
-    private func info(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(DS.small).foregroundStyle(.secondary)
-            Text(value).font(DS.heading).lineLimit(1).truncationMode(.middle)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
+    /// The group most people care about: the first manual group (usually "Proxy").
+    private var mainGroup: PolicyGroup? { core.groups.first(where: \.isSelectable) ?? core.groups.first }
 
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                CardTitle(text: "SLUICE 内核", icon: "cpu")
-                Spacer()
-                StatusDot(state: core.state)
+    /// The one card that answers "is it working, and how is traffic going out?"
+    private var hero: some View {
+        let subline: String = {
+            if case .failed(let why) = core.state { return why }
+            let ports = [core.summary.httpListen.map { "HTTP \(port($0))" }, core.summary.socksListen.map { "SOCKS5 \(port($0))" }]
+                .compactMap { $0 }.joined(separator: " · ")
+            let profile = URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent
+            return [profile, ports, core.privileged ? "增强模式" : nil].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        }()
+        return HStack(alignment: .center, spacing: 20) {
+            HStack(spacing: 14) {
+                StatusOrb(state: core.state)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(core.state.label).font(DS.title).tracking(-0.3)
+                        .contentTransition(.opacity).animation(DS.spring, value: core.state.label)
+                    Text(subline).font(DS.small).foregroundStyle(core.state.isFailed ? Color.red : Color.secondary)
+                        .lineLimit(2).textSelection(.enabled)
+                }
             }
-            Text(core.state.label).font(DS.display)
-            if case .failed(let why) = core.state {
-                Text(why).font(DS.small).foregroundStyle(.red).lineLimit(3).textSelection(.enabled)
-            } else if core.privileged {
-                Text("增强模式 (root)").font(DS.small).foregroundStyle(.orange)
+            .frame(minWidth: 200, alignment: .leading)
+            Spacer(minLength: 8)
+            HStack(spacing: 22) {
+                fact("出站模式", OutboundMode(rawValue: core.mode)?.title ?? core.mode, accent: core.state == .running)
+                fact("当前节点", mainGroup?.selected ?? "–")
+                fact("系统代理", core.systemProxyOn ? "已接管" : "未接管", accent: core.systemProxyOn)
             }
-            Spacer(minLength: 0)
-            HStack {
+            Divider().frame(height: 36)
+            HStack(spacing: 8) {
                 StartStopButton().glassButton(prominent: true)
-                Button("重启") { core.restart() }.disabled(!core.isActive)
-                Button("重载配置") { core.reload() }.disabled(core.state != .running)
+                Button { core.restart() } label: { Image(systemName: "arrow.clockwise") }
+                    .help("重启内核").disabled(!core.isActive)
+                Button { core.reload() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
+                    .help("重载配置").disabled(core.state != .running)
             }
             .glassButton()
-            .controlSize(.small)
         }
-        .frame(minHeight: 130, alignment: .topLeading)
+        .padding(.vertical, 6)
         .card()
+    }
+
+    private func fact(_ label: String, _ value: String, accent: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(DS.caption).foregroundStyle(.secondary)
+            Text(value).font(DS.heading).foregroundStyle(accent ? Color.accentColor : Color.primary)
+                .lineLimit(1).truncationMode(.middle)
+                .contentTransition(.opacity).animation(DS.spring, value: value)
+        }
+        .frame(maxWidth: 120, alignment: .leading)
     }
 
     private var connectionsCard: some View {
@@ -687,7 +741,6 @@ struct ActivityView: View {
             HStack {
                 CardTitle(text: "活动连接", icon: "point.3.connected.trianglepath.dotted")
                 Spacer()
-                StatusDot(state: core.state)
             }
             BigNumber(value: "\(core.traffic?.active ?? 0)")
             Divider()
@@ -781,43 +834,61 @@ struct ActivityView: View {
     }
 }
 
-struct RateCard: View {
-    let title: String
-    let rate: Double
-    let series: [Double]
-    let color: Color
+/// Upload and download together: two large figures with a legend, and one chart
+/// drawing both series (upload graphite, download accent).
+struct TrafficCard: View {
+    let up: Double
+    let down: Double
+    let history: [(up: Double, down: Double)]
 
     var body: some View {
-        let (n, u) = splitRate(rate)
-        let peak = series.max() ?? 0
-        VStack(alignment: .leading, spacing: 4) {
+        let peak = history.map { max($0.up, $0.down) }.max() ?? 0
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                CardTitle(text: title, icon: title == "上传" ? "arrow.up" : "arrow.down")
+                CardTitle(text: "实时流量", icon: "waveform.path")
                 Spacer()
-                Text("\(formatBytes(peak))/s").font(DS.caption).foregroundStyle(.tertiary)
+                Text("峰值 \(formatBytes(peak))/s").font(DS.caption).foregroundStyle(.tertiary)
             }
-            BigNumber(value: n, unit: u)
+            HStack(alignment: .firstTextBaseline, spacing: 28) {
+                figure("下载", down, color: .accentColor, symbol: "arrow.down")
+                figure("上传", up, color: .secondary, symbol: "arrow.up")
+                Spacer()
+            }
             Chart {
-                // Right-aligned: the newest sample is always at the right edge.
-                ForEach(Array(series.enumerated()), id: \.offset) { n, v in
-                    let i = 60 - series.count + n
-                    AreaMark(x: .value("t", i), y: .value("rate", v))
-                        .foregroundStyle(LinearGradient(colors: [color.opacity(0.3), color.opacity(0.02)], startPoint: .top, endPoint: .bottom))
+                ForEach(Array(history.enumerated()), id: \.offset) { n, v in
+                    let i = 60 - history.count + n
+                    AreaMark(x: .value("t", i), y: .value("rate", v.down), series: .value("s", "down"))
+                        .foregroundStyle(LinearGradient(colors: [Color.accentColor.opacity(0.22), Color.accentColor.opacity(0.0)], startPoint: .top, endPoint: .bottom))
                         .interpolationMethod(.monotone)
-                    LineMark(x: .value("t", i), y: .value("rate", v))
-                        .foregroundStyle(color)
+                    LineMark(x: .value("t", i), y: .value("rate", v.down), series: .value("s", "down"))
+                        .foregroundStyle(Color.accentColor).lineStyle(StrokeStyle(lineWidth: 2))
+                        .interpolationMethod(.monotone)
+                    LineMark(x: .value("t", i), y: .value("rate", v.up), series: .value("s", "up"))
+                        .foregroundStyle(Color.secondary.opacity(0.7)).lineStyle(StrokeStyle(lineWidth: 1.5))
                         .interpolationMethod(.monotone)
                 }
             }
             .chartXScale(domain: 0...59)
             .chartYScale(domain: 0...max(peak * 1.2, 1024))
-            .animation(.smooth(duration: 0.6), value: series.last)
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
-            .frame(height: 56)
+            .animation(.smooth(duration: 0.6), value: history.last?.down)
+            .frame(height: 84)
         }
-        .frame(minHeight: 130, alignment: .topLeading)
         .card()
+    }
+
+    private func figure(_ label: String, _ rate: Double, color: Color, symbol: String) -> some View {
+        let (n, u) = splitRate(rate)
+        return VStack(alignment: .leading, spacing: 2) {
+            Label {
+                Text(label).font(DS.caption).foregroundStyle(.secondary)
+            } icon: {
+                Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(color)
+            }
+            .labelStyle(BadgeLabelStyle())
+            BigNumber(value: n, unit: u)
+        }
     }
 }
 
@@ -900,10 +971,7 @@ struct FeatureCard: View {
             }
             Text(detail).font(DS.small).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            HStack(spacing: 6) {
-                Circle().fill(statusOn ? Color.green : Color.primary.opacity(0.2)).frame(width: 6, height: 6)
-                Text(status).font(DS.small).lineLimit(1).truncationMode(.middle)
-            }
+            StatusBadge(text: status, tone: statusOn ? .green : .secondary)
         }
         .frame(minHeight: 110, alignment: .topLeading)
         .card()
@@ -999,8 +1067,7 @@ struct GroupCard: View {
                     Text(group.selected).font(DS.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     if latency != nil {
-                        let (t, c) = latencyStyle(latency)
-                        Text(t).font(DS.caption.monospacedDigit()).foregroundStyle(c)
+                        LatencyBadge(latency: latency)
                     }
                 }
             }
@@ -1130,8 +1197,7 @@ struct NodeCard: View {
                     .font(.system(size: 11).monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if latency != nil {
-                    let (t, c) = latencyStyle(latency)
-                    Text(t).font(DS.caption.monospacedDigit()).foregroundStyle(c)
+                    LatencyBadge(latency: latency)
                 }
             }
         }
@@ -1279,10 +1345,7 @@ struct OutboundTag: View {
     let name: String
     var body: some View {
         let color: Color = name == "REJECT" ? .red : name == "DIRECT" ? .secondary : .accentColor
-        Text(name).font(DS.caption).lineLimit(1)
-            .foregroundStyle(color)
-            .padding(.horizontal, 6).padding(.vertical, 1)
-            .background(color.opacity(0.12), in: Capsule())
+        StatusBadge(text: name, tone: color)
     }
 }
 

@@ -54,6 +54,8 @@ final class Core: ObservableObject {
         case stopped, starting, running
         case failed(String)
 
+        var isFailed: Bool { if case .failed = self { true } else { false } }
+
         var label: String {
             switch self {
             case .stopped: "已停止"
