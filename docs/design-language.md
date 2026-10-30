@@ -52,11 +52,11 @@ these tokens and never set their own values.
 
 ## Icon
 
-The app icon is three capsule streams on an off-white superellipse tile with a
+The app icon is five capsule streams on an off-white superellipse tile with a
 hairline rim and a faint pool of light behind the mark. They have the
 same length and are staggered at equal steps, flowing left to right. Their
-colour deepens from graphite through slate into the accent blue, the stream
-in motion. It uses the same vocabulary as the interface:
+colour runs from cyan through blue into indigo, top to bottom, like water
+deepening as it falls. It uses the same vocabulary as the interface:
 capsule shapes, a calm light surface, and one accent that means "active".
 Each stream has a soft shadow and a faint top highlight.
 

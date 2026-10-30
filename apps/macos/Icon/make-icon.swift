@@ -1,4 +1,4 @@
-// Draws the Sluice app icon (three staggered streams on an off-white tile) and writes an .iconset.
+// Draws the Sluice app icon (five staggered streams on an off-white tile) and writes an .iconset.
 // Usage: swift make-icon.swift <out.iconset>
 import AppKit
 
@@ -36,7 +36,7 @@ func draw(_ s: CGFloat) -> NSImage {
         // Off-white tile, slightly brighter at the top.
         ctx.saveGState()
         ctx.addPath(shape); ctx.clip()
-        ctx.drawLinearGradient(gradient([rgb(0.905, 0.918, 0.94), rgb(0.975, 0.98, 0.988), rgb(1, 1, 1)], [0, 0.55, 1]),
+        ctx.drawLinearGradient(gradient([rgb(0.90, 0.925, 0.965), rgb(0.97, 0.978, 0.99), rgb(1, 1, 1)], [0, 0.55, 1]),
                                start: CGPoint(x: 0, y: tile.minY), end: CGPoint(x: 0, y: tile.maxY), options: [])
         // A soft pool of light behind the mark, so the streams sit in depth rather than on a flat card.
         ctx.drawRadialGradient(gradient([rgb(0.80, 0.87, 1, 0.35), rgb(0.80, 0.87, 1, 0)], [0, 1]),
@@ -50,36 +50,31 @@ func draw(_ s: CGFloat) -> NSImage {
                                start: CGPoint(x: 0, y: tile.minY), end: CGPoint(x: 0, y: tile.maxY), options: [])
         ctx.restoreGState()
 
-        // The mark: three staggered streams, flowing left to right. Two are graphite;
-        // they deepen from graphite through slate into the accent.
-        func capsule(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat) -> CGPath {
-            CGPath(roundedRect: CGRect(x: x * u, y: y * u, width: w * u, height: 104 * u),
-                   cornerWidth: 52 * u, cornerHeight: 52 * u, transform: nil)
-        }
-        // Same length, same vertical gap (140) and the same horizontal step (60) between streams.
-        let streams = [(capsule(242, 600, 420), 0), (capsule(302, 460, 420), 1), (capsule(362, 320, 420), 2)]
-        // Three tones, deepening into the accent as the stream moves: graphite, slate, blue.
-        let tones: [[NSColor]] = [
-            [rgb(0.11, 0.12, 0.14), rgb(0.26, 0.27, 0.30)],
-            [rgb(0.36, 0.45, 0.60), rgb(0.52, 0.62, 0.76)],
-            [rgb(0.10, 0.40, 1.0), rgb(0.33, 0.68, 1.0)],
-        ]
-        for (path, i) in streams {
-            let accent = i == 2
+        // The mark: five staggered streams, flowing left to right and down, like water
+        // stepping through a sluice. Same length, same vertical gap and the same horizontal step.
+        let count = 5, h: CGFloat = 78, gap: CGFloat = 32, w: CGFloat = 440, step: CGFloat = 40
+        let span = CGFloat(count) * h + CGFloat(count - 1) * gap
+        let width = w + CGFloat(count - 1) * step
+        // Colour runs through the set: cyan at the top, through blue, into indigo at the bottom.
+        let ramp: [(CGFloat, CGFloat, CGFloat)] = [(0.16, 0.80, 0.92), (0.13, 0.62, 1.0), (0.18, 0.46, 1.0), (0.32, 0.36, 0.98), (0.45, 0.30, 0.92)]
+        for i in 0..<count {
+            let x = 512 - width / 2 + CGFloat(i) * step
+            let y = 512 + span / 2 - h - CGFloat(i) * (h + gap)
+            let rect = CGRect(x: x * u, y: y * u, width: w * u, height: h * u)
+            let path = CGPath(roundedRect: rect, cornerWidth: h / 2 * u, cornerHeight: h / 2 * u, transform: nil)
+            let (r, g, b) = ramp[i]
             ctx.saveGState()
-            ctx.setShadow(offset: CGSize(width: 0, height: -8 * u), blur: 20 * u,
-                          color: accent ? rgb(0.10, 0.40, 1, 0.35).cgColor : NSColor.black.withAlphaComponent(0.14).cgColor)
-            ctx.addPath(path); ctx.setFillColor(NSColor.white.cgColor); ctx.fillPath()
+            ctx.setShadow(offset: CGSize(width: 0, height: -7 * u), blur: 18 * u, color: rgb(r, g, b, 0.38).cgColor)
+            ctx.addPath(path); ctx.setFillColor(rgb(r, g, b).cgColor); ctx.fillPath()
             ctx.restoreGState()
             ctx.saveGState()
             ctx.addPath(path); ctx.clip()
-            let colors = tones[i]
-            let box = path.boundingBox
-            ctx.drawLinearGradient(gradient(colors, [0, 1]), start: CGPoint(x: box.minX, y: box.minY),
-                                   end: CGPoint(x: box.maxX, y: box.maxY), options: [])
-            // Soft top highlight on each stream.
-            ctx.drawLinearGradient(gradient([NSColor.white.withAlphaComponent(0), NSColor.white.withAlphaComponent(0.18)], [0, 1]),
-                                   start: CGPoint(x: 0, y: box.midY), end: CGPoint(x: 0, y: box.maxY), options: [])
+            // Lighter at the head of the stream, full colour at its tail.
+            ctx.drawLinearGradient(gradient([rgb(min(r + 0.22, 1), min(g + 0.18, 1), b, 1), rgb(r, g, b)], [0, 1]),
+                                   start: CGPoint(x: rect.minX, y: 0), end: CGPoint(x: rect.maxX, y: 0), options: [])
+            // Soft top highlight and a faint lower edge give each stream a little volume.
+            ctx.drawLinearGradient(gradient([rgb(0, 0, 0, 0.08), rgb(1, 1, 1, 0), rgb(1, 1, 1, 0.28)], [0, 0.45, 1]),
+                                   start: CGPoint(x: 0, y: rect.minY), end: CGPoint(x: 0, y: rect.maxY), options: [])
             ctx.restoreGState()
         }
         return true
