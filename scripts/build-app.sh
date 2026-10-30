@@ -43,7 +43,14 @@ cp "$bin/SluiceApp" "$app/Contents/MacOS/Sluice"
 # Privileged helper for enhanced mode, registered by the app with SMAppService (docs/helper.md).
 cp "$bin/SluiceHelper" "$app/Contents/MacOS/SluiceHelper"
 cp apps/macos/Helper/dev.sluice.Sluice.helper.plist "$app/Contents/Library/LaunchDaemons/"
-ditto "$bin/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
+# Cached SwiftPM artifacts can have framework symlinks flattened into copies.
+# Copy the canonical version and rebuild the links before signing.
+framework="$app/Contents/Frameworks/Sparkle.framework"
+ditto "$bin/Sparkle.framework/Versions/B" "$framework/Versions/B"
+ln -s B "$framework/Versions/Current"
+for entry in Autoupdate Sparkle Headers Modules PrivateHeaders Resources Updater.app XPCServices; do
+  ln -s "Versions/Current/$entry" "$framework/$entry"
+done
 cp "$core" "$app/Contents/Resources/sluice"
 cp apps/macos/Icon/Sluice.icns "$app/Contents/Resources/Sluice.icns"
 cp apps/macos/Icon/SluiceMenuBarIcon.png "$app/Contents/Resources/SluiceMenuBarIcon.png"

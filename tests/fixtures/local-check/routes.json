@@ -1,0 +1,22 @@
+[
+  {"target":"exact.test", "rule":"DOMAIN,exact.test"},
+  {"target":"child.suffix.test", "rule":"DOMAIN-SUFFIX,suffix.test"},
+  {"target":"has-needle.test", "rule":"DOMAIN-KEYWORD,needle"},
+  {"target":"127.1.2.3", "rule":"IP-CIDR,127.1.0.0/16"},
+  {"target":"[::1]:443", "rule":"IP-CIDR6,::1/128"},
+  {"target":"unmatched.test", "args":["--process","local-check"], "rule":"PROCESS-NAME,local-check"},
+  {"target":"unmatched.test:8443", "rule":"DST-PORT,8443"},
+  {"target":"unmatched.test", "args":["--in-port","8765"], "rule":"IN-PORT,8765"},
+  {"target":"unmatched.test", "args":["--src","127.2.3.4:1234"], "rule":"SRC-IP,127.2.0.0/16"},
+  {"target":"unmatched.test", "args":["--proto","UDP"], "rule":"PROTOCOL,UDP"},
+  {"target":"url.test:80", "args":["--url","http://url.test/path"], "rule":"URL-REGEX,^http://url\\.test/"},
+  {"target":"and.test:9443", "rule":"AND,((DOMAIN,and.test),(DST-PORT,9443))"},
+  {"target":"and.test:443", "rule":"FINAL", "outbound":"REJECT"},
+  {"target":"or-a.test", "rule":"OR,((DOMAIN,or-a.test),(DOMAIN,or-b.test))"},
+  {"target":"or-b.test", "rule":"OR,((DOMAIN,or-a.test),(DOMAIN,or-b.test))"},
+  {"target":"not.test:80", "rule":"AND,((DOMAIN,not.test),(NOT,((DST-PORT,443))))"},
+  {"target":"not.test:443", "rule":"FINAL", "outbound":"REJECT"},
+  {"target":"set.test", "rule":"RULE-SET,rules.list"},
+  {"target":"child.domain-set.test", "rule":"DOMAIN-SET,domains.list"},
+  {"target":"unmatched.test", "rule":"FINAL", "outbound":"REJECT"}
+]

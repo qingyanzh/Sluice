@@ -1,0 +1,3 @@
+proxies:
+  - {name: Clash-SS, type: ss, server: 127.0.0.1, port: 9, cipher: aes-128-gcm, password: local-clash-password}
+  - {name: Clash-Trojan, type: trojan, server: 127.0.0.1, port: 9, password: local-clash-trojan}

@@ -412,6 +412,9 @@ final class Core: ObservableObject {
     /// Asks whoever started the root core to stop it. Nonisolated: `stopForQuit` blocks the
     /// main thread waiting for it, so it must never need the main actor.
     nonisolated static func stopRoot(pid: Int32, viaHelper: Bool) async throws {
+        // An invalid PID must not stop the helper's current core (or signal a
+        // process group through the administrator-prompt fallback).
+        guard pid > 0 else { throw APIError(message: "invalid core PID: \(pid)") }
         if viaHelper {
             try await HelperClient.stop()
         } else {

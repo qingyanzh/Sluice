@@ -1,0 +1,10 @@
+# All schemes accepted by src/subscription.rs::parse_link; credentials are fake.
+# ssr, tuic, wireguard, socks/http share links are not supported by this core.
+ss://YWVzLTEyOC1nY206bG9jYWwtc3MtcGFzc3dvcmQ=@127.0.0.1:9#SS
+vmess://eyJ2IjogIjIiLCAicHMiOiAiVk1lc3MiLCAiYWRkIjogIjEyNy4wLjAuMSIsICJwb3J0IjogIjkiLCAiaWQiOiAiYjgzMTM4MWQtNjMyNC00ZDUzLWFkNGYtOGNkYTQ4YjMwODExIiwgImFpZCI6ICIwIiwgInNjeSI6ICJhdXRvIiwgIm5ldCI6ICJ0Y3AiLCAidGxzIjogIiJ9
+vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.1:9?security=tls&sni=localhost#VLESS
+vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.1:9?security=reality&sni=localhost&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=a1b2c3d4&flow=xtls-rprx-vision#Reality
+trojan://local-trojan-password@127.0.0.1:9?sni=localhost#Trojan
+hysteria2://local-hy2-password@127.0.0.1:9?sni=localhost&obfs=salamander&obfs-password=local-obfs-password#Hy2
+hy2://local-hy2-alias-password@127.0.0.1:9?sni=localhost#Hy2-alias
+anytls://local-anytls-password@127.0.0.1:9?sni=localhost#AnyTLS

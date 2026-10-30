@@ -47,7 +47,9 @@ Sluice — rule-based network proxy
 usage:
   sluice run   <config.conf>                 start the proxy
   sluice check <config.conf>                 validate the config
-  sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses
+  sluice route <config.conf> <host[:port]> [--process name] [--src ip:port]
+               [--proto TCP|UDP|HTTP|HTTPS|QUIC] [--in-port port] [--url url]
+                                           show which rule and outbound a target uses
   sluice convert <share-link>                print a share link as a [Proxy] line
   sluice mitm gen-ca [--force]               create the HTTPS decryption CA (not installed)
   sluice diag export <out.zip> [config.conf] write a redacted diagnostics bundle";
@@ -150,10 +152,25 @@ async fn run() -> Result<()> {
                 cfg.rules.len()
             );
         }
-        ["route", path, target] => {
+        ["route", path, target, context @ ..] => {
+            let mut ctx = rule::ConnInfo::default();
+            let (options, remainder) = context.as_chunks::<2>();
+            for pair in options {
+                match pair {
+                    ["--process", name] => ctx = ctx.with_process(name),
+                    ["--src", src] => ctx.src = Some(src.parse().context("bad --src address")?),
+                    ["--proto", proto] => ctx.proto = rule::Proto::parse(proto)?,
+                    ["--in-port", port] => ctx.in_port = Some(port.parse().context("bad --in-port")?),
+                    ["--url", url] => ctx.url = Some(url.to_string()),
+                    _ => bail!("unknown route option {:?}", pair[0]),
+                }
+            }
+            if !remainder.is_empty() {
+                bail!("route option needs a value");
+            }
             let (_, router) = build(read_config(path)?, path, true).await?;
             let t = Target::parse_authority(target, 443)?;
-            let d = router.decide(&t).await?;
+            let d = if context.is_empty() { router.decide(&t).await? } else { router.decide_with(&t, &ctx).await? };
             println!("{t}\n  rule:     {}\n  policy:   {}\n  outbound: {}", d.rule, d.policy, d.outbound);
         }
         ["convert", link] => {
