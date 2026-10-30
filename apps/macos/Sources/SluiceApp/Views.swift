@@ -2038,6 +2038,7 @@ struct ConfigView: View {
     @State private var pendingSwitch: String?
     @State private var pendingDelete: String?
     @State private var profileEdit: ProfileEdit?
+    @State private var editorMode = "文本"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2052,12 +2053,26 @@ struct ConfigView: View {
                     Button("载入磁盘版本") { confirmRestore = true }.glassButton(prominent: true)
                 }.padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
+            Picker("编辑方式", selection: $editorMode) {
+                Text("文本").tag("文本")
+                Text("规则").tag("规则")
+                Text("策略组").tag("策略组")
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360)
+            .padding(.horizontal, DS.gutter).padding(.bottom, 12)
             HStack(alignment: .top, spacing: DS.gap) {
                 ConfigProfileList(busy: draft.busy, switchProfile: requestSwitch,
                                   edit: { profileEdit = $0 }, delete: { pendingDelete = $0 })
-                ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
-                    .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
-                    .glass()
+                Group {
+                    if editorMode == "文本" {
+                        ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
+                            .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+                            .glass()
+                    } else {
+                        StructuredConfigEditors(text: $draft.text, section: editorMode == "规则" ? "Rule" : "Proxy Group")
+                            .disabled(draft.busy)
+                    }
+                }
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, 16)
             HStack {
