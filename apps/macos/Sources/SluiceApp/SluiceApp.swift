@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.applicationIconImage = icon
         }
         NSApp.activate(ignoringOtherApps: true)
+        _ = Updater.shared
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -33,6 +34,9 @@ struct SluiceApp: App {
                 .onAppear { delegate.core = core }
         }
         .defaultSize(width: 1120, height: 860)
+        .commands {
+            CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
+        }
 
         MenuBarExtra {
             MenuBarContent().environmentObject(core)

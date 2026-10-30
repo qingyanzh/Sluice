@@ -141,6 +141,7 @@ struct MenuBarContent: View {
             .disabled(core.exportingDiagnostics)
 
         Divider()
+        CheckForUpdatesButton()
         Button("退出 Sluice", systemImage: "power") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
