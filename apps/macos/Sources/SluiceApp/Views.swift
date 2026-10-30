@@ -96,6 +96,8 @@ struct Sidebar: View {
         .frame(width: 200)
     }
 
+    @State private var hovered: Pane?
+
     private func row(_ p: Pane) -> some View {
         let on = pane == p
         return Button {
@@ -103,6 +105,8 @@ struct Sidebar: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: p.icon).font(.system(size: 13, weight: on ? .semibold : .regular))
+                    .foregroundStyle(on ? Color.accentColor : Color.secondary)
+                    .symbolEffect(.bounce, value: on)
                     .frame(width: 18)
                 Text(p.title).font(.system(size: 13, weight: on ? .semibold : .regular))
                 Spacer()
@@ -113,12 +117,16 @@ struct Sidebar: View {
                 if on {
                     RoundedRectangle(cornerRadius: 9, style: .continuous).fill(DS.surface)
                         .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
+                        .overlay(alignment: .leading) { FlowMark().padding(.leading, 4) }
                         .matchedGeometryEffect(id: "selection", in: ns)
+                } else if hovered == p {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.045))
                 }
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
+        .onHover { inside in withAnimation(.easeOut(duration: 0.15)) { hovered = inside ? p : (hovered == p ? nil : hovered) } }
     }
 }
 
@@ -209,6 +217,8 @@ struct TogglePill: View {
             HStack(spacing: 6) {
                 Circle().fill(on ? Color.green : Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
                     .shadow(color: on ? .green.opacity(0.6) : .clear, radius: 3)
+                    .scaleEffect(on ? 1 : 0.8)
+                    .animation(DS.spring, value: on)
                 Text(title).font(DS.small.weight(.medium))
             }
             .padding(.horizontal, 4)
@@ -257,11 +267,11 @@ struct StartStopButton: View {
     var compact = false
     var body: some View {
         if core.isActive {
-            Button { core.stop() } label: { Label("停止", systemImage: "stop.fill") }
+            Button { core.stop() } label: { Label("停止", systemImage: "stop.fill").contentTransition(.symbolEffect(.replace)) }
                 .labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
                 .help("停止 Sluice")
         } else {
-            Button { core.start() } label: { Label("启动", systemImage: "play.fill") }
+            Button { core.start() } label: { Label("启动", systemImage: "play.fill").contentTransition(.symbolEffect(.replace)) }
                 .labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
                 .help("启动 Sluice")
         }
@@ -304,7 +314,11 @@ struct LatencyBadge: View {
     }
 }
 
-/// Design tokens: one gutter, one gap, two radii, shared everywhere.
+/// "Sluice Flow", the app's design language (see docs/design-language.md):
+/// calm off-white page and white content cards; Liquid Glass only on controls;
+/// capsule geometry for everything interactive; a single accent that means
+/// "active", marked by the flow mark; one spring for all motion; one type scale.
+/// These tokens are the only source of spacing, radii, colours, type and motion.
 enum DS {
     static let gutter: CGFloat = 24
     static let gap: CGFloat = 12
@@ -383,9 +397,12 @@ struct GlassSegmented<T: Hashable>: View {
                                 .matchedGeometryEffect(id: "thumb", in: ns)
                         }
                     }
+                    .overlay(alignment: .bottom) {
+                        if on { FlowMark(vertical: false).padding(.bottom, 2).matchedGeometryEffect(id: "mark", in: ns) }
+                    }
                     .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle())
             }
         }
         .padding(3)
@@ -435,6 +452,26 @@ extension View {
             .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
             .glass()
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
+    }
+}
+
+/// The signature of the design language: a short accent capsule, the "flow mark",
+/// marks whatever is active (selected sidebar item, selected segment).
+struct FlowMark: View {
+    var vertical = true
+    var body: some View {
+        Capsule().fill(Color.accentColor.gradient)
+            .frame(width: vertical ? 3 : 16, height: vertical ? 14 : 3)
+    }
+}
+
+/// Every plain, tappable surface (rows, tiles, segments) sinks slightly while pressed.
+struct PressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(DS.spring, value: configuration.isPressed)
     }
 }
 
@@ -972,7 +1009,7 @@ struct GroupCard: View {
             .tileBackground(highlighted: showing)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
         .hoverLift()
         .popover(isPresented: $showing, arrowEdge: .bottom) { GroupOptions(group: group) }
     }
@@ -1016,7 +1053,8 @@ struct OptionRow: View {
             if !chosen { core.select(group: group.group, option: option.name) }
         } label: {
             HStack {
-                Image(systemName: "checkmark").opacity(chosen ? 1 : 0).foregroundStyle(Color.accentColor).frame(width: 14)
+                Image(systemName: "checkmark").opacity(chosen ? 1 : 0).scaleEffect(chosen ? 1 : 0.5)
+                    .foregroundStyle(Color.accentColor).frame(width: 14).animation(DS.spring, value: chosen)
                 Text(option.name)
                 Spacer()
                 LatencyBadge(latency: option.latencyMs)
@@ -1024,7 +1062,7 @@ struct OptionRow: View {
             .padding(.horizontal, 10).padding(.vertical, 6)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
         .disabled(!group.isSelectable)
         .help(group.isSelectable ? "使用 \(option.name)" : "\(group.type) 自动选择")
     }
@@ -1114,7 +1152,7 @@ struct AddCard: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(.separator))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
         .hoverLift()
     }
 }
