@@ -2035,13 +2035,15 @@ struct ConfigView: View {
     @EnvironmentObject var core: Core
     @ObservedObject var draft: ConfigDraft
     @State private var confirmRestore = false
-    @State private var confirmChoose = false
+    @State private var pendingSwitch: String?
+    @State private var pendingDelete: String?
+    @State private var profileEdit: ProfileEdit?
 
     var body: some View {
         VStack(spacing: 0) {
             let name = URL(fileURLWithPath: core.configPath).lastPathComponent
             PaneHeader(title: "配置", subtitle: draft.text == draft.saved ? "\(name) · 已保存" : "\(name) · 有未保存的修改") {
-                Button("选取…") { if draft.hasChanges { confirmChoose = true } else { choose() } }.disabled(draft.busy)
+                Button("从当前新建…") { profileEdit = .create }.disabled(draft.busy)
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }
             }
             if draft.changedOnDisk {
@@ -2050,8 +2052,13 @@ struct ConfigView: View {
                     Button("载入磁盘版本") { confirmRestore = true }.glassButton(prominent: true)
                 }.padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
-            ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
-                .glassPanel()
+            HStack(alignment: .top, spacing: DS.gap) {
+                ConfigProfileList(busy: draft.busy, switchProfile: requestSwitch,
+                                  edit: { profileEdit = $0 }, delete: { pendingDelete = $0 })
+                ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
+                    .glassPanel()
+            }
+            .padding(.horizontal, DS.gutter).padding(.bottom, 16)
             HStack {
                 if let (msg, ok) = draft.message {
                     if ok {
@@ -2067,21 +2074,52 @@ struct ConfigView: View {
                 Spacer()
                 Button("还原") { confirmRestore = true }.disabled(draft.busy || (!draft.hasChanges && !draft.changedOnDisk)).help(draft.text == draft.saved ? "没有修改可还原" : "放弃修改，恢复到磁盘上的版本")
                 Button(draft.busy ? "检查中…" : "检查") { run(save: false) }.disabled(draft.busy)
-                Button(draft.busy ? "处理中…" : core.state == .running ? "保存并应用" : "保存") { run(save: true) }.keyboardShortcut("s").disabled(draft.busy || draft.text == draft.saved || draft.changedOnDisk)
+                Button(draft.busy ? "处理中…" : core.state == .running ? "保存并应用" : "保存") { run(save: true) }.keyboardShortcut("s").disabled(draft.busy || !core.canChangeProfile || draft.text == draft.saved || draft.changedOnDisk)
                     .help(draft.text == draft.saved ? "没有修改需要保存" : "检查通过后保存，并让运行中的内核重新加载 (⌘S)")
                     .glassButton(prominent: true)
             }
             .glassButton()
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
-        .onAppear(perform: load)
+        .onAppear { core.refreshProfiles(); load() }
         // Validation feedback belongs to the submitted version of the text.
         .onChange(of: draft.text) { if !draft.busy { draft.message = nil } }
         .confirmationDialog("放弃当前未保存的修改？", isPresented: $confirmRestore) {
             Button("载入磁盘版本", role: .destructive) { draft.restore(core.readConfig()) }
         }
-        .confirmationDialog("切换配置文件会放弃当前草稿", isPresented: $confirmChoose) {
-            Button("放弃草稿并选取…", role: .destructive, action: choose)
+        .confirmationDialog("切换配置会放弃当前未保存的修改", isPresented: Binding(
+            get: { pendingSwitch != nil }, set: { if !$0 { pendingSwitch = nil } })) {
+            if let name = pendingSwitch {
+                Button("放弃修改并切换到「\(name)」", role: .destructive) { switchProfile(name) }
+                Button("复制草稿并切换") { copyText(draft.text); switchProfile(name) }
+            }
+        }
+        .confirmationDialog("删除「\(pendingDelete ?? "")」？", isPresented: Binding(
+            get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
+            if let name = pendingDelete {
+                Button("删除配置", role: .destructive) {
+                    do { try core.deleteProfile(name) }
+                    catch { core.lastActionError = error.localizedDescription }
+                    pendingDelete = nil
+                }
+            }
+        } message: {
+            Text("配置文件将从本地永久删除。")
+        }
+        .sheet(item: $profileEdit) { action in
+            ProfileNameSheet(action: action) { name in
+                switch action {
+                case .create:
+                    try core.createProfile(name: name, contents: draft.text)
+                case .duplicate(let source):
+                    try core.duplicateProfile(source, as: name)
+                case .rename(let source):
+                    let active = core.activeProfileName == source
+                    try core.renameProfile(source, to: name)
+                    // Renaming the active file preserves its unsaved editor contents.
+                    if active { draft.path = core.configPath }
+                }
+            }
         }
     }
 
@@ -2111,16 +2149,20 @@ struct ConfigView: View {
         }
     }
 
-    private func choose() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "选择 Sluice 配置文件"
-        if panel.runModal() == .OK, let url = panel.url {
-            core.configPath = url.path
-            core.refreshSummary()
+    private func requestSwitch(_ name: String) {
+        guard name != core.activeProfileName else { return }
+        if draft.hasChanges { pendingSwitch = name } else { switchProfile(name) }
+    }
+
+    private func switchProfile(_ name: String) {
+        do {
+            try core.switchProfile(to: name)
+            draft.message = nil
             load()
+        } catch {
+            core.lastActionError = error.localizedDescription
         }
+        pendingSwitch = nil
     }
 }
 

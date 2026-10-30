@@ -127,16 +127,19 @@ final class Core: ObservableObject {
     @Published private(set) var testingGroups: Set<String> = []
     @Published private(set) var testingTotal = 0
     @Published private(set) var reloading = false
+    @Published private(set) var restarting = false
+    @Published private(set) var profileNames: [String] = []
     /// A menu bar shortcut to a pane, consumed when the main window appears.
     @Published var requestedPane: Pane?
     @Published var autoStart: Bool {
         didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
     }
-    @Published var configPath: String {
+    @Published private(set) var configPath: String {
         didSet { UserDefaults.standard.set(configPath, forKey: "configPath") }
     }
 
     private var process: Process?
+    private var profileStore: ProfileStore?
     /// Root core started through the admin prompt (enhanced mode); followed via its log file.
     private var rootPID: Int32?
     private var logOffset: UInt64 = 0
@@ -154,6 +157,12 @@ final class Core: ObservableObject {
             .appendingPathComponent("Library/Application Support/Sluice", isDirectory: true)
         return dir.appendingPathComponent("sluice.conf").path
     }()
+
+    static let profilesDirectory = URL(fileURLWithPath: defaultConfigPath)
+        .deletingLastPathComponent().appendingPathComponent("profiles", isDirectory: true)
+
+    var activeProfileName: String? { profileStore?.activeName }
+    var canChangeProfile: Bool { state != .starting && !reloading && !restarting }
 
     static let starterConfig = """
         # Sluice config created by the app. Edit it, then press Reload.
@@ -178,6 +187,15 @@ final class Core: ObservableObject {
         configPath = UserDefaults.standard.string(forKey: "configPath") ?? Core.defaultConfigPath
         autoStart = UserDefaults.standard.bool(forKey: "autoStart")
         ensureConfigExists()
+        do {
+            let store = try ProfileStore(baseDirectory: Self.profilesDirectory,
+                                         migratingFrom: URL(fileURLWithPath: configPath))
+            profileStore = store
+            profileNames = try store.names()
+            configPath = store.url(for: store.activeName).path
+        } catch {
+            lastActionError = "无法载入配置列表：\(error.localizedDescription)"
+        }
         refreshSummary()
     }
 
@@ -339,9 +357,12 @@ final class Core: ObservableObject {
     }
 
     func restart() {
+        guard !restarting else { return }
         guard isActive else { return start() }
+        restarting = true
         stop()
         Task {
+            defer { restarting = false }
             let deadline = Date().addingTimeInterval(15)
             while isActive && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
             if !isActive { start() }
@@ -526,6 +547,61 @@ final class Core: ObservableObject {
     }
 
     // MARK: config editing
+
+    private func profiles() throws -> ProfileStore {
+        guard let profileStore else { throw APIError(message: "配置目录不可用，请检查权限后重新打开应用。") }
+        return profileStore
+    }
+
+    func refreshProfiles() {
+        do { profileNames = try profiles().names() }
+        catch { lastActionError = "无法刷新配置列表：\(error.localizedDescription)" }
+    }
+
+    func createProfile(name: String, contents: String) throws {
+        try profiles().create(name: name, contents: contents)
+        refreshProfiles()
+    }
+
+    func duplicateProfile(_ name: String, as newName: String) throws {
+        try profiles().duplicate(name, as: newName)
+        refreshProfiles()
+    }
+
+    func renameProfile(_ name: String, to newName: String) throws {
+        let store = try profiles()
+        let wasActive = store.activeName == name
+        if wasActive { try requireProfileChange() }
+        try store.rename(name, to: newName)
+        if wasActive { applyProfilePath(store) }
+        refreshProfiles()
+    }
+
+    func deleteProfile(_ name: String) throws {
+        try profiles().delete(name)
+        refreshProfiles()
+    }
+
+    func switchProfile(to name: String) throws {
+        try requireProfileChange()
+        let store = try profiles()
+        guard name != store.activeName else { return }
+        try store.activate(name)
+        applyProfilePath(store)
+    }
+
+    private func requireProfileChange() throws {
+        guard canChangeProfile else { throw APIError(message: "内核正在启动或应用配置，请稍后再试。") }
+    }
+
+    private func applyProfilePath(_ store: ProfileStore) {
+        let path = store.url(for: store.activeName).path
+        guard configPath != path else { return }
+        configPath = path
+        refreshSummary()
+        // Reload has no path parameter: restart so `run` receives the new file.
+        if isActive { restart() }
+    }
 
     func readConfig() -> String {
         (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
