@@ -3,7 +3,7 @@
 //! On macOS every process's socket descriptors are walked with libproc
 //! (`proc_listallpids` / `proc_pidinfo(PROC_PIDLISTFDS)` / `proc_pidfdinfo`). One walk
 //! snapshots all sockets, and lookups share that snapshot for a short while, so a burst of
-//! new connections costs one walk. Other users' processes are only visible as root.
+//! new connections costs one walk (a miss rescans). Other users' processes are only visible as root.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 
 /// How long a snapshot answers lookups that it can answer.
 const FRESH: Duration = Duration::from_secs(2);
-/// A lookup that misses rescans, but not more often than this.
-const MIN_RESCAN: Duration = Duration::from_millis(50);
 
 /// (udp, local port) -> [(remote port, pid)].
 type Sockets = HashMap<(bool, u16), Vec<(u16, i32)>>;
@@ -35,9 +33,10 @@ fn find(sockets: &Sockets, udp: bool, lport: u16, rport: u16) -> Option<i32> {
 /// connected to remote port `rport`. Blocking; call off the async runtime.
 pub fn lookup(udp: bool, lport: u16, rport: u16) -> Option<String> {
     let mut guard = SNAPSHOT.lock().unwrap();
-    let age = guard.as_ref().map(|s| s.taken.elapsed());
-    let mut pid = guard.as_ref().filter(|_| age < Some(FRESH)).and_then(|s| find(&s.sockets, udp, lport, rport));
-    if pid.is_none() && age.is_none_or(|a| a >= MIN_RESCAN) {
+    let mut pid = guard.as_ref().filter(|s| s.taken.elapsed() < FRESH).and_then(|s| find(&s.sockets, udp, lport, rport));
+    // A miss always rescans: the socket may be newer than the snapshot. Lookups queue on
+    // the lock, so a burst of new connections still shares about one scan.
+    if pid.is_none() {
         let sockets = sys::scan();
         pid = find(&sockets, udp, lport, rport);
         *guard = Some(Snapshot { taken: Instant::now(), sockets, names: HashMap::new() });
