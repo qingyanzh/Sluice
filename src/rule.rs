@@ -253,7 +253,7 @@ impl Matcher {
             "IP-CIDR" | "IP-CIDR6" => Matcher::IpCidr { cidr: Cidr::parse(value)?, raw: value.to_string(), no_resolve },
             "GEOIP" => Matcher::GeoIp { country: value.to_ascii_uppercase(), no_resolve },
             "IP-ASN" => {
-                let n = value.trim_start_matches(|c| c == 'A' || c == 'S' || c == 'a' || c == 's');
+                let n = value.trim_start_matches(['A', 'S', 'a', 's']);
                 Matcher::IpAsn { asn: n.parse().map_err(|_| anyhow!("bad ASN {value:?}"))?, no_resolve }
             }
             "DST-PORT" | "DEST-PORT" => Matcher::DstPort { range: PortRange::parse(value)?, raw: value.to_string() },

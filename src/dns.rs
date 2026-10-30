@@ -450,7 +450,7 @@ async fn open_stream(host: &str, port: u16, follow: bool) -> Result<BoxStream> {
                 if let Some(handle) = ROUTER.get() {
                     let router = handle.current();
                     return router
-                        .dispatch(&Target::new(host, port))
+                        .dispatch_with(&Target::new(host, port), &crate::rule::ConnInfo::default())
                         .await?
                         .ok_or_else(|| anyhow!("encrypted DNS {host}:{port} is rejected by the rules"));
                 }
