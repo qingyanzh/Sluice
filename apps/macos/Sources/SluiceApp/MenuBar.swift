@@ -84,17 +84,24 @@ struct MenuBarContent: View {
             ForEach(core.groups.filter(\.isSelectable)) { group in
                 Menu {
                     ForEach(group.options, id: \.name) { option in
-                        Toggle(optionLabel(option), isOn: Binding(
+                        Toggle(isOn: Binding(
                             get: { group.selected == option.name },
                             set: { if $0 { core.select(group: group.group, option: option.name) } }
-                        ))
+                        )) {
+                            Label {
+                                Text(optionLabel(option))
+                            } icon: {
+                                Image(nsImage: latencyIcon(option.latencyMs)).renderingMode(.original)
+                            }
+                        }
                     }
                     Divider()
-                    Button("测试延迟", systemImage: "speedometer") { core.test(group: group.group) }
+                    Button(core.testingGroups.contains(group.group) ? "测试中…" : "测试延迟", systemImage: "speedometer") { core.test(group: group.group) }
                         .disabled(core.testingGroups.contains(group.group))
                 } label: {
                     Label("\(group.group)：\(group.selected)", systemImage: "point.3.connected.trianglepath.dotted")
                 }
+                .disabled(core.state != .running)
             }
         }
 
@@ -144,8 +151,17 @@ struct MenuBarContent: View {
     }
 
     private func optionLabel(_ option: GroupOption) -> String {
-        guard let latency = option.latencyMs else { return option.name }
-        return "\(option.name)    \(latencyStyle(latency).0)"
+        "\(option.name)    \(latencyText(option.latencyMs))"
+    }
+
+    /// Native menus use an image for the badge dot, preserving its semantic colour.
+    private func latencyIcon(_ milliseconds: Int?) -> NSImage {
+        let color = NSColor(latencyStyle(milliseconds).1)
+        return NSImage(size: NSSize(width: 12, height: 12), flipped: false) { _ in
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 3, y: 3, width: 6, height: 6)).fill()
+            return true
+        }
     }
 
     private func showWindow(_ pane: Pane? = nil) {

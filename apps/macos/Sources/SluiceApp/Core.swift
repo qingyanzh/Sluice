@@ -106,6 +106,7 @@ final class Core: ObservableObject {
     /// Outbound mode reported by the core: "rule", "direct" or "global".
     @Published private(set) var mode = "rule"
     @Published private(set) var testingGroups: Set<String> = []
+    @Published private(set) var testingTotal = 0
     @Published private(set) var reloading = false
     /// A menu bar shortcut to a pane, consumed when the main window appears.
     @Published var requestedPane: Pane?
@@ -434,14 +435,20 @@ final class Core: ObservableObject {
     }
 
     func select(group: String, option: String) {
+        guard state == .running,
+              groups.contains(where: { $0.group == group && $0.isSelectable && $0.options.contains(where: { $0.name == option }) }) else { return }
         perform("切换到 \(option) ") { try await $0.select(group: group, option: option) }
     }
 
     func test(group: String) {
         guard state == .running, let api, !testingGroups.contains(group) else { return }
         testingGroups.insert(group)
+        testingTotal += 1
         Task {
-            defer { testingGroups.remove(group) }
+            defer {
+                testingGroups.remove(group)
+                if testingGroups.isEmpty { testingTotal = 0 }
+            }
             do {
                 try await api.test(group: group)
                 if let fresh = try? await api.policies() { groups = fresh }
@@ -452,6 +459,8 @@ final class Core: ObservableObject {
     }
 
     func testAll() {
+        guard testingGroups.isEmpty else { return }
+        // Each test starts its own async request, so groups run concurrently.
         for g in groups { test(group: g.group) }
     }
 

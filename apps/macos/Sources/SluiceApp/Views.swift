@@ -477,17 +477,44 @@ struct ErrorBanner: View {
 }
 
 func latencyStyle(_ latency: Int?) -> (String, Color) {
-    guard let ms = latency else { return ("点击测试", .secondary) }
-    if ms < 0 { return ("失败", DS.fail) }
-    return ("\(ms) ms", ms < 200 ? DS.ok : ms < 500 ? DS.warn : DS.fail)
+    let color: Color
+    switch LatencyClassification(milliseconds: latency) {
+    case .untested: color = DS.ink3
+    case .good: color = DS.ok
+    case .ok: color = DS.warn
+    case .slow, .timeout: color = DS.fail
+    }
+    return (latencyText(latency), color)
 }
 
 struct LatencyBadge: View {
     let latency: Int?
     var body: some View {
         let (text, color) = latencyStyle(latency)
-        StatusBadge(text: latency == nil ? "未测试" : text, tone: latency == nil ? .secondary : color)
+        StatusBadge(text: text, tone: color)
             .monospacedDigit()
+    }
+}
+
+/// Both panes share the same test state, including progress across pane changes.
+struct TestAllLatencyButton: View {
+    @EnvironmentObject private var core: Core
+
+    var body: some View {
+        Button { core.testAll() } label: {
+            HStack(spacing: 6) {
+                if !core.testingGroups.isEmpty {
+                    ProgressView().controlSize(.small)
+                    Text("测试中… \(core.testingTotal - core.testingGroups.count)/\(core.testingTotal)")
+                        .monospacedDigit()
+                } else {
+                    Label("测试全部", systemImage: "speedometer")
+                }
+            }
+        }
+        .glassButton()
+        .disabled(core.state != .running || core.groups.isEmpty || !core.testingGroups.isEmpty)
+        .help("并发测试所有策略组的节点延迟")
     }
 }
 
@@ -1114,10 +1141,7 @@ struct PolicyView: View {
                 HStack {
                     SectionTitle(text: "策略组")
                     Spacer()
-                    Button(core.testingGroups.isEmpty ? "测试全部" : "测试中…") { core.testAll() }
-                        .glassButton()
-                        .controlSize(.small)
-                        .disabled(core.state != .running || core.groups.isEmpty || !core.testingGroups.isEmpty)
+                    TestAllLatencyButton().controlSize(.small)
                 }
                 if core.groups.isEmpty {
                     EmptyState(icon: "signpost.right",
@@ -1176,7 +1200,7 @@ struct GroupSection: View {
                 IconTile(symbol: kindIcon, size: 28)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(group.group).font(DS.heading).lineLimit(1)
-                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · 点击选项切换" : "\(Self.kindLabel(group.type)) · 自动选择")
+                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · 点击选项切换" : "\(Self.kindLabel(group.type)) · 自动 · 当前：\(group.selected)")
                         .font(DS.caption).foregroundStyle(DS.ink2)
                 }
                 Spacer(minLength: 8)
@@ -1199,7 +1223,7 @@ struct GroupSection: View {
     }
 }
 
-/// One option: availability dot, name, latency. The current choice is blue.
+/// A node's latency and current selection; automatic groups remain read-only.
 struct OptionChip: View {
     @EnvironmentObject var core: Core
     let group: PolicyGroup
@@ -1207,34 +1231,38 @@ struct OptionChip: View {
     @State private var hovering = false
 
     var body: some View {
-        let chosen = group.selected == option.name
-        let dot: Color = option.latencyMs.map { $0 < 0 ? DS.fail : latencyStyle($0).1 } ?? DS.off.opacity(0.5)
-        Button {
-            if !chosen { core.select(group: group.group, option: option.name) }
-        } label: {
-            HStack(spacing: 8) {
-                Circle().fill(dot).frame(width: 7, height: 7)
-                Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 4)
-                Text(option.latencyMs.map { $0 < 0 ? "失败" : "\($0) ms" } ?? "—")
-                    .font(DS.caption.monospacedDigit())
-                    .foregroundStyle(option.latencyMs.map { $0 < 0 ? DS.fail : DS.ink2 } ?? DS.ink3)
-            }
-            .padding(.horizontal, 12).frame(height: 40)
-            .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
-                        in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
-            .overlay {
-                if chosen {
-                    RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(DS.accent.opacity(0.35), lineWidth: 1)
-                }
-            }
-            .contentShape(Rectangle())
+        if group.isSelectable {
+            Button {
+                if group.selected != option.name { core.select(group: group.group, option: option.name) }
+            } label: { content }
+            .buttonStyle(PressableStyle())
+            .disabled(core.state != .running)
+            .help(group.selected == option.name ? "当前选择" : "切换到 \(option.name)")
+        } else {
+            content
+                .help("自动选择 · 当前：\(group.selected)")
         }
-        .buttonStyle(PressableStyle())
-        .disabled(!group.isSelectable || core.state != .running)
+    }
+
+    private var content: some View {
+        let chosen = group.selected == option.name
+        return HStack(spacing: 8) {
+            if chosen { Image(systemName: "checkmark").font(DS.caption).foregroundStyle(DS.accent) }
+            Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 4)
+            LatencyBadge(latency: option.latencyMs)
+        }
+        .padding(.horizontal, 12).frame(height: 40)
+        .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
+                    in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+        .overlay {
+            if chosen {
+                RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(DS.accent.opacity(0.35), lineWidth: 1)
+            }
+        }
+        .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(DS.spring, value: chosen)
-        .help(chosen ? "当前选择" : group.isSelectable ? "切换到 \(option.name)" : "这个策略组自动选择，不能手动切换")
     }
 }
 
