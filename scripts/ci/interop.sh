@@ -17,7 +17,7 @@ keys=$(xray x25519)
 reality_priv=$(echo "$keys" | awk -F': ' '/^Private ?[Kk]ey/{print $2}')
 reality_pub=$(echo "$keys" | awk -F': ' '/Public ?[Kk]ey/{print $2}')
 wrong_pub=$(xray x25519 | awk -F': ' '/Public ?[Kk]ey/{print $2}')
-reality="\"security\":\"reality\",\"realitySettings\":{\"dest\":\"www.microsoft.com:443\",\"serverNames\":[\"www.microsoft.com\"],\"privateKey\":\"$reality_priv\",\"shortIds\":[\"0123abcd\"]}"
+reality="\"security\":\"reality\",\"realitySettings\":{\"dest\":\"www.apple.com:443\",\"serverNames\":[\"www.apple.com\"],\"privateKey\":\"$reality_priv\",\"shortIds\":[\"0123abcd\"]}"
 ws='"network":"ws","wsSettings":{"path":"/ray"}'
 grpc='"network":"grpc","grpcSettings":{"serviceName":"gun"}'
 cat > "$work/xray.json" <<EOF
@@ -72,10 +72,10 @@ VLESS-WS = vless, 127.0.0.1, 19005, uuid=$uuid, ws=true, ws-path=/ray
 Hysteria2 = hysteria2, 127.0.0.1, 19443, password=hy, sni=test.local, skip-cert-verify=true
 VLESS-gRPC-TLS = vless, 127.0.0.1, 19006, uuid=$uuid, tls=true, sni=test.local, skip-cert-verify=true, grpc=true, grpc-service-name=gun
 VMess-gRPC = vmess, 127.0.0.1, 19007, username=$uuid, grpc=true, grpc-service-name=gun
-VLESS-REALITY = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.microsoft.com, reality-public-key=$reality_pub, reality-short-id=0123abcd
-VLESS-REALITY-Vision = vless, 127.0.0.1, 19009, uuid=$uuid, sni=www.microsoft.com, reality-public-key=$reality_pub, reality-short-id=0123abcd, flow=xtls-rprx-vision
+VLESS-REALITY = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.apple.com, reality-public-key=$reality_pub, reality-short-id=0123abcd
+VLESS-REALITY-Vision = vless, 127.0.0.1, 19009, uuid=$uuid, sni=www.apple.com, reality-public-key=$reality_pub, reality-short-id=0123abcd, flow=xtls-rprx-vision
 VLESS-TLS-Vision = vless, 127.0.0.1, 19010, uuid=$uuid, tls=true, sni=test.local, skip-cert-verify=true, flow=xtls-rprx-vision
-REALITY-WrongKey = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.microsoft.com, reality-public-key=$wrong_pub, reality-short-id=0123abcd
+REALITY-WrongKey = vless, 127.0.0.1, 19008, uuid=$uuid, sni=www.apple.com, reality-public-key=$wrong_pub, reality-short-id=0123abcd
 Hy2-Obfs = hysteria2, 127.0.0.1, 19444, password=hy, sni=test.local, skip-cert-verify=true, obfs=salamander, obfs-password=obfs-secret
 [Proxy Group]
 P = select, DIRECT, SS-AES256, SS-CHACHA, VMess, VLESS, Trojan-TLS, VMess-WS-TLS, VLESS-WS, VLESS-gRPC-TLS, VMess-gRPC, VLESS-REALITY, VLESS-REALITY-Vision, VLESS-TLS-Vision, REALITY-WrongKey, Hysteria2, Hy2-Obfs
@@ -92,14 +92,14 @@ cat > "$work/xray-client.json" <<EOF
 {"log":{"loglevel":"warning"},
 "inbounds":[{"listen":"127.0.0.1","port":10808,"protocol":"socks","settings":{"udp":true}}],
 "outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"127.0.0.1","port":19008,"users":[{"id":"$uuid","encryption":"none"}]}]},
- "streamSettings":{"network":"tcp","security":"reality","realitySettings":{"serverName":"www.microsoft.com","fingerprint":"chrome","publicKey":"$reality_pub","shortId":"0123abcd"}}}]}
+ "streamSettings":{"network":"tcp","security":"reality","realitySettings":{"serverName":"www.apple.com","fingerprint":"chrome","publicKey":"$reality_pub","shortId":"0123abcd"}}}]}
 EOF
 xray run -c "$work/xray-client.json" > "$work/xray-client.log" 2>&1 &
 sleep 2
 RUST_LOG=sluice=info,sluice::vision=debug ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
 for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:16170/v1/policies && break; sleep 0.5; done
 
-# Diagnostic: Xray's own REALITY client vs Sluice against the same server (www.microsoft.com target).
+# Diagnostic: Xray's own REALITY client vs Sluice against the same server (www.apple.com target); if both fail, the target site is at fault.
 curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=VLESS-REALITY" > /dev/null
 for who in xray:10808 sluice:16153; do
     ok=0
