@@ -47,7 +47,7 @@ struct SluiceApp: App {
         }
 
         MenuBarExtra {
-            MenuBarContent().environmentObject(core).defaultAppStorage(core.preferences)
+            MenuBarContent(core: core).equatable().defaultAppStorage(core.preferences)
         } label: {
             MenuBarLabel().environmentObject(core).defaultAppStorage(core.preferences)
         }

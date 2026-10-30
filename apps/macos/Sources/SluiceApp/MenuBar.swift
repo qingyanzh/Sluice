@@ -37,84 +37,88 @@ func menuBarSpeed(_ bytesPerSecond: Double) -> String {
 }
 
 /// The status bar menu keeps the frequent controls available without opening a window.
-struct MenuBarContent: View {
-    @EnvironmentObject private var core: Core
-    @ObservedObject private var diagnostics = DiagnosticsExporter.shared
+struct MenuBarContent: View, Equatable {
+    let core: Core
+    @StateObject private var menu: MenuBarModel
+    private let diagnostics = DiagnosticsExporter.shared
     @Environment(\.openWindow) private var openWindow
-    @AppStorage("menuBarDisplayMode") private var displayMode = MenuBarDisplayMode.iconAndSpeed
-    @AppStorage("menuBarShowOutboundMode") private var showOutboundMode = true
 
-    private var profileName: String {
-        URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent
+    init(core: Core) {
+        self.core = core
+        _menu = StateObject(wrappedValue: MenuBarModel(core: core, diagnostics: .shared))
     }
 
-    private var outboundMode: OutboundMode {
-        OutboundMode(rawValue: core.mode) ?? .rule
-    }
+    // The App scene also observes Core. Its live status-label updates must not
+    // invalidate this content; only MenuBarModel should publish menu changes.
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.core === rhs.core }
 
     var body: some View {
-        Text("Sluice · \(core.state.label)")
-        Text("配置：\(profileName)")
-        if core.state == .running {
-            Text("↓ \(formatBytes(core.downRate))/s   ↑ \(formatBytes(core.upRate))/s   ·   \(core.traffic?.active ?? 0) 个连接")
-        } else if core.systemProxyOn {
+        let state = menu.value
+        Text("Sluice · \(state.state.label)")
+        Text("配置：\(state.profileName)")
+        if state.state == .running {
+            Text(state.trafficLabel)
+        } else if state.systemProxyOn {
             Text("系统代理已开启，内核未运行")
         }
-        if let other = core.otherSystemProxy { Text("系统代理：\(other)") }
+        if let other = state.otherSystemProxy { Text("系统代理：\(other)") }
 
         Divider()
-        Button(core.isActive ? "停止 Sluice" : "启动 Sluice", systemImage: core.isActive ? "stop.fill" : "play.fill") {
+        Button(state.isActive ? "停止 Sluice" : "启动 Sluice", systemImage: state.isActive ? "stop.fill" : "play.fill") {
             if core.isActive { core.stop() } else { core.start() }
         }
-        .disabled(core.state == .starting)
+        .disabled(state.state == .starting)
 
         Divider()
         Menu {
             ForEach(OutboundMode.allCases) { mode in
-                Toggle(mode.title, isOn: Binding(
-                    get: { core.mode == mode.rawValue },
-                    set: { if $0 { core.setMode(mode.rawValue) } }
-                ))
+                let rawValue = mode.rawValue
+                Button { [core, rawValue] in core.setMode(rawValue) } label: {
+                    menuChoice(mode.title, selected: state.mode == mode)
+                }
             }
         } label: {
-            Label("出站模式：\(outboundMode.title)", systemImage: outboundMode.icon)
+            Label("出站模式：\(state.mode.title)", systemImage: state.mode.icon)
         }
-        .disabled(core.state != .running)
+        .disabled(state.state != .running)
 
-        if core.groups.contains(where: \.isSelectable) {
+        if !state.groups.isEmpty {
             Divider()
-            ForEach(core.groups.filter(\.isSelectable)) { group in
+            ForEach(state.groups) { group in
+                let groupName = group.group
                 Menu {
                     ForEach(group.options, id: \.name) { option in
-                        Toggle(isOn: Binding(
-                            get: { group.selected == option.name },
-                            set: { if $0 { core.select(group: group.group, option: option.name) } }
-                        )) {
+                        let optionName = option.name
+                        Button { [core, groupName, optionName] in
+                            core.select(group: groupName, option: optionName)
+                        } label: {
                             Label {
-                                Text(optionLabel(option))
+                                menuChoice(optionLabel(option), selected: group.selected == optionName)
                             } icon: {
                                 Image(nsImage: latencyIcon(option.latencyMs)).renderingMode(.original)
                             }
                         }
                     }
                     Divider()
-                    Button(core.testingGroups.contains(group.group) ? "测试中…" : "测试延迟", systemImage: "speedometer") { core.test(group: group.group) }
-                        .disabled(core.testingGroups.contains(group.group))
+                    Button(state.testingGroups.contains(groupName) ? "测试中…" : "测试延迟", systemImage: "speedometer") { [core, groupName] in
+                        core.test(group: groupName)
+                    }
+                    .disabled(state.testingGroups.contains(groupName))
                 } label: {
                     Label("\(group.group)：\(group.selected)", systemImage: "point.3.connected.trianglepath.dotted")
                 }
-                .disabled(core.state != .running)
+                .disabled(state.state != .running)
             }
         }
 
         Divider()
         Toggle("设置为系统代理", isOn: Binding(
-            get: { core.systemProxyOn },
+            get: { state.systemProxyOn },
             set: { core.setSystemProxy($0) }
         ))
-        .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
+        .disabled(!state.canSetSystemProxy)
         Toggle("增强模式", isOn: Binding(
-            get: { core.summary.enhancedMode },
+            get: { state.enhancedMode },
             set: { on in
                 Task {
                     if let error = await core.setEnhancedMode(on) { core.lastActionError = "增强模式：\(error)" }
@@ -124,21 +128,27 @@ struct MenuBarContent: View {
 
         Divider()
         Button("重新载入配置", systemImage: "arrow.triangle.2.circlepath") { core.reload() }
-            .disabled(core.state != .running || core.reloading)
+            .disabled(state.state != .running || state.reloading)
             .keyboardShortcut("r")
         Button("重启内核", systemImage: "arrow.clockwise") { core.restart() }
-            .disabled(!core.isActive)
+            .disabled(!state.isActive)
 
         Divider()
         Menu("菜单栏显示") {
             ForEach(MenuBarDisplayMode.allCases) { option in
-                Toggle(option.title, isOn: Binding(
-                    get: { displayMode == option },
-                    set: { if $0 { displayMode = option } }
-                ))
+                let rawValue = option.rawValue
+                Button { [core, rawValue] in
+                    core.preferences.set(rawValue, forKey: "menuBarDisplayMode")
+                } label: {
+                    menuChoice(option.title, selected: state.displayMode == option)
+                }
             }
             Divider()
-            Toggle("显示当前的出站模式", isOn: $showOutboundMode)
+            Button { [core, show = !state.showOutboundMode] in
+                core.preferences.set(show, forKey: "menuBarShowOutboundMode")
+            } label: {
+                menuChoice("显示当前的出站模式", selected: state.showOutboundMode)
+            }
         }
 
         Divider()
@@ -157,12 +167,16 @@ struct MenuBarContent: View {
                 }
             }
         }
-        .disabled(diagnostics.state.isExporting)
+        .disabled(state.isExporting)
 
         Divider()
         CheckForUpdatesButton()
         Button("退出 Sluice", systemImage: "power") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    private func menuChoice(_ title: String, selected: Bool) -> Text {
+        Text(selected ? "✓ \(title)" : title)
     }
 
     private func optionLabel(_ option: GroupOption) -> String {

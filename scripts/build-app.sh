@@ -63,6 +63,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Sluice</string>
   <key>CFBundleDisplayName</key><string>Sluice</string>
+  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+  <key>CFBundleLocalizations</key><array><string>zh-Hans</string></array>
   <key>CFBundleIdentifier</key><string>dev.sluice.Sluice</string>
   <key>CFBundleExecutable</key><string>Sluice</string>
   <key>CFBundleIconFile</key><string>Sluice</string>

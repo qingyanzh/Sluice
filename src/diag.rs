@@ -440,7 +440,7 @@ fn zip(root: &Path, out: &Path) -> Result<()> {
     }
     let _ = fs::remove_file(out);
     let st = Command::new("/usr/bin/ditto")
-        .args(["-c", "-k", "--keepParent"])
+        .args(["-c", "-k", "--keepParent", "--norsrc", "--noextattr", "--noqtn"])
         .arg(root)
         .arg(out)
         .status()
@@ -591,6 +591,28 @@ mod tests {
         std::os::unix::fs::symlink(base.join("secret.pem"), src.join("b.log")).unwrap();
         assert_eq!(copy_dir_redacted(&src, &dst, |_| true).unwrap(), 1);
         assert!(!dst.join("b.log").exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn zip_excludes_resource_forks_and_extended_attributes() {
+        let base = std::env::temp_dir().join(format!("sluice-zip-{}", std::process::id()));
+        let root = base.join("diagnostics");
+        fs::create_dir_all(&root).unwrap();
+        let config = root.join("config.conf");
+        fs::write(&config, "[General]\n").unwrap();
+        for attribute in ["com.apple.ResourceFork", "com.apple.metadata:test"] {
+            assert!(Command::new("/usr/bin/xattr").args(["-w", attribute, "metadata"]).arg(&config).status().unwrap().success());
+        }
+        let out = base.join("diagnostics.zip");
+        zip(&root, &out).unwrap();
+        let listing = Command::new("/usr/bin/unzip").arg("-Z1").arg(&out).output().unwrap();
+        assert!(listing.status.success());
+        let names = String::from_utf8(listing.stdout).unwrap();
+        assert!(names.lines().any(|name| name == "diagnostics/config.conf"));
+        for name in names.lines() {
+            assert!(!name.split('/').any(|part| part.starts_with("._") || part == "__MACOSX"), "unexpected metadata entry: {name}");
+        }
         fs::remove_dir_all(&base).unwrap();
     }
 

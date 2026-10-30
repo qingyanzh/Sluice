@@ -225,7 +225,7 @@ struct MainView: View {
                 case .requests: RequestsView()
                 case .policy: PolicyView()
                 case .nodes: NodesView(intent: $nodesIntent)
-                case .rule: RuleView(pane: $pane)
+                case .rule: RuleView(pane: $pane, draft: configDraft)
                 case .logs: LogsView()
                 case .dns: DNSView()
                 case .profile: ConfigView(draft: configDraft)
@@ -1500,9 +1500,13 @@ struct RequestsView: View {
                                     RequestRow(connection: c, selected: c.id == selection, showsProcess: showsProcess) {
                                         withAnimation(DS.spring) { selection = c.id }
                                     }
-                                    .contextMenu {
-                                        Button("复制目标") { copyText(c.target) }
-                                        Button("复制匹配规则") { copyText(c.rule) }
+                                    .overlay {
+                                        RowContextMenu { [c] in
+                                            let menu = RowContextMenu.Menu()
+                                            menu.addAction("复制目标") { copyText(c.target) }
+                                            menu.addAction("复制匹配规则") { copyText(c.rule) }
+                                            return menu
+                                        }
                                     }
                                 }
                             }
@@ -1777,6 +1781,7 @@ struct RuleRow: Identifiable {
 struct RuleView: View {
     @EnvironmentObject var core: Core
     @Binding var pane: Pane?
+    @ObservedObject var draft: ConfigDraft
     @State private var rules: [RuleRow] = []
     @State private var filter = ""
     @State private var target = "www.google.com"
@@ -1818,7 +1823,7 @@ struct RuleView: View {
         .paneHeader {
             PaneHeader(title: "规则", subtitle: Pane.rule.subtitle) {
                 SearchField(prompt: "搜索规则", text: $filter)
-                Button { pane = .profile } label: { Label("在配置中编辑", systemImage: "square.and.pencil") }
+                Button { draft.editorMode = "规则"; pane = .profile } label: { Label("在配置中编辑", systemImage: "square.and.pencil") }
             }
         }
         .onAppear(perform: load)
@@ -2077,7 +2082,6 @@ struct ConfigView: View {
     @State private var pendingSwitch: String?
     @State private var pendingDelete: String?
     @State private var profileEdit: ProfileEdit?
-    @State private var editorMode = E2ELaunch.current?.editorMode ?? "文本"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2092,7 +2096,7 @@ struct ConfigView: View {
                     Button("载入磁盘版本") { confirmRestore = true }.glassButton(prominent: true)
                 }.padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
-            Picker("编辑方式", selection: $editorMode) {
+            Picker("编辑方式", selection: $draft.editorMode) {
                 Text("文本").tag("文本")
                 Text("规则").tag("规则")
                 Text("策略组").tag("策略组")
@@ -2103,12 +2107,12 @@ struct ConfigView: View {
                 ConfigProfileList(busy: draft.busy, switchProfile: requestSwitch,
                                   edit: { profileEdit = $0 }, delete: { pendingDelete = $0 })
                 Group {
-                    if editorMode == "文本" {
+                    if draft.editorMode == "文本" {
                         ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
                             .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
                             .glass()
                     } else {
-                        StructuredConfigEditors(text: $draft.text, section: editorMode == "规则" ? "Rule" : "Proxy Group")
+                        StructuredConfigEditors(text: $draft.text, section: draft.editorMode == "规则" ? "Rule" : "Proxy Group")
                             .disabled(draft.busy)
                     }
                 }
@@ -2145,6 +2149,7 @@ struct ConfigView: View {
         .onChange(of: draft.text) { if !draft.busy { draft.message = nil } }
         .confirmationDialog("放弃当前未保存的修改？", isPresented: $confirmRestore) {
             Button("载入磁盘版本", role: .destructive) { draft.restore(core.readConfig()) }
+            Button("取消", role: .cancel) {}
         }
         .confirmationDialog("切换配置会放弃当前未保存的修改", isPresented: Binding(
             get: { pendingSwitch != nil }, set: { if !$0 { pendingSwitch = nil } })) {
@@ -2152,6 +2157,7 @@ struct ConfigView: View {
                 Button("放弃修改并切换到「\(name)」", role: .destructive) { switchProfile(name) }
                 Button("复制草稿并切换") { copyText(draft.text); switchProfile(name) }
             }
+            Button("取消", role: .cancel) { pendingSwitch = nil }
         }
         .confirmationDialog("删除「\(pendingDelete ?? "")」？", isPresented: Binding(
             get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
@@ -2162,6 +2168,7 @@ struct ConfigView: View {
                     pendingDelete = nil
                 }
             }
+            Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
             Text("配置文件将从本地永久删除。")
         }

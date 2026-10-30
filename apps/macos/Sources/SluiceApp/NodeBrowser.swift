@@ -12,6 +12,8 @@ struct NodeRecord: Identifiable {
     let interval: String
     let isSubscription: Bool
 
+    var copyableEndpoint: String? { isSubscription ? nil : endpoint }
+
     init(line: String, id: String) {
         self.id = id
         let pair = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -78,12 +80,20 @@ struct NodesView: View {
                             NodeBrowserRow(node: node, latency: latency(for: node))
                         }
                         .buttonStyle(.plain)
-                        .contextMenu {
-                            Button("查看详情") { selected = node }
-                            Button(core.testingNodes.contains(node.name) ? "测试中…" : "测试节点") { core.test(node: node.name) }
-                                .disabled(core.state != .running || core.testingNodes.contains(node.name))
-                            Button("复制名称") { copyText(node.name) }
-                            Button("复制服务器") { copyText(node.endpoint) }
+                        .overlay {
+                            RowContextMenu { [node, core, selected = $selected] in
+                                let menu = RowContextMenu.Menu()
+                                menu.addAction("查看详情") { selected.wrappedValue = node }
+                                let testing = core.testingNodes.contains(node.name)
+                                menu.addAction(testing ? "测试中…" : "测试节点", isEnabled: core.state == .running && !testing) {
+                                    core.test(node: node.name)
+                                }
+                                menu.addAction("复制名称") { copyText(node.name) }
+                                if let endpoint = node.copyableEndpoint {
+                                    menu.addAction("复制服务器") { copyText(endpoint) }
+                                }
+                                return menu
+                            }
                         }
                         if node.id != visible.last?.id { Divider().padding(.leading, 60) }
                     }
@@ -201,7 +211,9 @@ struct NodeDetailSheet: View {
             Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : "连接参数可在配置页编辑，节点切换请前往策略页。")
                 .font(DS.small).foregroundStyle(DS.ink2)
             HStack {
-                Button("复制服务器") { copyText(node.endpoint) }.glassButton()
+                if let endpoint = node.copyableEndpoint {
+                    Button("复制服务器") { copyText(endpoint) }.glassButton()
+                }
                 Button(core.testingNodes.contains(node.name) ? "测试中…" : "测试节点") { core.test(node: node.name) }
                     .glassButton().disabled(core.state != .running || core.testingNodes.contains(node.name))
                 Spacer()

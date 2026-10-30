@@ -39,14 +39,14 @@ struct StructuredConfigEditors: View {
         .padding(20)
         .glassPanel()
         .sheet(item: $ruleEdit) { request in
-            RuleConfigSheet(rule: request.rule, policies: document.policies) { rule in
+            RuleConfigSheet(rule: request.rule, isNew: request.line == nil, policies: document.policies) { rule in
                 guard text == request.snapshot else { return "草稿已更新，请关闭后重新编辑。" }
                 mutate { $0.setRule(rule, at: request.line) }
                 return nil
             }
         }
         .sheet(item: $groupEdit) { request in
-            GroupConfigSheet(group: request.group, policies: document.policies) { group in
+            GroupConfigSheet(group: request.group, isNew: request.line == nil, policies: document.policies) { group in
                 guard text == request.snapshot else { return "草稿已更新，请关闭后重新编辑。" }
                 guard !document.groups.contains(where: { $0.id != request.line && $0.value.name == group.name }),
                       !document.policies.filter({ !document.groups.map { $0.value.name }.contains($0) }).contains(group.name)
@@ -159,16 +159,18 @@ struct StructuredConfigEditors: View {
     }
 }
 
-private struct RuleConfigSheet: View {
+struct RuleConfigSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State var rule: StructuredConfig.Rule
+    let isNew: Bool
     let policies: [String]
     let apply: (StructuredConfig.Rule) -> String?
     @State private var error: String?
+    var title: String { isNew ? "添加规则" : "编辑规则" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            Text("编辑规则").font(DS.title)
+            Text(title).font(DS.title)
             Form {
                 Picker("类型", selection: $rule.type) {
                     ForEach(choices(StructuredConfig.Rule.types, including: rule.type), id: \.self) { Text($0).tag($0) }
@@ -188,6 +190,7 @@ private struct RuleConfigSheet: View {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("更新草稿") {
+                    var rule = rule
                     rule.normalise()
                     guard (rule.isFinal || !rule.value.isEmpty), !rule.policy.isEmpty,
                           !rule.serialised.contains("\n"), !rule.serialised.contains("\r"),
@@ -197,20 +200,23 @@ private struct RuleConfigSheet: View {
                 }.keyboardShortcut(.defaultAction).glassButton(prominent: true)
             }.glassButton()
         }.font(DS.label).padding(28).frame(width: 560)
+        .onChange(of: rule) { error = nil }
     }
 }
 
-private struct GroupConfigSheet: View {
+struct GroupConfigSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State var group: StructuredConfig.Group
+    let isNew: Bool
     let policies: [String]
     let apply: (StructuredConfig.Group) -> String?
     @State private var error: String?
+    var title: String { isNew ? "添加策略组" : "编辑策略组" }
     private var candidates: [String] { policies.filter { $0 != group.name && !group.members.contains($0) } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("编辑策略组").font(DS.title)
+            Text(title).font(DS.title)
             Form {
                 TextField("名称", text: $group.name)
                 Picker("类型", selection: $group.type) {
@@ -255,9 +261,11 @@ private struct GroupConfigSheet: View {
             }
         }
         .font(DS.label).glassButton().padding(28).frame(width: 580)
+        .onChange(of: group) { error = nil }
     }
 
     private func submit() {
+        var group = group
         group.name = StructuredConfig.trim(group.name)
         guard !group.name.isEmpty, !group.name.contains(where: { ",=\r\n".contains($0) }),
               !["#", ";", "//", "["].contains(where: group.name.hasPrefix),
