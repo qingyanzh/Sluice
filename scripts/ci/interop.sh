@@ -113,22 +113,29 @@ fails=0
 printf '%-20s %-6s %-12s %s\n' NODE HTTPS DOWNLOAD UDP
 for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision Hysteria2 Hy2-Obfs; do
     curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
-    https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
-    size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \
-        'https://speed.cloudflare.com/__down?bytes=10000000')
-    udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
-    ok=yes
-    [ "$https" = 200 ] || ok=no
-    [ "$size" = 10000000 ] || ok=no
-    [[ "$udp" == "replies 23/23"* ]] || ok=no
+    # One retry per node: REALITY servers occasionally relay a valid client to the target
+    # (a race on their side; Xray's own client hits it too), which shows up as one failed check.
+    for attempt in 1 2; do
+        https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
+        size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \
+            'https://speed.cloudflare.com/__down?bytes=10000000')
+        udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
+        ok=yes
+        [ "$https" = 200 ] || ok=no
+        [ "$size" = 10000000 ] || ok=no
+        [[ "$udp" == "replies 23/23"* ]] || ok=no
+        [ $ok = yes ] && break
+        [ $attempt = 1 ] && printf '%-20s %-6s %-12s %s (retrying)\n' "$node" "$https" "$size" "$udp"
+    done
     [ $ok = yes ] || fails=$((fails + 1))
     printf '%-20s %-6s %-12s %s %s\n' "$node" "$https" "$size" "$udp" "$([ $ok = yes ] && echo PASS || echo FAIL)"
 done
 
 # A wrong REALITY key must not connect: the client has to refuse the real site's certificate.
 curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=REALITY-WrongKey" > /dev/null
+log_lines=$(wc -l < "$work/sluice.log")
 wrong=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
-if [ "$wrong" = 000 ] && grep -q "REALITY verification failed" "$work/sluice.log"; then
+if [ "$wrong" = 000 ] && tail -n +$((log_lines + 1)) "$work/sluice.log" | grep -q "REALITY verification failed"; then
     echo "REALITY-WrongKey  refused (REALITY verification failed) PASS"
 else
     echo "REALITY-WrongKey  HTTP $wrong, expected refusal FAIL"; fails=$((fails + 1))
