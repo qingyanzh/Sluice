@@ -12,7 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_rustls::TlsConnector;
 
-use crate::trojan::tls_client_alpn;
+use crate::trojan::tls_client_config;
+use rustls::ClientConfig;
 use crate::util::{connect_tcp, BoxStream};
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -55,7 +56,7 @@ pub enum Layer {
 pub struct Transport {
     server: String,
     port: u16,
-    tls: Option<(TlsConnector, ServerName<'static>)>,
+    tls: Option<(Arc<ClientConfig>, ServerName<'static>)>,
     /// Replaces `tls` when set.
     reality: Option<crate::reality::RealityOpts>,
     layer: Option<Layer>,
@@ -88,7 +89,7 @@ impl Transport {
         let tls = tls && reality.is_none();
         // gRPC needs HTTP/2, which TLS servers only speak when the client offers ALPN h2.
         let alpn: &[&[u8]] = if matches!(layer, Some(Layer::Grpc { .. })) { &[b"h2"] } else { &[] };
-        let tls = if tls { Some(tls_client_alpn(&server, sni, skip_cert_verify, alpn)?) } else { None };
+        let tls = if tls { Some(tls_client_config(&server, sni, skip_cert_verify, alpn)?) } else { None };
         Ok(Transport { server, port, tls, reality, layer, default_host })
     }
 
@@ -96,7 +97,7 @@ impl Transport {
         let tcp = connect_tcp(&self.server, self.port).await?;
         let stream: BoxStream = match (&self.reality, &self.tls) {
             (Some(r), _) => crate::reality::connect(Box::new(tcp), r).await?,
-            (None, Some((connector, sni))) => Box::new(connector.connect(sni.clone(), tcp).await?),
+            (None, Some((config, sni))) => Box::new(TlsConnector::from(config.clone()).connect(sni.clone(), tcp).await?),
             (None, None) => Box::new(tcp),
         };
         match &self.layer {
@@ -104,6 +105,25 @@ impl Transport {
             Some(Layer::Grpc { service }) => grpc(stream, service, &self.default_host, self.tls.is_some()).await,
             None => Ok(stream),
         }
+    }
+}
+
+impl Transport {
+    /// For XTLS-Vision: the TLS or REALITY handshake done by hand, returning the raw TCP
+    /// stream together with the session's record layer.
+    pub async fn connect_records(&self) -> Result<(BoxStream, Box<dyn crate::vision::RecordLayer>)> {
+        if self.layer.is_some() {
+            bail!("{} needs plain TCP under TLS/REALITY (no ws/grpc)", crate::vision::FLOW);
+        }
+        let mut raw: BoxStream = Box::new(connect_tcp(&self.server, self.port).await?);
+        let tls: Box<dyn crate::vision::RecordLayer> = match (&self.reality, &self.tls) {
+            (Some(r), _) => Box::new(crate::reality::handshake(&mut raw, r).await?),
+            (None, Some((config, sni))) => {
+                Box::new(crate::vision::rustls_handshake(&mut raw, config.clone(), sni.clone()).await?)
+            }
+            (None, None) => bail!("{} needs TLS or REALITY", crate::vision::FLOW),
+        };
+        Ok((raw, tls))
     }
 }
 

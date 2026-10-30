@@ -85,6 +85,16 @@ pub fn tls_client_alpn(
     skip_cert_verify: bool,
     alpn: &[&[u8]],
 ) -> Result<(TlsConnector, ServerName<'static>)> {
+    let (config, sni) = tls_client_config(server, sni, skip_cert_verify, alpn)?;
+    Ok((TlsConnector::from(config), sni))
+}
+
+pub fn tls_client_config(
+    server: &str,
+    sni: Option<String>,
+    skip_cert_verify: bool,
+    alpn: &[&[u8]],
+) -> Result<(Arc<ClientConfig>, ServerName<'static>)> {
     let provider = Arc::new(ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
     let mut config = if skip_cert_verify {
@@ -96,7 +106,7 @@ pub fn tls_client_alpn(
     config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     let sni_name = sni.unwrap_or_else(|| server.to_string());
     let sni = ServerName::try_from(sni_name.clone()).map_err(|_| anyhow!("invalid sni {sni_name:?}"))?;
-    Ok((TlsConnector::from(Arc::new(config)), sni))
+    Ok((Arc::new(config), sni))
 }
 
 impl TrojanServer {

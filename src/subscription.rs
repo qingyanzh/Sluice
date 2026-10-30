@@ -133,8 +133,9 @@ fn parse_vmess(body: &str) -> Result<(Option<String>, ProxyDef)> {
 fn parse_vless(body: &str) -> Result<(Option<String>, ProxyDef)> {
     let l = split_link(body)?;
     let q = &l.query;
-    if q.get("flow").is_some_and(|f| !f.is_empty()) {
-        bail!("VLESS flow (XTLS-Vision) not supported yet");
+    let flow = q.get("flow").cloned().filter(|f| !f.is_empty());
+    if let Some(f) = flow.as_deref().filter(|f| *f != crate::vision::FLOW) {
+        bail!("VLESS flow {f:?} not supported");
     }
     let reality = match q.get("security").map(String::as_str) {
         Some("reality") => {
@@ -151,6 +152,7 @@ fn parse_vless(body: &str) -> Result<(Option<String>, ProxyDef)> {
     };
     let def = ProxyDef::Vless {
         reality,
+        flow,
         uuid: l.user.ok_or_else(|| anyhow!("vless link without uuid"))?,
         tls: q.get("security").is_some_and(|s| s == "tls"),
         sni: q.get("sni").cloned().filter(|s| !s.is_empty()),

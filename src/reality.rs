@@ -454,6 +454,45 @@ fn alert_text(body: &[u8]) -> String {
 
 /// Runs the REALITY handshake over `stream` and returns the protected byte stream.
 pub async fn connect(mut stream: BoxStream, opts: &RealityOpts) -> Result<BoxStream> {
+    let r = handshake(&mut stream, opts).await?;
+    Ok(protected_stream(stream, r.rx, r.tx))
+}
+
+/// The application-data protection of an established REALITY session.
+pub struct RealityRecords {
+    rx: RecordCipher,
+    tx: RecordCipher,
+}
+
+impl crate::vision::RecordLayer for RealityRecords {
+    fn seal(&mut self, data: &[u8]) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(data.len() + 32);
+        for chunk in data.chunks(MAX_RECORD) {
+            out.extend(self.tx.seal(0x17, chunk));
+        }
+        Ok(out)
+    }
+
+    fn open(&mut self, record: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+        let header: [u8; 5] = record[..5].try_into().unwrap();
+        if header[0] == 0x14 {
+            return Ok(Some(Vec::new()));
+        }
+        match self.rx.open(&header, &record[5..]) {
+            Ok((0x17, data)) => Ok(Some(data)),
+            Ok((0x16, _)) => Ok(Some(Vec::new())),
+            Ok(_) => Ok(None),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+        }
+    }
+
+    fn close(&mut self) -> Vec<u8> {
+        self.tx.seal(0x15, &[1, 0])
+    }
+}
+
+/// Runs the REALITY handshake over `stream`, leaving it right after the client Finished.
+pub async fn handshake(stream: &mut BoxStream, opts: &RealityOpts) -> Result<RealityRecords> {
     let secret = StaticSecret::random_from_rng(rand::thread_rng());
     let public = PublicKey::from(&secret);
     let mut random = [0u8; 32];
@@ -477,7 +516,7 @@ pub async fn connect(mut stream: BoxStream, opts: &RealityOpts) -> Result<BoxStr
     // ServerHello (plaintext; may be preceded by nothing else).
     let mut hs_buf = Vec::new();
     let server_hello = loop {
-        let (header, body) = read_record(&mut stream).await?;
+        let (header, body) = read_record(stream).await?;
         match header[0] {
             0x16 => {
                 hs_buf.extend(body);
@@ -511,7 +550,7 @@ pub async fn connect(mut stream: BoxStream, opts: &RealityOpts) -> Result<BoxStr
     // EncryptedExtensions, Certificate, CertificateVerify, Finished.
     let mut verified_cert = false;
     loop {
-        let (header, body) = read_record(&mut stream).await?;
+        let (header, body) = read_record(stream).await?;
         match header[0] {
             0x14 => continue,
             0x15 => bail!("server alert during handshake ({})", alert_text(&body)),
@@ -572,11 +611,14 @@ pub async fn connect(mut stream: BoxStream, opts: &RealityOpts) -> Result<BoxStr
     stream.flush().await?;
     debug!("REALITY handshake with {} done ({suite:?})", opts.server_name);
 
-    Ok(protected_stream(stream, RecordCipher::new(suite, &s_ap), RecordCipher::new(suite, &c_ap), hs_buf))
+    if !hs_buf.is_empty() {
+        debug!("REALITY: {} stray handshake bytes after Finished", hs_buf.len());
+    }
+    Ok(RealityRecords { rx: RecordCipher::new(suite, &s_ap), tx: RecordCipher::new(suite, &c_ap) })
 }
 
 /// Bridges the TLS application-data records to a plain byte stream.
-fn protected_stream(stream: BoxStream, mut rx: RecordCipher, mut tx: RecordCipher, _leftover: Vec<u8>) -> BoxStream {
+fn protected_stream(stream: BoxStream, mut rx: RecordCipher, mut tx: RecordCipher) -> BoxStream {
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (app, inner) = tokio::io::duplex(64 * 1024);
     let (mut ird, mut iwr) = tokio::io::split(inner);
