@@ -314,7 +314,13 @@ fn client_hello(random: &[u8; 32], key_share: &[u8; 32], mlkem_ek: &[u8], server
         versions.extend_from_slice(&v.to_be_bytes());
     }
     ext(&mut exts, 0x002b, &versions);
-    ext(&mut exts, grease(&mut rng), &[0]);
+    // Like BoringSSL, never repeat the first GREASE extension: Go's parser (REALITY servers)
+    // rejects duplicate extensions and the server then relays us to the real site.
+    let mut g5 = grease(&mut rng);
+    if g5 == g2 {
+        g5 ^= 0x1010;
+    }
+    ext(&mut exts, g5, &[0]);
 
     body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
     body.extend(exts);
@@ -731,6 +737,22 @@ mod tests {
         let hybrid = hello.windows(4).position(|w| w == [0x11, 0xec, 0x04, 0xc0]).unwrap();
         let plain = hello.windows(4).position(|w| w == [0x00, 0x1d, 0x00, 0x20]).unwrap();
         assert!(hybrid < plain);
+        // Go's TLS parser (REALITY servers) rejects duplicate extensions, so the two GREASE
+        // extensions must never collide.
+        for _ in 0..500 {
+            let h = client_hello(&random, &share, &[4u8; MLKEM_EK_LEN], "www.example.com");
+            let mut p = SESSION_ID_AT + 32;
+            p += 2 + be16(&h, p).unwrap() as usize; // cipher suites
+            p += 1 + h[p] as usize; // compression methods
+            let end = p + 2 + be16(&h, p).unwrap() as usize;
+            p += 2;
+            let mut seen = std::collections::HashSet::new();
+            while p < end {
+                assert!(seen.insert(be16(&h, p).unwrap()), "duplicate extension in ClientHello");
+                p += 4 + be16(&h, p + 2).unwrap() as usize;
+            }
+            assert_eq!(p, end);
+        }
         assert_eq!(&hello[hybrid + 4 + MLKEM_EK_LEN..hybrid + 4 + MLKEM_EK_LEN + 32], &share);
         let zeroed = hello.clone();
         let key = [3u8; 32];
