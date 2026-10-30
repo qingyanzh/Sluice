@@ -5,6 +5,8 @@
 //!   POST /v1/policies/<group>/test          run an automatic group's health check now
 //!   GET  /v1/route?target=<host[:port]>     explain which rule and outbound a target hits
 //!   POST /v1/reload                         reload the config file (and subscriptions)
+//!   GET  /v1/mode                           outbound mode: rule, direct or global
+//!   POST /v1/mode?set=<mode>                switch the outbound mode
 //!   GET  /v1/traffic                        total bytes up/down and open connections
 
 use std::sync::Arc;
@@ -109,6 +111,15 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                 None => ("400 Bad Request", "{\"error\":\"missing ?select=\"}".to_string()),
             }
         }
+        ("GET", "/v1/mode") => ("200 OK", format!("{{\"mode\":\"{}\"}}", router.mode().name())),
+        ("POST" | "PUT", "/v1/mode") => match query_param(query, "set").as_deref().and_then(crate::router::Mode::parse) {
+            Some(m) => {
+                router.set_mode(m);
+                info!("outbound mode: {}", m.name());
+                ("200 OK", format!("{{\"mode\":\"{}\"}}", m.name()))
+            }
+            None => ("400 Bad Request", "{\"error\":\"set= must be rule, direct or global\"}".to_string()),
+        },
         ("GET", "/v1/traffic") => {
             let (up, down, active) = crate::stats::snapshot();
             ("200 OK", format!("{{\"up\":{up},\"down\":{down},\"active\":{active}}}"))

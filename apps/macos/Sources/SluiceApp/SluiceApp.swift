@@ -28,7 +28,7 @@ struct SluiceApp: App {
                 .environmentObject(core)
                 .onAppear { delegate.core = core }
         }
-        .defaultSize(width: 980, height: 640)
+        .defaultSize(width: 1000, height: 680)
 
         MenuBarExtra {
             MenuBarContent().environmentObject(core)
@@ -43,26 +43,44 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Text("Sluice: \(core.state.label)")
-        if core.isActive {
-            Button("Stop") { core.stop() }
-        } else {
-            Button("Start") { core.start() }
+        Text("Sluice：\(core.state.label)")
+        if core.state == .running {
+            Text("↑ \(formatBytes(core.upRate))/s   ↓ \(formatBytes(core.downRate))/s")
         }
+        if core.isActive {
+            Button("停止") { core.stop() }
+        } else {
+            Button("启动") { core.start() }
+        }
+        Divider()
+        Picker("出站模式", selection: Binding(get: { core.mode }, set: { core.setMode($0) })) {
+            ForEach(OutboundMode.allCases) { Text($0.title).tag($0.rawValue) }
+        }
+        .pickerStyle(.inline)
+        .disabled(core.state != .running)
         Divider()
         ForEach(core.groups.filter(\.isSelectable)) { g in
             Picker(g.group, selection: Binding(get: { g.selected }, set: { core.select(group: g.group, option: $0) })) {
-                ForEach(g.options, id: \.name) { Text($0.name).tag($0.name) }
+                ForEach(g.options, id: \.name) { o in
+                    let (t, _) = latencyStyle(o.latencyMs)
+                    Text(o.latencyMs == nil ? o.name : "\(o.name)    \(t)").tag(o.name)
+                }
             }
         }
         if !core.groups.isEmpty { Divider() }
-        Toggle("System Proxy", isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }))
+        Toggle("设置为系统代理", isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }))
+        Toggle("增强模式", isOn: Binding(get: { core.summary.enhancedMode }, set: { on in
+            Task { if let err = await core.setEnhancedMode(on) { core.lastActionError = "增强模式: \(err)" } }
+        }))
         Divider()
-        Button("Open Sluice") {
+        Button("重新载入配置") { core.reload() }.disabled(core.state != .running).keyboardShortcut("r")
+        Button("显示主窗口") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
-        Button("Quit Sluice") { NSApp.terminate(nil) }.keyboardShortcut("q")
+        .keyboardShortcut("0")
+        Divider()
+        Button("退出 Sluice") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
 }
 

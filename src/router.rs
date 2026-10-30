@@ -38,6 +38,35 @@ pub struct Router {
     /// Last health-check result per option name: `Some(ms)` healthy, `None` failed.
     latency: RwLock<HashMap<String, Option<u64>>>,
     geoip: Option<maxminddb::Reader<Vec<u8>>>,
+    mode: RwLock<Mode>,
+}
+
+/// Outbound mode: `Rule` follows the rules, `Direct` sends everything direct,
+/// `Global` sends everything to the FINAL rule's policy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Rule,
+    Direct,
+    Global,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Rule => "rule",
+            Mode::Direct => "direct",
+            Mode::Global => "global",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "rule" => Some(Mode::Rule),
+            "direct" => Some(Mode::Direct),
+            "global" => Some(Mode::Global),
+            _ => None,
+        }
+    }
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -155,6 +184,7 @@ impl Router {
             groups: cfg.groups.clone(),
             selected: RwLock::new(selected),
             latency: RwLock::new(HashMap::new()),
+            mode: RwLock::new(Mode::Rule),
             geoip,
         };
         // Catches group cycles at load time rather than on first request.
@@ -244,7 +274,29 @@ impl Router {
         bail!("policy group loop involving {policy:?}")
     }
 
+    pub fn mode(&self) -> Mode {
+        *self.mode.read().unwrap()
+    }
+
+    pub fn set_mode(&self, mode: Mode) {
+        *self.mode.write().unwrap() = mode;
+    }
+
     pub async fn decide(&self, target: &Target) -> Result<Decision> {
+        match self.mode() {
+            Mode::Direct => {
+                return Ok(Decision { rule: "DIRECT-MODE".into(), policy: "DIRECT".into(), outbound: "DIRECT".into() })
+            }
+            Mode::Global => {
+                let policy = self
+                    .rules
+                    .iter()
+                    .find(|r| matches!(r.matcher, Matcher::Final))
+                    .map_or("DIRECT".to_string(), |r| r.policy.clone());
+                return Ok(Decision { rule: "GLOBAL-MODE".into(), outbound: self.resolve(&policy)?, policy });
+            }
+            Mode::Rule => {}
+        }
         let rule = self.match_rule(target).await;
         Ok(Decision { rule: rule.to_string(), policy: rule.policy.clone(), outbound: self.resolve(&rule.policy)? })
     }
@@ -429,6 +481,7 @@ impl Router {
     /// Carries group selections and health-check results over from the router being
     /// replaced, wherever the same group and option still exist.
     pub fn inherit_state(&self, old: &Router) {
+        self.set_mode(old.mode());
         let old_selected = old.selected.read().unwrap().clone();
         let mut selected = self.selected.write().unwrap();
         for g in self.groups.iter().filter(|g| g.kind != GroupKind::LoadBalance) {
@@ -502,6 +555,20 @@ FINAL,DIRECT
         assert_eq!(decide(&r, "google.com").await.1, "DIRECT");
         assert!(r.select("Proxy", "REJECT").is_err());
         assert!(r.select("Nope", "A").is_err());
+    }
+
+    #[tokio::test]
+    async fn modes() {
+        let r = router(&CONF.replace("FINAL,DIRECT", "FINAL,Proxy"));
+        r.set_mode(Mode::Direct);
+        assert_eq!(decide(&r, "exact.com").await.1, "DIRECT");
+        r.set_mode(Mode::Global);
+        assert_eq!(decide(&r, "10.1.2.3").await, ("GLOBAL-MODE".into(), "A".into()));
+        let new = router(CONF);
+        new.inherit_state(&r);
+        assert_eq!(new.mode(), Mode::Global);
+        r.set_mode(Mode::Rule);
+        assert_eq!(decide(&r, "exact.com").await.1, "REJECT");
     }
 
     #[test]

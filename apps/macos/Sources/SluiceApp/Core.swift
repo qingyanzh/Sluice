@@ -24,6 +24,10 @@ struct ConfigSummary {
     var httpListen: String?
     var socksListen: String?
     var enhancedMode = false
+    /// Nodes in [Proxy] and subscription groups (policy-path) in [Proxy Group].
+    var proxyCount = 0
+    var subscriptionCount = 0
+    var hasNodes: Bool { proxyCount + subscriptionCount > 0 }
 
     init(text: String) {
         var section = ""
@@ -33,6 +37,9 @@ struct ConfigSummary {
                 section = String(line.dropFirst().dropLast())
                 continue
             }
+            if line.isEmpty || line.hasPrefix("#") || line.hasPrefix(";") { continue }
+            if section == "Proxy", line.contains("=") { proxyCount += 1; continue }
+            if section == "Proxy Group", line.contains("policy-path=") { subscriptionCount += 1; continue }
             guard section == "General", let eq = line.firstIndex(of: "=") else { continue }
             let key = line[..<eq].trimmingCharacters(in: .whitespaces)
             let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
@@ -54,12 +61,14 @@ final class Core: ObservableObject {
         case stopped, starting, running
         case failed(String)
 
+        var isFailed: Bool { if case .failed = self { true } else { false } }
+
         var label: String {
             switch self {
-            case .stopped: "Stopped"
-            case .starting: "Starting…"
-            case .running: "Running"
-            case .failed: "Error"
+            case .stopped: "已停止"
+            case .starting: "启动中…"
+            case .running: "运行中"
+            case .failed: "出错"
             }
         }
     }
@@ -76,6 +85,10 @@ final class Core: ObservableObject {
     @Published private(set) var upRate: Double = 0
     @Published private(set) var downRate: Double = 0
     @Published private(set) var traffic: Traffic?
+    /// Last 60 one-second samples of (up, down) bytes per second, oldest first.
+    @Published private(set) var rateHistory: [(up: Double, down: Double)] = []
+    /// Outbound mode reported by the core: "rule", "direct" or "global".
+    @Published private(set) var mode = "rule"
     @Published var autoStart: Bool {
         didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
     }
@@ -265,7 +278,7 @@ final class Core: ObservableObject {
                     _ = try await Privileged.run("kill -INT \(pid)")
                 } catch {
                     stopping = false
-                    lastActionError = "Stop: \(error.localizedDescription)"
+                    lastActionError = "停止失败：\(error.localizedDescription)"
                 }
             }
             return
@@ -316,6 +329,8 @@ final class Core: ObservableObject {
         rootPID = nil
         privileged = false
         traffic = nil
+        rateHistory = []
+        mode = "rule"
         upRate = 0
         downRate = 0
         groups = []
@@ -333,6 +348,8 @@ final class Core: ObservableObject {
         if let prev = traffic, elapsed > 0 {
             upRate = Double(now.up &- prev.up) / elapsed
             downRate = Double(now.down &- prev.down) / elapsed
+            rateHistory.append((upRate, downRate))
+            if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
         }
         traffic = now
     }
@@ -352,6 +369,7 @@ final class Core: ObservableObject {
             if let api, state == .starting || tick % 2 == 0, let fresh = try? await api.policies() {
                 groups = fresh
                 if state == .starting { state = .running }
+                if let m = try? await api.mode() { mode = m }
             }
             if let api, state == .running {
                 await sampleTraffic(api, elapsed: Date().timeIntervalSince(last))
@@ -373,30 +391,43 @@ final class Core: ObservableObject {
                 lastActionError = nil
                 if let fresh = try? await api.policies() { groups = fresh }
             } catch {
-                lastActionError = "\(what): \(error.localizedDescription)"
+                lastActionError = "\(what)失败：\(error.localizedDescription)"
             }
         }
     }
 
     func select(group: String, option: String) {
-        perform("Select \(option)") { try await $0.select(group: group, option: option) }
+        perform("切换到 \(option) ") { try await $0.select(group: group, option: option) }
     }
 
     func test(group: String) {
-        perform("Test \(group)") { try await $0.test(group: group) }
+        perform("测试 \(group) ") { try await $0.test(group: group) }
     }
 
     func testAll() {
         for g in groups where !g.isSelectable { test(group: g.group) }
     }
 
+    func setMode(_ m: String) {
+        guard let api else { return }
+        Task {
+            do {
+                try await api.setMode(m)
+                mode = m
+                lastActionError = nil
+            } catch {
+                lastActionError = "切换出站模式失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
     func reload() {
         refreshSummary()
-        perform("Reload") { try await $0.reload() }
+        perform("重载配置") { try await $0.reload() }
     }
 
     func route(_ target: String) async throws -> RouteResult {
-        guard let api, state == .running else { throw APIError(message: "Sluice isn't running") }
+        guard let api, state == .running else { throw APIError(message: "Sluice 未运行") }
         return try await api.route(target)
     }
 
@@ -409,13 +440,23 @@ final class Core: ObservableObject {
     /// Runs `sluice check` on `text` (as a sibling temp file, so relative paths still
     /// resolve); returns the error message, or nil if the config is valid.
     func validate(_ text: String) async -> String? {
-        guard let binary = coreBinary else { return "Sluice core binary not found" }
+        guard let binary = coreBinary else { return "找不到 Sluice 内核，请重新安装应用。" }
         let dir = URL(fileURLWithPath: configPath).deletingLastPathComponent()
         let tmp = dir.appendingPathComponent(".sluice-check-\(UUID().uuidString).conf")
         do { try text.write(to: tmp, atomically: true, encoding: .utf8) } catch { return error.localizedDescription }
         defer { try? FileManager.default.removeItem(at: tmp) }
         let (status, out) = await runTool(binary.path, ["check", tmp.path])
-        return status == 0 ? nil : out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // First line is for people; the core's own message follows as detail.
+        if status == 0 { return nil }
+        let detail = out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if let line = Self.errorLine(in: detail) { return "第 \(line) 行有错误，配置没有保存。\n" + detail }
+        return "配置检查未通过，没有保存。\n" + detail
+    }
+
+    /// The line a `sluice check` message points at ("line 17: …"), if any.
+    static func errorLine(in message: String) -> Int? {
+        guard let r = message.range(of: #"line (\d+)"#, options: .regularExpression) else { return nil }
+        return Int(message[r].dropFirst(5))
     }
 
     /// Validates, saves and (if running) reloads. Returns an error message on failure.
@@ -432,6 +473,14 @@ final class Core: ObservableObject {
         return nil
     }
 
+    /// Turns enhanced mode on or off in the config and restarts the core so it takes effect.
+    func setEnhancedMode(_ on: Bool) async -> String? {
+        let text = ConfigText.setGeneral("enhanced-mode", on ? "true" : "false", in: readConfig())
+        if let err = await saveConfig(text) { return err }
+        if isActive { restart() }
+        return nil
+    }
+
     private func uniqueName(_ base: String, in text: String) -> String {
         let taken = ConfigText.names(in: text)
         var name = base.isEmpty ? "Node" : base
@@ -443,33 +492,45 @@ final class Core: ObservableObject {
     /// Adds a node from a share link or a Surge `[Proxy]` line; returns an error or nil.
     func addNode(_ input: String) async -> String? {
         var line = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty else { return "Paste a share link or a proxy line" }
+        guard !line.isEmpty else { return "请先粘贴分享链接或代理行。" }
         if line.contains("://") {
-            guard let binary = coreBinary else { return "Sluice core binary not found" }
+            guard let binary = coreBinary else { return "找不到 Sluice 内核，请重新安装应用。" }
             let (status, out) = await runTool(binary.path, ["convert", line])
-            guard status == 0 else { return out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard status == 0 else {
+                return "无法识别这个分享链接。\n" + out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             line = out.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard let eq = line.firstIndex(of: "=") else { return "Expected `Name = type, server, port, ...`" }
+        guard let eq = line.firstIndex(of: "=") else {
+            return "格式不正确：代理行需要写成「名称 = 类型, 服务器, 端口, 参数…」，缺少「名称 =」。"
+        }
         var text = readConfig()
         let name = uniqueName(line[..<eq].trimmingCharacters(in: .whitespaces), in: text)
         line = "\(name) =\(line[line.index(after: eq)...])"
         text = ConfigText.insert(line, into: "Proxy", of: text)
         text = ConfigText.addToFinalGroup(name, in: text)
-        return await saveConfig(text)
+        return Core.explain(await saveConfig(text), as: "这个节点无法加入配置，配置没有改动。请检查代理类型和参数是否正确。")
     }
 
     /// Adds a subscription as its own `select` group fed by `policy-path`.
     func addSubscription(name: String, url: String, filter: String) async -> String? {
         let url = url.trimmingCharacters(in: .whitespaces)
-        guard url.hasPrefix("http://") || url.hasPrefix("https://") else { return "The subscription URL must start with http:// or https://" }
+        guard url.hasPrefix("http://") || url.hasPrefix("https://") else { return "订阅地址需要以 http:// 或 https:// 开头。" }
         var text = readConfig()
         let group = uniqueName(name.trimmingCharacters(in: .whitespaces).isEmpty ? "Subscription" : name, in: text)
         var line = "\(group) = select, policy-path=\(url)"
         if !filter.trimmingCharacters(in: .whitespaces).isEmpty { line += ", policy-regex-filter=\(filter)" }
         text = ConfigText.insert(line, into: "Proxy Group", of: text)
         text = ConfigText.addToFinalGroup(group, in: text)
-        return await saveConfig(text)
+        return Core.explain(await saveConfig(text), as: "订阅没有添加，配置没有改动。请确认地址可以访问，且内容是节点列表。")
+    }
+
+    /// Replaces the generic first line of a check failure with one that fits the action,
+    /// keeping the core's message as the detail.
+    static func explain(_ error: String?, as headline: String) -> String? {
+        guard let error else { return nil }
+        let detail = error.split(separator: "\n", maxSplits: 1).dropFirst().first.map(String.init) ?? error
+        return headline + "\n" + detail
     }
 
     // MARK: system proxy
@@ -483,7 +544,7 @@ final class Core: ObservableObject {
         let http = SystemProxy.split(summary.httpListen)
         let socks = SystemProxy.split(summary.socksListen)
         guard !on || http != nil || socks != nil else {
-            lastActionError = "Add http-listen or socks5-listen to [General] first"
+            lastActionError = "无法开启系统代理：配置的 [General] 中没有 http-listen 或 socks5-listen。"
             return
         }
         Task {
@@ -491,7 +552,7 @@ final class Core: ObservableObject {
                 try await SystemProxy.set(enabled: on, http: http, socks: socks)
                 lastActionError = nil
             } catch {
-                lastActionError = "System proxy: \(error.localizedDescription)"
+                lastActionError = "设置系统代理失败：\(error.localizedDescription)"
             }
             refreshSystemProxy()
         }

@@ -98,6 +98,21 @@ enum ConfigText {
         return lines.joined(separator: "\n")
     }
 
+    /// Sets `key = value` in [General], replacing an existing line for that key.
+    static func setGeneral(_ key: String, _ value: String, in text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        var section = ""
+        for (i, raw) in lines.enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { section = line; continue }
+            if section == "[General]", let eq = line.firstIndex(of: "="), line[..<eq].trimmingCharacters(in: .whitespaces) == key {
+                lines[i] = "\(key) = \(value)"
+                return lines.joined(separator: "\n")
+            }
+        }
+        return insert("\(key) = \(value)", into: "General", of: text)
+    }
+
     /// Names already used in [Proxy] and [Proxy Group].
     static func names(in text: String) -> Set<String> {
         var section = ""
