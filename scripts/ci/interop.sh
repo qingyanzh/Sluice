@@ -99,34 +99,34 @@ sleep 2
 RUST_LOG=sluice=info,sluice::vision=debug ./target/release/sluice run "$work/sluice.conf" > "$work/sluice.log" 2>&1 &
 for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:16170/v1/policies && break; sleep 0.5; done
 
-# Diagnostic: Xray's own REALITY client vs Sluice against the same server (www.apple.com target); if both fail, the target site is at fault.
+# Xray's own REALITY client and Sluice against the same server: Sluice must do as well
+# (if both fail, the target site is at fault, not the client).
 curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=VLESS-REALITY" > /dev/null
-for who in xray:10808 sluice:16153; do
-    ok=0
-    for _ in 1 2 3 4 5 6; do
-        [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:${who#*:} https://example.com/)" = 200 ] && ok=$((ok + 1))
+reality_ok() { # socks port -> successes out of 20
+    local ok=0
+    for _ in $(seq 20); do
+        [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:$1 https://example.com/)" = 200 ] && ok=$((ok + 1))
     done
-    echo "REALITY control ${who%%:*}: $ok/6 ok"
-done
+    echo $ok
+}
+xray_ok=$(reality_ok 10808)
+sluice_ok=$(reality_ok 16153)
+control_fail=0
+[ "$sluice_ok" -lt "$xray_ok" ] && control_fail=1
+echo "REALITY control: xray $xray_ok/20, sluice $sluice_ok/20 $([ $control_fail = 0 ] && echo PASS || echo FAIL)"
 
-fails=0
+fails=$control_fail
 printf '%-20s %-6s %-12s %s\n' NODE HTTPS DOWNLOAD UDP
 for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS-WS VLESS-gRPC-TLS VMess-gRPC VLESS-REALITY VLESS-REALITY-Vision VLESS-TLS-Vision Hysteria2 Hy2-Obfs; do
     curl -s -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null
-    # One retry per node: REALITY servers occasionally relay a valid client to the target
-    # (a race on their side; Xray's own client hits it too), which shows up as one failed check.
-    for attempt in 1 2; do
-        https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
-        size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \
-            'https://speed.cloudflare.com/__down?bytes=10000000')
-        udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
-        ok=yes
-        [ "$https" = 200 ] || ok=no
-        [ "$size" = 10000000 ] || ok=no
-        [[ "$udp" == "replies 23/23"* ]] || ok=no
-        [ $ok = yes ] && break
-        [ $attempt = 1 ] && printf '%-20s %-6s %-12s %s (retrying)\n' "$node" "$https" "$size" "$udp"
-    done
+    https=$(curl -s -m 15 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)
+    size=$(curl -s -m 60 -o /dev/null -w '%{size_download}' --socks5-hostname 127.0.0.1:16153 \
+        'https://speed.cloudflare.com/__down?bytes=10000000')
+    udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
+    ok=yes
+    [ "$https" = 200 ] || ok=no
+    [ "$size" = 10000000 ] || ok=no
+    [[ "$udp" == "replies 23/23"* ]] || ok=no
     [ $ok = yes ] || fails=$((fails + 1))
     printf '%-20s %-6s %-12s %s %s\n' "$node" "$https" "$size" "$udp" "$([ $ok = yes ] && echo PASS || echo FAIL)"
 done
