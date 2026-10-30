@@ -447,7 +447,16 @@ final class Core: ObservableObject {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let (status, out) = await runTool(binary.path, ["check", tmp.path])
         // First line is for people; the core's own message follows as detail.
-        return status == 0 ? nil : "配置检查未通过，没有保存。\n" + out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if status == 0 { return nil }
+        let detail = out.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if let line = Self.errorLine(in: detail) { return "第 \(line) 行有错误，配置没有保存。\n" + detail }
+        return "配置检查未通过，没有保存。\n" + detail
+    }
+
+    /// The line a `sluice check` message points at ("line 17: …"), if any.
+    static func errorLine(in message: String) -> Int? {
+        guard let r = message.range(of: #"line (\d+)"#, options: .regularExpression) else { return nil }
+        return Int(message[r].dropFirst(5))
     }
 
     /// Validates, saves and (if running) reloads. Returns an error message on failure.

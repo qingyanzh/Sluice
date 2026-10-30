@@ -556,6 +556,9 @@ struct SearchField: View {
         .padding(.horizontal, 12).padding(.vertical, 6)
         .frame(width: 220)
         .liquidGlass(in: Capsule())
+        // While it filters, a blue ring says the list is narrowed.
+        .overlay(Capsule().strokeBorder(text.isEmpty ? Color.clear : DS.accent.opacity(0.7), lineWidth: 1.5))
+        .animation(DS.spring, value: text.isEmpty)
     }
 }
 
@@ -755,15 +758,7 @@ struct CardModifier: ViewModifier {
 }
 
 extension View {
-    /// The shared surface for cards and tiles: raised, borderless, soft shadow.
-    func tileBackground(radius: CGFloat = DS.smallRadius + 2, highlighted: Bool = false) -> some View {
-        glass(radius: radius, highlighted: highlighted)
-    }
-}
-
-extension View {
     func card() -> some View { modifier(CardModifier()) }
-    func hoverLift() -> some View { modifier(HoverLift()) }
 }
 
 /// Content rises into place when a pane opens, each piece a beat after the last.
@@ -784,16 +779,6 @@ extension View {
     func entrance(_ index: Int) -> some View { modifier(Entrance(index: index)) }
 }
 
-/// Clickable tiles rise slightly under the pointer.
-struct HoverLift: ViewModifier {
-    @State private var hovering = false
-    func body(content: Content) -> some View {
-        content
-            .scaleEffect(hovering ? 1.01 : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: hovering)
-            .onHover { hovering = $0 }
-    }
-}
 
 /// Card caption with a tinted symbol, e.g. "↑ 上传".
 struct CardTitle: View {
@@ -1337,9 +1322,7 @@ struct PolicyView: View {
                                action: core.isActive ? nil : ("启动 Sluice", { core.start() }) as (String, () -> Void)?)
                         .frame(minHeight: 260)
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: DS.gap)], spacing: 10) {
-                        ForEach(Array(core.groups.enumerated()), id: \.element.id) { i, g in GroupCard(group: g).entrance(i) }
-                    }
+                    ForEach(Array(core.groups.enumerated()), id: \.element.id) { i, g in GroupSection(group: g).entrance(i) }
                 }
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
@@ -1348,20 +1331,18 @@ struct PolicyView: View {
     }
 }
 
-/// A policy group as a tile; clicking opens its options.
-struct GroupCard: View {
+/// A policy group with every option laid out, so the current choice, latency and
+/// availability compare at a glance. Manual groups switch by clicking an option.
+struct GroupSection: View {
     @EnvironmentObject var core: Core
     let group: PolicyGroup
-    @State private var showing = false
-
-    private var kindLabel: String { Self.kindLabel(group.type) }
 
     static func kindLabel(_ type: String) -> String {
         switch type {
-        case "select": "手动选择策略组"
-        case "url-test": "自动测试策略组"
-        case "fallback": "故障转移策略组"
-        case "load-balance": "负载均衡策略组"
+        case "select": "手动选择"
+        case "url-test": "自动测试"
+        case "fallback": "故障转移"
+        case "load-balance": "负载均衡"
         default: type
         }
     }
@@ -1377,94 +1358,70 @@ struct GroupCard: View {
     }
 
     var body: some View {
-        let latency = group.options.first { $0.name == group.selected }?.latencyMs
-        Button { showing = true } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 10) {
-                    IconTile(symbol: kindIcon, on: showing, size: 28)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(group.group).font(DS.heading).lineLimit(1)
-                        Text(kindLabel).font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 10)
-                HStack {
-                    Text(group.selected).font(DS.label.weight(.medium)).lineLimit(1)
-                    Spacer()
-                    if latency != nil {
-                        LatencyBadge(latency: latency)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
-            .padding(12)
-            .tileBackground(highlighted: showing)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressableStyle())
-        .hoverLift()
-        .popover(isPresented: $showing, arrowEdge: .bottom) { GroupOptions(group: group) }
-    }
-}
-
-struct GroupOptions: View {
-    @EnvironmentObject var core: Core
-    let group: PolicyGroup
-
-    var body: some View {
-        // Re-read the group so selection and latencies update while open.
-        let g = core.groups.first { $0.group == group.group } ?? group
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
+        let failed = group.options.filter { ($0.latencyMs ?? 0) < 0 }.count
+        let tested = group.options.filter { $0.latencyMs != nil }.count
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                IconTile(symbol: kindIcon, size: 28)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(g.group).font(DS.heading)
-                    Text(GroupCard.kindLabel(g.type)).font(DS.caption).foregroundStyle(DS.ink2)
+                    Text(group.group).font(DS.heading).lineLimit(1)
+                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · 点击选项切换" : "\(Self.kindLabel(group.type)) · 自动选择")
+                        .font(DS.caption).foregroundStyle(DS.ink2)
                 }
-                Spacer()
-                if !g.isSelectable {
-                    Button("测试") { core.test(group: g.group) }.glassButton().controlSize(.small)
+                Spacer(minLength: 8)
+                if tested > 0 {
+                    Text(failed == 0 ? "\(tested) 个可用" : "\(tested - failed) 个可用 · \(failed) 个失败")
+                        .font(DS.caption).foregroundStyle(failed == 0 ? DS.ink2 : failed == tested ? DS.fail : DS.warn)
                 }
+                Button("测试") { core.test(group: group.group) }.glassButton()
+                    .help("测试这个策略组里每个选项的延迟")
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
-            Divider()
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(g.options, id: \.name) { o in OptionRow(group: g, option: o) }
-                }
-                .padding(.vertical, 4)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], spacing: 8) {
+                ForEach(group.options, id: \.name) { OptionChip(group: group, option: $0) }
             }
-            .frame(maxHeight: 360)
         }
-        .frame(width: 300)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glass()
     }
 }
 
-struct OptionRow: View {
+/// One option: availability dot, name, latency. The current choice is blue.
+struct OptionChip: View {
     @EnvironmentObject var core: Core
     let group: PolicyGroup
     let option: GroupOption
+    @State private var hovering = false
 
     var body: some View {
         let chosen = group.selected == option.name
+        let dot: Color = option.latencyMs.map { $0 < 0 ? DS.fail : latencyStyle($0).1 } ?? DS.off.opacity(0.5)
         Button {
             if !chosen { core.select(group: group.group, option: option.name) }
         } label: {
-            HStack {
-                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold))
-                    .opacity(chosen ? 1 : 0).scaleEffect(chosen ? 1 : 0.5)
-                    .foregroundStyle(DS.accent).frame(width: 14).animation(DS.spring, value: chosen)
-                Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular))
-                Spacer()
-                LatencyBadge(latency: option.latencyMs)
+            HStack(spacing: 8) {
+                Circle().fill(dot).frame(width: 7, height: 7)
+                Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Text(option.latencyMs.map { $0 < 0 ? "失败" : "\($0) ms" } ?? "—")
+                    .font(DS.caption.monospacedDigit())
+                    .foregroundStyle(option.latencyMs.map { $0 < 0 ? DS.fail : DS.ink2 } ?? DS.ink3)
             }
-            .padding(.horizontal, 10).padding(.vertical, 7)
-            .background(chosen ? DS.accent.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 10).frame(height: 34)
+            .background(chosen ? DS.accent.opacity(0.14) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
+                        in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+            .overlay {
+                if chosen {
+                    RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(DS.accent.opacity(0.6), lineWidth: 1)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
         .disabled(!group.isSelectable)
-        .help(group.isSelectable ? "使用 \(option.name)" : "\(group.type) 自动选择")
+        .onHover { hovering = $0 }
+        .animation(DS.spring, value: chosen)
+        .help(chosen ? "当前选择" : group.isSelectable ? "切换到 \(option.name)" : "这个策略组自动选择，不能手动切换")
     }
 }
 
@@ -1720,15 +1677,33 @@ struct AddSubscriptionSheet: View {
 struct RequestsView: View {
     @EnvironmentObject var core: Core
     @State private var filter = ""
+    @State private var kind = OutboundKind.all
     @State private var selection: Connection.ID?
+
+    /// Which outbounds to show.
+    enum OutboundKind: Hashable { case all, proxy, direct, reject
+        func admits(_ outbound: String) -> Bool {
+            switch self {
+            case .all: true
+            case .proxy: outbound != "DIRECT" && outbound != "REJECT"
+            case .direct: outbound == "DIRECT"
+            case .reject: outbound == "REJECT"
+            }
+        }
+    }
 
     var body: some View {
         let rows = core.connections.reversed().filter {
-            filter.isEmpty || $0.target.localizedCaseInsensitiveContains(filter) || $0.outbound.localizedCaseInsensitiveContains(filter)
-                || $0.policy.localizedCaseInsensitiveContains(filter)
+            kind.admits($0.outbound)
+                && (filter.isEmpty || $0.target.localizedCaseInsensitiveContains(filter) || $0.outbound.localizedCaseInsensitiveContains(filter)
+                    || $0.policy.localizedCaseInsensitiveContains(filter))
         }
+        let filtering = kind != .all || !filter.isEmpty
         VStack(spacing: 0) {
-            PaneHeader(title: "请求", subtitle: "\(core.connections.count) 个请求") {
+            PaneHeader(title: "请求", subtitle: filtering ? "显示 \(rows.count) / \(core.connections.count) 个请求" : "\(core.connections.count) 个请求") {
+                GlassSegmented(options: [(OutboundKind.all, "全部", nil), (.proxy, "代理", nil), (.direct, "直连", nil), (.reject, "拒绝", nil)],
+                               selection: $kind)
+                    .frame(width: 250)
                 SearchField(prompt: "搜索", text: $filter)
                 Button { core.clearConnections() } label: { Label("清除", systemImage: "trash") }
             }
@@ -1800,10 +1775,14 @@ struct RequestRow: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(selected ? DS.accent.opacity(0.09) : hovering ? Color.primary.opacity(0.04) : .clear)
+                RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous)
+                    .fill(selected ? DS.accent.opacity(0.14) : hovering ? Color.primary.opacity(0.045) : .clear)
             }
-            .overlay(alignment: .leading) { if selected { FlowMark().padding(.leading, 1) } }
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(DS.accent.opacity(0.55), lineWidth: 1)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
@@ -2005,9 +1984,9 @@ struct RuleView: View {
             VStack(alignment: .leading, spacing: DS.gap) {
                 routeTest.entrance(0)
                 HStack {
-                    SectionTitle(text: "规则 (\(rules.count))")
+                    SectionTitle(text: filter.isEmpty ? "规则 (\(rules.count))" : "规则 (\(rows.count) / \(rules.count))")
                     Spacer()
-                    Text("添加、编辑和排序规则请在配置中修改").font(DS.small).foregroundStyle(DS.ink3)
+                    Text("添加、编辑和排序请在配置中修改").font(DS.caption).foregroundStyle(DS.ink2).padding(.top, 10)
                 }
                 // The list is only as tall as its rules: a short list stays short.
                 VStack(spacing: 0) {
@@ -2021,7 +2000,6 @@ struct RuleView: View {
                         if rule.id != rows.last?.id { Divider().padding(.leading, 50).opacity(0.5) }
                     }
                 }
-                .padding(.vertical, 4)
                 .glass()
                 .entrance(1)
             }
@@ -2057,41 +2035,45 @@ struct RuleView: View {
             if hit { Text("命中").font(DS.caption).foregroundStyle(DS.accent) }
             OutboundTag(name: rule.policy)
         }
-        .padding(.horizontal, 14).padding(.vertical, 9)
+        .padding(.horizontal, 14).padding(.vertical, 7)
         .background(hit ? DS.accent.opacity(0.08) : .clear)
         .overlay(alignment: .leading) { if hit { FlowMark().padding(.leading, 3) } }
         .animation(DS.spring, value: hit)
     }
 
+    /// The rule test as one compact toolbar row; its answer sits on the same line.
     private var routeTest: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("规则测试").font(DS.heading)
-                Spacer()
-                Text(core.state == .running ? "由运行中的内核判定" : "内核未运行 · 按配置离线匹配")
-                    .font(DS.caption).foregroundStyle(core.state == .running ? DS.ink3 : Color.orange)
-            }
-            HStack {
-                TextField("主机或 主机:端口", text: $target).textFieldStyle(.plain).font(DS.label).onSubmit(check)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.05), in: Capsule())
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "scope").font(.system(size: 12, weight: .semibold)).foregroundStyle(DS.ink2)
+                    .accessibilityHidden(true)
+                TextField("测试主机，如 www.google.com", text: $target).textFieldStyle(.plain).font(DS.label).onSubmit(check)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(DS.surface, in: Capsule())
+                    .overlay(Capsule().strokeBorder(DS.stroke, lineWidth: 1))
+                    .frame(width: 260)
                 Button("测试", action: check).glassButton(prominent: true).disabled(target.isEmpty)
-            }
-            if let result {
-                HStack(spacing: 16) {
-                    LabeledContent("规则", value: result.rule)
-                    LabeledContent("策略", value: result.policy)
-                    LabeledContent("出站") { OutboundTag(name: result.outbound) }
-                    if offline { Text("离线结果，策略组的实际选择以运行时为准").font(DS.caption).foregroundStyle(DS.ink3) }
+                    .help(target.isEmpty ? "先输入要测试的主机" : "查看目标会匹配哪条规则，不会真正建立连接")
+                if let result {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(DS.ink3)
+                        Text(result.rule).font(DS.small.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                        Text("·").foregroundStyle(DS.ink3)
+                        Text(result.policy).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1)
+                        OutboundTag(name: result.outbound)
+                    }
+                    .transition(.opacity)
                 }
-                .font(DS.label)
-            } else if let error {
-                ErrorText(raw: error)
-            } else {
-                Text("查看目标会匹配哪条规则、使用哪个出站，不会真正建立连接。").font(DS.small).foregroundStyle(DS.ink2)
+                Spacer(minLength: 8)
+                Text(core.state == .running ? "内核判定" : "离线匹配")
+                    .font(DS.caption).foregroundStyle(core.state == .running ? DS.ink2 : DS.warn)
+                    .help(core.state == .running ? "由运行中的内核判定" : "内核未运行：按配置自上而下离线匹配，策略组的实际选择以运行时为准")
             }
+            if let error, result == nil { ErrorText(raw: error) }
         }
-        .card()
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .glass()
+        .animation(DS.spring, value: result?.rule)
     }
 
     private func load() {
@@ -2246,7 +2228,7 @@ struct ConfigView: View {
                 Button("选取…", action: choose)
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }
             }
-            ConfigEditor(text: $text)
+            ConfigEditor(text: $text, errorLine: message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
                 .glassPanel()
             HStack {
                 if let (msg, ok) = message {
@@ -2271,6 +2253,8 @@ struct ConfigView: View {
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .onAppear(perform: load)
+        // An error is about the text it was found in; once that text changes it no longer applies.
+        .onChange(of: text) { if message?.1 == false { message = nil } }
     }
 
     private func load() {
@@ -2319,6 +2303,7 @@ struct DotLabelStyle: LabelStyle {
 
 /// Line numbers in the editor's gutter.
 final class LineNumberRuler: NSRulerView {
+    var errorLine: Int?
     private let font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
     init(textView: NSTextView) {
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
@@ -2349,8 +2334,10 @@ final class LineNumberRuler: NSRulerView {
             let frag = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             let y = convert(NSPoint(x: 0, y: frag.minY + inset), from: tv).y
             let label = "\(line)" as NSString
-            let size = label.size(withAttributes: attrs)
-            label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y + (frag.height - size.height) / 2), withAttributes: attrs)
+            var a = attrs
+            if line == errorLine { a[.foregroundColor] = NSColor.systemRed; a[.font] = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .bold) }
+            let size = label.size(withAttributes: a)
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y + (frag.height - size.height) / 2), withAttributes: a)
             line += 1
             if NSMaxRange(lineRange) <= index { break }
             index = NSMaxRange(lineRange)
@@ -2363,6 +2350,8 @@ final class LineNumberRuler: NSRulerView {
 /// keys and rule types in emphasis, values in secondary ink, comments faded.
 struct ConfigEditor: NSViewRepresentable {
     @Binding var text: String
+    /// A line `sluice check` rejected: tinted red, numbered red in the gutter, and scrolled into view.
+    var errorLine: Int?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -2396,11 +2385,35 @@ struct ConfigEditor: NSViewRepresentable {
             Coordinator.highlight(tv)
             scroll.verticalRulerView?.needsDisplay = true
         }
+        if context.coordinator.shownError != errorLine {
+            context.coordinator.shownError = errorLine
+            Coordinator.markError(errorLine, in: tv)
+            (scroll.verticalRulerView as? LineNumberRuler)?.errorLine = errorLine
+            scroll.verticalRulerView?.needsDisplay = true
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ConfigEditor
+        var shownError: Int?
         init(_ parent: ConfigEditor) { self.parent = parent }
+
+        static func markError(_ line: Int?, in tv: NSTextView) {
+            guard let lm = tv.layoutManager else { return }
+            let s = tv.string as NSString
+            lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: s.length))
+            guard let line, line >= 1 else { return }
+            var n = 1, location = 0
+            while n < line && location < s.length {
+                location = NSMaxRange(s.lineRange(for: NSRange(location: location, length: 0)))
+                n += 1
+            }
+            guard n == line, location <= s.length else { return }
+            let range = s.lineRange(for: NSRange(location: location, length: 0))
+            lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemRed.withAlphaComponent(0.16), forCharacterRange: range)
+            tv.setSelectedRange(NSRange(location: range.location, length: 0))
+            tv.scrollRangeToVisible(range)
+        }
 
         func textDidChange(_ note: Notification) {
             guard let tv = note.object as? NSTextView else { return }
