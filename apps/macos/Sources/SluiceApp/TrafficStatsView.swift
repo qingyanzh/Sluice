@@ -42,12 +42,12 @@ struct TrafficStatsView: View {
             VStack(alignment: .leading, spacing: DS.gap) {
                 ViewThatFits(in: .horizontal) {
                     HStack {
-                        CardTitle(text: "策略流量", icon: "chart.xyaxis.line")
+                        CardTitle(text: core.statsFallback ? "总体流量" : "策略流量", icon: "chart.xyaxis.line")
                         Spacer(minLength: 16)
                         policyPicker.frame(width: 240)
                     }
                     VStack(alignment: .leading, spacing: 12) {
-                        CardTitle(text: "策略流量", icon: "chart.xyaxis.line")
+                        CardTitle(text: core.statsFallback ? "总体流量" : "策略流量", icon: "chart.xyaxis.line")
                         policyPicker
                     }
                 }
@@ -119,8 +119,9 @@ struct TrafficStatsView: View {
                     .foregroundStyle(DS.ink2)
             }
         }
-        .chartXScale(domain: end.addingTimeInterval(-599)...end)
+        .chartXScale(domain: end.addingTimeInterval(-600)...end)
         .chartYScale(domain: 0...max(1024, peak * 1.1))
+        .chartPlotStyle { plot in plot.clipped() }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 5)) { _ in
                 AxisGridLine()

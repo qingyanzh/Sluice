@@ -41,6 +41,35 @@ final class TrafficStatsTests: XCTestCase {
         XCTAssertTrue(stats.policyNames.isEmpty)
     }
 
+    func testPolicyPickerIncludesTotalsAndHistoryWithoutDuplicates() throws {
+        let json = #"""
+        {
+          "up":100,"down":200,"active":1,
+          "policies":[{"name":"DIRECT","up":100,"down":200},{"name":"Idle","up":0,"down":0}],
+          "nodes":[],
+          "history":[
+            {"time_ms":1000,"up":10,"down":20,"policies":[{"policy":"Historical","up":10,"down":20}]},
+            {"time_ms":2000,"up":10,"down":20,"policies":[{"policy":"DIRECT","up":10,"down":20}]}
+          ]
+        }
+        """#
+        let stats = try JSONDecoder().decode(TrafficStats.self, from: Data(json.utf8))
+        XCTAssertEqual(stats.policyNames, ["DIRECT", "Historical", "Idle"])
+        XCTAssertEqual(stats.rates(for: "Idle").map(\.up), [0, 0])
+        XCTAssertEqual(stats.rates(for: "Historical").map(\.down), [20, 0])
+        XCTAssertEqual(stats.rates(for: nil).map(\.up), [10, 10])
+    }
+
+    func testMalformedStatsAreRejectedInsteadOfBecomingEmptyHistory() {
+        for json in [
+            #"{"up":0,"down":0,"active":0,"policies":[],"nodes":[]}"#,
+            #"{"up":-1,"down":0,"active":0,"policies":[],"nodes":[],"history":[]}"#,
+            #"{"up":0,"down":0,"active":0,"policies":[],"nodes":[],"history":[{"time_ms":1000,"up":0,"down":0}]}"#,
+        ] {
+            XCTAssertThrowsError(try JSONDecoder().decode(TrafficStats.self, from: Data(json.utf8)))
+        }
+    }
+
     func testRingUsesElapsedTimeAndIncludesIdleSamples() {
         var ring = TrafficHistory()
         record(&ring, second: 0, up: 100, down: 200)
@@ -92,6 +121,19 @@ final class TrafficStatsTests: XCTestCase {
         XCTAssertEqual(ring.samples.count, 1)
         XCTAssertEqual(ring.samples[0].up, 10)
         XCTAssertEqual(ring.samples[0].down, 20)
+    }
+
+    func testRingSubtractsLargeCountersBeforeConvertingToFloatingPoint() {
+        var ring = TrafficHistory()
+        record(&ring, second: 0, up: UInt64.max - 10, down: UInt64.max - 20)
+        record(&ring, second: 1, up: UInt64.max, down: UInt64.max)
+        XCTAssertEqual(ring.samples.first?.up, 10)
+        XCTAssertEqual(ring.samples.first?.down, 20)
+        record(&ring, second: 2, up: 0, down: 0)
+        XCTAssertTrue(ring.samples.isEmpty)
+        record(&ring, second: 3, up: 1, down: 2)
+        XCTAssertEqual(ring.samples.first?.up, 1)
+        XCTAssertEqual(ring.samples.first?.down, 2)
     }
 
     private func date(_ second: Double) -> Date {
