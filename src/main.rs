@@ -19,6 +19,7 @@ mod trojan;
 mod tun;
 mod udp;
 mod util;
+mod vision;
 mod vless;
 mod vmess;
 

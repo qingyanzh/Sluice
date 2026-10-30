@@ -1,6 +1,7 @@
 //! VLESS client (protocol version 0) over any stream transport (TCP, TLS, WebSocket).
 //!
-//! Request:  ver(0) uuid(16) addons_len(0) cmd(1=tcp) port(2) atyp addr, then payload.
+//! Request:  ver(0) uuid(16) addons_len addons cmd(1=tcp) port(2) atyp addr, then payload.
+//! The only addon is the flow (protobuf field 1), set for XTLS-Vision; see [`crate::vision`].
 //! Response: ver addons_len addons..., then payload.
 
 use std::io;
@@ -28,11 +29,15 @@ const CMD_TCP: u8 = 1;
 const CMD_UDP: u8 = 2;
 
 /// VLESS uses its own address types: 1=IPv4, 2=domain, 3=IPv6.
-fn request_header(uuid: &[u8; 16], cmd: u8, target: &Target) -> Result<Vec<u8>> {
+fn request_header(uuid: &[u8; 16], flow: Option<&str>, cmd: u8, target: &Target) -> Result<Vec<u8>> {
     let mut h = Vec::with_capacity(64);
     h.push(0);
     h.extend_from_slice(uuid);
-    h.push(0);
+    match flow {
+        Some(f) => h.extend_from_slice(&[f.len() as u8 + 2, 0x0a, f.len() as u8]),
+        None => h.push(0),
+    }
+    h.extend_from_slice(flow.unwrap_or_default().as_bytes());
     h.push(cmd);
     h.extend_from_slice(&target.port.to_be_bytes());
     match &target.host {
@@ -129,24 +134,36 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessStream<S> {
 pub struct VlessServer {
     uuid: [u8; 16],
     transport: Transport,
+    vision: bool,
 }
 
 impl VlessServer {
-    pub fn new(transport: Transport, uuid: &str) -> Result<Self> {
-        Ok(VlessServer { uuid: parse_uuid(uuid)?, transport })
+    pub fn new(transport: Transport, uuid: &str, flow: Option<&str>) -> Result<Self> {
+        let vision = match flow.unwrap_or_default() {
+            "" => false,
+            crate::vision::FLOW => true,
+            other => bail!("unsupported VLESS flow {other:?}"),
+        };
+        Ok(VlessServer { uuid: parse_uuid(uuid)?, transport, vision })
     }
 
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
-        self.connect_cmd(target, CMD_TCP).await
+        if !self.vision {
+            return self.connect_cmd(target, CMD_TCP).await;
+        }
+        let header = request_header(&self.uuid, Some(crate::vision::FLOW), CMD_TCP, target)?;
+        let (raw, tls) = self.transport.connect_records().await?;
+        Ok(crate::vision::connect(raw, tls, self.uuid, header))
     }
 
-    /// UDP: packets are `len(u16) payload` inside the stream.
+    /// UDP: packets are `len(u16) payload` inside the stream. Vision doesn't apply: Xray
+    /// servers take UDP without a flow even from Vision users.
     pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
         Ok(over_stream(self.connect_cmd(target, CMD_UDP).await?, Framing::LengthPrefixed))
     }
 
     async fn connect_cmd(&self, target: &Target, cmd: u8) -> Result<BoxStream> {
-        let header = request_header(&self.uuid, cmd, target)?;
+        let header = request_header(&self.uuid, None, cmd, target)?;
         let mut stream = self.transport.connect().await?;
         stream.write_all(&header).await?;
         stream.flush().await?;
@@ -164,8 +181,12 @@ mod tests {
         let u = parse_uuid("b831381d-6324-4d53-ad4f-8cda48b30811").unwrap();
         assert_eq!(u[0], 0xb8);
         assert!(parse_uuid("1234").is_err());
-        let h = request_header(&u, CMD_TCP, &Target::new("a.com", 443)).unwrap();
+        let h = request_header(&u, None, CMD_TCP, &Target::new("a.com", 443)).unwrap();
         assert_eq!(&h[17..], &[0, 1, 1, 187, 2, 5, b'a', b'.', b'c', b'o', b'm']);
+        let h = request_header(&u, Some("xtls-rprx-vision"), CMD_TCP, &Target::new("a.com", 443)).unwrap();
+        assert_eq!(&h[17..20], &[18, 0x0a, 16]);
+        assert_eq!(&h[20..36], b"xtls-rprx-vision");
+        assert_eq!(&h[36..], &[1, 1, 187, 2, 5, b'a', b'.', b'c', b'o', b'm']);
     }
 
     #[tokio::test]

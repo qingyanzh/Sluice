@@ -75,8 +75,9 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
             }
         }
         "vless" => {
-            if s(v, "flow").is_some() {
-                bail!("VLESS flow (XTLS-Vision) not supported yet");
+            let flow = s(v, "flow").filter(|f| !f.is_empty());
+            if let Some(f) = flow.as_deref().filter(|f| *f != crate::vision::FLOW) {
+                bail!("VLESS flow {f:?} not supported");
             }
             let reality = match v.get("reality-opts") {
                 Some(o) => {
@@ -98,6 +99,7 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
                 skip_cert_verify: skip,
                 layer: transport(v)?,
                 reality,
+                flow,
             }
         }
         "trojan" => ProxyDef::Trojan { server, port, password: need(v, "password")?, sni, skip_cert_verify: skip, layer: transport(v)? },
@@ -156,7 +158,8 @@ proxies:
   - {name: US VLESS, type: vless, server: us.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: us.example.com}
   - {name: SG Trojan, type: trojan, server: sg.example.com, port: 443, password: pw, sni: sg.example.com, skip-cert-verify: true}
   - {name: KR HY2, type: hysteria2, server: kr.example.com, port: 8443, password: pw}
-  - {name: Reality, type: vless, server: r.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, flow: xtls-rprx-vision, reality-opts: {public-key: x}}
+  - {name: Reality, type: vless, server: r.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: www.microsoft.com, flow: xtls-rprx-vision, reality-opts: {public-key: 9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4, short-id: ab}}
+  - {name: Splice, type: vless, server: s.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, flow: xtls-rprx-splice}
   - {name: Plugin SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: obfs}
 proxy-groups:
   - {name: Proxy, type: select, proxies: [HK 01]}
@@ -167,8 +170,9 @@ proxy-groups:
         assert!(looks_like(SAMPLE));
         let (nodes, skipped) = parse(SAMPLE).unwrap();
         let names: Vec<&str> = nodes.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["HK 01", "JP WS", "US VLESS", "SG Trojan", "KR HY2"]);
-        assert_eq!(skipped, ["VLESS flow (XTLS-Vision) not supported yet", "ss plugins not supported"]);
+        assert_eq!(names, ["HK 01", "JP WS", "US VLESS", "SG Trojan", "KR HY2", "Reality"]);
+        assert_eq!(skipped, ["VLESS flow \"xtls-rprx-splice\" not supported", "ss plugins not supported"]);
+        assert!(matches!(&nodes[5].1, ProxyDef::Vless { flow: Some(f), reality: Some(_), .. } if f == "xtls-rprx-vision"));
         assert!(matches!(&nodes[0].1, ProxyDef::Shadowsocks { password, .. } if password == "p@ss"));
         match &nodes[1].1 {
             ProxyDef::Vmess { tls: true, layer: Some(Layer::Ws(ws)), sni: Some(sni), .. } => {

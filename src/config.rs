@@ -33,6 +33,8 @@ pub enum ProxyDef {
         layer: Option<Layer>,
         /// REALITY instead of ordinary TLS; `sni` is the site it impersonates.
         reality: Option<RealityDef>,
+        /// `xtls-rprx-vision` or none.
+        flow: Option<String>,
     },
     /// `obfs`: Salamander obfuscation password.
     Hysteria2 { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, obfs: Option<String> },
@@ -86,8 +88,11 @@ impl ProxyDef {
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 layer_bits(&mut parts, layer);
             }
-            ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer, reality } => {
+            ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer, reality, flow } => {
                 parts.extend(["vless".into(), server.clone(), port.to_string(), format!("uuid={uuid}")]);
+                if let Some(f) = flow {
+                    parts.push(format!("flow={f}"));
+                }
                 if *tls {
                     parts.push("tls=true".into());
                 }
@@ -227,6 +232,7 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             layer: layer.clone(),
             reality: take("reality-public-key")
                 .map(|public_key| RealityDef { public_key, short_id: take("reality-short-id").unwrap_or_default() }),
+            flow: take("flow").filter(|f| !f.is_empty()),
         },
         "vmess" => ProxyDef::Vmess {
             server,
