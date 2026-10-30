@@ -172,7 +172,7 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                 .iter()
                 .map(|c| {
                     format!(
-                        "{{\"id\":{},\"time_ms\":{},\"network\":\"{}\",\"target\":{},\"src\":{},\"rule\":{},\"policy\":{},\"outbound\":{},\"process\":{}}}",
+                        "{{\"id\":{},\"time_ms\":{},\"network\":\"{}\",\"target\":{},\"src\":{},\"rule\":{},\"policy\":{},\"outbound\":{},\"process\":{},\"url\":{},\"mitm\":{}}}",
                         c.id,
                         c.time_ms,
                         c.network,
@@ -181,7 +181,9 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                         json_str(&c.rule),
                         json_str(&c.policy),
                         json_str(&c.outbound),
-                        json_opt(c.process.as_deref())
+                        json_opt(c.process.as_deref()),
+                        json_opt(c.url.as_deref()),
+                        c.mitm
                     )
                 })
                 .collect();

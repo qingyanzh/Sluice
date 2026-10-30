@@ -20,6 +20,10 @@ pub struct ConnRecord {
     pub outbound: String,
     /// Owning process, when a PROCESS-NAME rule looked it up.
     pub process: Option<String>,
+    /// Request URL when known: plain HTTP, CONNECT (`https://host/`), or a decrypted request.
+    pub url: Option<String>,
+    /// Whether this was a request decrypted by MITM.
+    pub mitm: bool,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);

@@ -113,6 +113,41 @@ run_case direct "$work/tun-direct.conf"
 run_case proxy "$work/tun-proxy.conf"
 kill $ss_pid 2>/dev/null
 
+# HTTPS decryption on TUN flows: curl (no proxy settings) trusts only Sluice's CA.
+echo "=================== mitm"
+./target/release/sluice mitm gen-ca --force > /dev/null
+cadir="$HOME/Library/Application Support/Sluice"
+cat > "$work/tun-mitm.conf" <<CONF
+[General]
+loglevel = debug
+enhanced-mode = true
+api-listen = 127.0.0.1:6170
+[MITM]
+hostname = example.com
+ca-cert = $cadir/ca.crt
+ca-key = $cadir/ca.key
+[URL Rewrite]
+^https://example\\.com/old https://example.com/new 302
+[Header Rewrite]
+http-response ^https://example\\.com/ header-add X-Sluice-Rewrite tun
+[Rule]
+FINAL,DIRECT
+CONF
+sudo ./target/release/sluice run "$work/tun-mitm.conf" > ci-logs/tun-mitm.log 2>&1 &
+(sleep "$WATCHDOG"; sudo pkill -INT -x sluice) &
+watchdog=$!
+for _ in $(seq 30); do curl -s -m 2 -o /dev/null http://127.0.0.1:6170/v1/policies && break; sleep 0.5; done
+sleep 1
+hdr=$(curl -s -m 20 --cacert "$cadir/ca.crt" -D - -o /dev/null https://example.com/ | tr -d '\r')
+redir=$(curl -s -m 20 --cacert "$cadir/ca.crt" -o /dev/null -w '%{http_code} %{redirect_url}' https://example.com/old)
+if echo "$hdr" | grep -qi '^x-sluice-rewrite: tun'; then echo "PASS TUN MITM header rewrite"; else echo "FAIL TUN MITM header rewrite"; echo "$hdr"; fails=$((fails + 1)); fi
+if [ "$redir" = "302 https://example.com/new" ]; then echo "PASS TUN MITM URL rewrite"; else echo "FAIL TUN MITM URL rewrite ($redir)"; fails=$((fails + 1)); fi
+sudo pkill -INT -x sluice
+for _ in $(seq 20); do pgrep -x sluice > /dev/null || break; sleep 0.5; done
+kill "$watchdog" 2>/dev/null
+repair_if_offline
+grep -v DEBUG ci-logs/tun-mitm.log | tail -10
+
 echo; [ $fails = 0 ] && echo "All TUN checks passed." || echo "$fails TUN check run(s) failed."
 exec 1>&3 2>&1
 cat "$out"

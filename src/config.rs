@@ -204,6 +204,8 @@ pub struct Config {
     pub rules: Vec<Rule>,
     /// `[Host]` lines: name or wildcard pattern, and its value (addresses or `server:...`).
     pub hosts: Vec<(String, String)>,
+    pub mitm: crate::mitm::MitmConfig,
+    pub rewrites: crate::rewrite::Rewrites,
 }
 
 fn split_kv(line: &str) -> Result<(&str, &str)> {
@@ -364,7 +366,7 @@ fn parse_group(line: &str) -> Result<GroupDef> {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self> {
-        let mut cfg = Config::default();
+        let mut cfg = Config { mitm: crate::mitm::MitmConfig::new(), ..Config::default() };
         let mut section = String::new();
         for (i, raw) in text.lines().enumerate() {
             let line = raw.trim();
@@ -409,6 +411,13 @@ impl Config {
                     cfg.hosts.push((k.to_string(), v.to_string()));
                 }
                 "Rule" => cfg.rules.push(Rule::parse(line).with_context(ctx)?),
+                "MITM" => {
+                    let (k, v) = split_kv(line).with_context(ctx)?;
+                    cfg.mitm.set(k, v);
+                }
+                "URL Rewrite" => cfg.rewrites.url.push(crate::rewrite::UrlRewrite::parse(line).with_context(ctx)?),
+                "Header Rewrite" => cfg.rewrites.header.push(crate::rewrite::HeaderRewrite::parse(line).with_context(ctx)?),
+                "Body Rewrite" => cfg.rewrites.body.push(crate::rewrite::BodyRewrite::parse(line).with_context(ctx)?),
                 _ => {}
             }
         }

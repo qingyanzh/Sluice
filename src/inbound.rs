@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
+use crate::mitm::{intercept_for, Intercept, Prefixed};
 use crate::udp::{parse_socks_addr, Packet, UdpPipe, MAX_PACKET};
 
 use crate::reload::RouterHandle;
@@ -89,6 +90,11 @@ pub async fn http_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let target = Target::parse_authority(uri, 443)?;
+        if let Some(Intercept::Tls) = intercept_for(&router, &target) {
+            sock.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+            let base = tcp_info(&sock, Proto::Https);
+            return crate::mitm::serve_tls(Prefixed::new(body, sock), router, target, base).await;
+        }
         let ctx = tcp_info(&sock, Proto::Https).with_url(format!("https://{}/", target.host_str()));
         match open(&router, &target, &ctx).await {
             Ok(Some(mut up)) => {
@@ -113,6 +119,10 @@ pub async fn http_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()> {
         None => (rest, "/"),
     };
     let target = Target::parse_authority(authority, 80)?;
+    if !router.rewrites().is_empty() {
+        let base = tcp_info(&sock, Proto::Http);
+        return crate::mitm::serve_plain(sock, buf, router, target, base).await;
+    }
     // One request per connection: a keep-alive client may switch hosts mid-connection.
     let mut out = format!("{method} {path} {version}\r\n");
     for line in lines.filter(|l| !l.is_empty()) {
@@ -269,6 +279,19 @@ pub async fn socks5_conn(mut sock: TcpStream, router: Arc<Router>) -> Result<()>
         bail!("unsupported SOCKS command {} (only CONNECT and UDP ASSOCIATE)", req[1]);
     }
     let target = Target::new(&host, port);
+    if let Some(kind) = intercept_for(&router, &target) {
+        sock.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+        return match kind {
+            Intercept::Tls => {
+                let base = tcp_info(&sock, Proto::Https);
+                crate::mitm::serve_tls(sock, router, target, base).await
+            }
+            Intercept::PlainHttp => {
+                let base = tcp_info(&sock, Proto::Http);
+                crate::mitm::serve_plain(sock, Vec::new(), router, target, base).await
+            }
+        };
+    }
     match open(&router, &target, &tcp_info(&sock, Proto::Tcp)).await {
         Ok(Some(up)) => {
             sock.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;

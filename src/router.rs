@@ -42,6 +42,8 @@ pub struct Router {
     geoip: Option<maxminddb::Reader<Vec<u8>>>,
     asn: Option<maxminddb::Reader<Vec<u8>>>,
     mode: RwLock<Mode>,
+    mitm: Option<Arc<crate::mitm::Mitm>>,
+    rewrites: Arc<crate::rewrite::Rewrites>,
 }
 
 /// Outbound mode: `Rule` follows the rules, `Direct` sends everything direct,
@@ -200,6 +202,8 @@ impl Router {
             mode: RwLock::new(Mode::Rule),
             geoip,
             asn,
+            mitm: crate::mitm::Mitm::new(&cfg.mitm)?.map(Arc::new),
+            rewrites: Arc::new(cfg.rewrites.clone()),
         };
         // Catches group cycles at load time rather than on first request.
         for g in &router.groups {
@@ -379,7 +383,7 @@ impl Router {
         })
     }
 
-    async fn decide_logged(&self, target: &Target, ctx: &ConnInfo) -> Result<Decision> {
+    pub async fn decide_logged(&self, target: &Target, ctx: &ConnInfo) -> Result<Decision> {
         let d = self.decide_with(target, ctx).await?;
         let proc_note = d.process.as_deref().map_or(String::new(), |p| format!(" ({p})"));
         info!("{} {target}{proc_note} -> {} [{}] via {}", ctx.proto.name(), d.policy, d.rule, d.outbound);
@@ -393,6 +397,8 @@ impl Router {
             policy: d.policy.clone(),
             outbound: d.outbound.clone(),
             process: d.process.clone(),
+            url: ctx.url.clone(),
+            mitm: ctx.mitm,
         });
         Ok(d)
     }
@@ -429,6 +435,19 @@ impl Router {
             Some(o) => Ok(Some(self.open_udp(&o, target).await?)),
             None => Ok(None),
         }
+    }
+
+    pub fn mitm(&self) -> Option<&Arc<crate::mitm::Mitm>> {
+        self.mitm.as_ref()
+    }
+
+    pub fn rewrites(&self) -> &Arc<crate::rewrite::Rewrites> {
+        &self.rewrites
+    }
+
+    /// Opens `target` through an outbound already decided on; `None` means rejected.
+    pub async fn connect(&self, outbound: &str, target: &Target) -> Result<Option<BoxStream>> {
+        Ok(self.open(outbound, target).await?.map(crate::stats::counted))
     }
 
     async fn open(&self, outbound: &str, target: &Target) -> Result<Option<BoxStream>> {

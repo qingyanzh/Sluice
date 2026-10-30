@@ -48,7 +48,22 @@ fn to_target(dst: SocketAddr, fake: &FakeDns) -> Option<Target> {
 
 async fn handle_tcp(mut tcp: IpStackTcpStream, router: Arc<Router>, fake: Arc<FakeDns>) {
     let Some(target) = to_target(tcp.peer_addr(), &fake) else { return };
-    let ctx = ConnInfo::new(Proto::Tcp, Some(tcp.local_addr()), None, tcp.peer_addr().port());
+    let (src, port) = (tcp.local_addr(), tcp.peer_addr().port());
+    if let Some(kind) = crate::mitm::intercept_for(&router, &target) {
+        let r = match kind {
+            crate::mitm::Intercept::Tls => {
+                crate::mitm::serve_tls(tcp, router, target.clone(), ConnInfo::new(Proto::Https, Some(src), None, port)).await
+            }
+            crate::mitm::Intercept::PlainHttp => {
+                crate::mitm::serve_plain(tcp, Vec::new(), router, target.clone(), ConnInfo::new(Proto::Http, Some(src), None, port)).await
+            }
+        };
+        if let Err(e) = r {
+            debug!("{target}: {e:#}");
+        }
+        return;
+    }
+    let ctx = ConnInfo::new(Proto::Tcp, Some(src), None, port);
     match router.dispatch_with(&target, &ctx).await {
         Ok(Some(mut up)) => {
             if let Err(e) = tokio::io::copy_bidirectional(&mut tcp, &mut up).await {

@@ -44,6 +44,34 @@ Then point the system or app proxy at `127.0.0.1:6152` (HTTP) or `127.0.0.1:6153
   - `POST /v1/reload`
   - `GET /v1/traffic` (bytes up and down, open connections)
 
+## HTTPS decryption and rewriting
+
+`sluice mitm gen-ca` creates a CA in `~/Library/Application Support/Sluice` (`ca.crt`,
+`ca.key`). Sluice never installs it; trust it yourself with the
+`sudo security add-trusted-cert ...` command it prints. Then:
+
+```ini
+[MITM]
+hostname = *.example.com, example.com, -skip.example.com   # host[:port], default port 443
+# ca-p12 = <base64 or path>   ca-passphrase = ...   (or ca-cert / ca-key PEM paths)
+skip-server-cert-verify = false
+h2 = true
+
+[URL Rewrite]
+^https?://example\.com/old https://example.com/new 302      # 302 | 307 | reject | header
+
+[Header Rewrite]
+http-request ^https://example\.com/ header-add X-Foo bar      # header-add | header-del | header-replace
+http-response ^https://example\.com/ header-del Server
+
+[Body Rewrite]
+http-response ^https://example\.com/ "Example Domain" "Sluice Domain"
+```
+
+Decryption covers the HTTP and SOCKS5 inbounds and enhanced mode. Rewrites also apply to
+plain HTTP. Each decrypted request is routed separately, so URL-REGEX rules see the full
+`https://` URL. In `/v1/connections` these requests show up with `url` and `"mitm": true`.
+
 ## macOS app
 
 `scripts/build-app.sh` builds `dist/Sluice.app`, a SwiftUI app with the core embedded. It runs the

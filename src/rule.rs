@@ -140,6 +140,8 @@ pub struct ConnInfo {
     /// Remote port of the client's own socket, to find it among the system's sockets:
     /// the listener port for an inbound, the destination port for TUN.
     pub app_remote_port: u16,
+    /// A request decrypted by MITM (its `url` is the full https URL).
+    pub mitm: bool,
     process: tokio::sync::OnceCell<Option<String>>,
 }
 
@@ -151,6 +153,19 @@ impl ConnInfo {
     pub fn with_url(mut self, url: String) -> Self {
         self.url = Some(url);
         self
+    }
+
+    /// Same client, for one request inside this connection (keeps a looked-up process).
+    pub fn child(&self, proto: Proto) -> ConnInfo {
+        ConnInfo {
+            proto,
+            src: self.src,
+            in_port: self.in_port,
+            url: None,
+            app_remote_port: self.app_remote_port,
+            mitm: false,
+            process: self.process.clone(),
+        }
     }
 
     /// Presets the owning process (tests and `/v1/route?process=`), skipping the lookup.

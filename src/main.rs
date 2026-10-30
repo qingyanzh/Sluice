@@ -5,9 +5,11 @@ mod conns;
 mod dns;
 mod hysteria2;
 mod inbound;
+mod mitm;
 mod process;
 mod reload;
 mod reality;
+mod rewrite;
 mod router;
 mod rule;
 mod ruleset;
@@ -42,7 +44,8 @@ usage:
   sluice run   <config.conf>                 start the proxy
   sluice check <config.conf>                 validate the config
   sluice route <config.conf> <host[:port]>   show which rule and outbound a target uses
-  sluice convert <share-link>                print a share link as a [Proxy] line";
+  sluice convert <share-link>                print a share link as a [Proxy] line
+  sluice mitm gen-ca [--force]               create the HTTPS decryption CA (not installed)";
 
 /// Resolves a name through the egress path (bound interface + upstream DNS).
 async fn egress_self_test(upstream: &[SocketAddr]) -> Result<()> {
@@ -151,6 +154,8 @@ async fn run() -> Result<()> {
             let (name, def) = subscription::parse_link(link)?;
             println!("{}", def.to_line(name.as_deref().unwrap_or("Imported")));
         }
+        ["mitm", "gen-ca"] => mitm::gen_ca(false)?,
+        ["mitm", "gen-ca", "--force"] => mitm::gen_ca(true)?,
         ["run", path] => {
             let cfg = read_config(path)?;
             let level = cfg.general.loglevel.as_deref().unwrap_or("info");
