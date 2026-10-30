@@ -208,7 +208,7 @@ struct MenuBarLabel: View {
         let speedWidth = ceil(max(upload.size(withAttributes: measure).width,
                                   download.size(withAttributes: measure).width)) + 2
         // Keep the text clear of the 8-point mode badge, as Surge does.
-        let speedX: CGFloat = displayMode.showsIcon ? (showOutboundMode ? 32 : 25) : 0
+        let speedX: CGFloat = displayMode.showsIcon ? (showOutboundMode ? 33 : 26) : 0
         let width = displayMode.showsSpeed ? speedX + speedWidth : (showOutboundMode ? 23 : 18)
         let dark = colorScheme == .dark
         let dimmed = dimWhenNotProxying && !core.systemProxyOn && !core.summary.enhancedMode
