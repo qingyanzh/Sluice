@@ -2036,6 +2036,7 @@ struct ConfigView: View {
     @ObservedObject var draft: ConfigDraft
     @State private var confirmRestore = false
     @State private var confirmChoose = false
+    @State private var editorMode = "文本"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2050,8 +2051,20 @@ struct ConfigView: View {
                     Button("载入磁盘版本") { confirmRestore = true }.glassButton(prominent: true)
                 }.padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
-            ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
-                .glassPanel()
+            Picker("编辑方式", selection: $editorMode) {
+                Text("文本").tag("文本")
+                Text("规则").tag("规则")
+                Text("策略组").tag("策略组")
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360)
+            .padding(.horizontal, DS.gutter).padding(.bottom, 16)
+            if editorMode == "文本" {
+                ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
+                    .glassPanel()
+            } else {
+                StructuredConfigEditors(text: $draft.text, section: editorMode == "规则" ? "Rule" : "Proxy Group")
+                    .disabled(draft.busy)
+            }
             HStack {
                 if let (msg, ok) = draft.message {
                     if ok {
