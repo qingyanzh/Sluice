@@ -76,7 +76,7 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
         }
         "vless" => {
             let flow = s(v, "flow").filter(|f| !f.is_empty());
-            if let Some(f) = flow.as_deref().filter(|f| *f != crate::vision::FLOW) {
+            if let Some(f) = flow.as_deref().filter(|f| !crate::vision::is_vision(f)) {
                 bail!("VLESS flow {f:?} not supported");
             }
             let reality = match v.get("reality-opts") {
@@ -119,8 +119,11 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
     Ok((name, def))
 }
 
+/// Named nodes, in file order.
+pub type Nodes = Vec<(String, ProxyDef)>;
+
 /// Parses the `proxies:` list; returns nodes and per-node skip reasons.
-pub fn parse(text: &str) -> Result<(Vec<(String, ProxyDef)>, Vec<String>)> {
+pub fn parse(text: &str) -> Result<(Nodes, Vec<String>)> {
     let doc: Value = serde_yaml::from_str(text).map_err(|e| anyhow!("Clash YAML: {e}"))?;
     let list = doc.get("proxies").and_then(Value::as_sequence).ok_or_else(|| anyhow!("Clash YAML has no proxies list"))?;
     let (mut nodes, mut skipped) = (Vec::new(), Vec::new());

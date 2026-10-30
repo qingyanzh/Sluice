@@ -18,6 +18,8 @@ use crate::vless::VlessServer;
 use crate::vmess::VmessServer;
 use crate::util::{connect_tcp, BoxStream, Host, Target};
 
+// Built once at startup and kept in a map; boxing the big variants would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Outbound {
     Direct,
     Reject,

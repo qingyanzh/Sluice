@@ -46,7 +46,7 @@ impl RealityOpts {
         let trimmed = pbk.trim().trim_end_matches('=');
         let key = URL_SAFE_NO_PAD.decode(trimmed).or_else(|_| STANDARD_NO_PAD.decode(trimmed)).map_err(|_| anyhow!("bad REALITY public key"))?;
         let public_key: [u8; 32] = key.try_into().map_err(|_| anyhow!("REALITY public key must be 32 bytes"))?;
-        if sid.len() > 16 || sid.len() % 2 != 0 {
+        if sid.len() > 16 || !sid.len().is_multiple_of(2) {
             bail!("REALITY short id must be 0-16 hex digits, even length");
         }
         let mut short_id = [0u8; 8];
@@ -157,6 +157,8 @@ impl Suite {
     }
 }
 
+// Built once per connection and never moved on a hot path; boxing would only add an indirection.
+#[allow(clippy::large_enum_variant)]
 enum Aead2 {
     Aes(Aes128Gcm),
     Aes256(Aes256Gcm),

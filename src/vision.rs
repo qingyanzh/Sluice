@@ -26,6 +26,12 @@ use crate::util::BoxStream;
 
 pub const FLOW: &str = "xtls-rprx-vision";
 
+/// Whether `flow` selects Vision. Xray's `-udp443` variant only lifts its client-side block on
+/// UDP/443 (QUIC); on the wire it is plain Vision, and our UDP never carries a flow anyway.
+pub fn is_vision(flow: &str) -> bool {
+    flow == FLOW || flow == "xtls-rprx-vision-udp443"
+}
+
 const CMD_CONTINUE: u8 = 0;
 const CMD_END: u8 = 1;
 const CMD_DIRECT: u8 = 2;
