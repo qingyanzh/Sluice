@@ -39,7 +39,7 @@ final class Updater: ObservableObject {
     }
 
     private init() {
-        guard Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else {
+        guard E2ELaunch.current == nil, Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else {
             controller = nil
             return
         }

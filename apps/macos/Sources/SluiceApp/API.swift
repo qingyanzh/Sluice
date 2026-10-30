@@ -64,15 +64,17 @@ struct APIError: LocalizedError {
 /// Client for the core's control API (see src/api.rs).
 struct APIClient {
     let port: Int
+    let host: String
     let session: URLSession
 
-    init(port: Int, session: URLSession = .shared) {
+    init(port: Int, session: URLSession = .shared, host: String = "127.0.0.1") {
         self.port = port
+        self.host = host
         self.session = session
     }
 
     private func url(_ path: String) -> URL {
-        URL(string: "http://127.0.0.1:\(port)\(path)")!
+        URL(string: "http://\(host):\(port)\(path)")!
     }
 
     private func request(_ method: String, _ path: String, timeout: TimeInterval = 15) async throws -> Data {
