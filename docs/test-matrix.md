@@ -349,6 +349,93 @@ FINAL,REJECT
 | G-232 | 应用菜单命令 | 应用信息之后的命令组（CommandGroup） | `apps/macos/Sources/SluiceApp/SluiceApp.swift:46` | 在应用菜单“关于”之后插入检查更新命令 | 否 | 打开应用菜单，核对位置、只有一个命令项及状态 |  |
 | G-233 | 应用菜单命令 | 检查更新… | `apps/macos/Sources/SluiceApp/SluiceApp.swift:46`<br>`apps/macos/Sources/SluiceApp/Updater.swift:60` | 执行检查更新，与菜单栏共享 canCheck | 是 | 完整 app 测试更新流程及两入口禁用同步；开发构建核对禁用 |  |
 
+## A2. 菜单栏（MenuBarExtra）功能与显示
+
+本节补充 A 节菜单栏入口的逐项检查及显示回归，保留原 G 编号供历史记录引用；M 编号独立计数。动态策略组按模板遍历每个 `select` 组及其每个选项，自动组不应出现。当前 `MenuBarDisplayMode` 只有 `iconAndSpeed`、`iconOnly`、`speedOnly` 三值；两行速度是前者和后者的渲染方式，没有独立的“两行”模式。以下结果全部待执行。
+
+### 菜单及子菜单
+
+| ID | 页面 | 控件（界面显示的中文标签） | 源码 file:line | 预期行为 | 需外网 | 测试方法 | 结果 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| M-001 | 菜单栏入口 | Sluice 图标／实时速度（MenuBarExtra） | `apps/macos/Sources/SluiceApp/SluiceApp.swift:49`<br>`apps/macos/Sources/SluiceApp/SluiceApp.swift:22` | 点击打开原生菜单；主窗口关闭后状态项仍存在 | 否 | 依次使用三种显示模式，关闭主窗口后打开菜单，再点击空白处关闭 |  |
+| M-002 | 菜单栏／状态头 | Sluice · 已停止／启动中…／运行中／出错 | `apps/macos/Sources/SluiceApp/MenuBar.swift:57`<br>`apps/macos/Sources/SluiceApp/Core.swift:108` | 只读标题与内核状态一致 | 否 | 本地配置覆盖停止、启动中、运行、无效配置失败；每次重新打开核对标题；涉及系统代理/TUN 时需无Surge机器 |  |
+| M-003 | 菜单栏／状态头 | 配置：当前配置名 | `apps/macos/Sources/SluiceApp/MenuBar.swift:58`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:26` | 显示当前配置文件去掉扩展名后的名称 | 否 | 切换两份临时配置，含中文及空格文件名；重新打开菜单核对名称 |  |
+| M-004 | 菜单栏／状态头 | ↓ 下载速度／↑ 上传速度／连接数 | `apps/macos/Sources/SluiceApp/MenuBar.swift:59`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:27` | 仅运行中显示，顺序为下载、上传、活动连接数；菜单关闭后重开刷新快照 | 否 | 限速下载本地大文件，对照 API 流量和活动连接；停止后重开确认消失；菜单保持打开时按 M-051 检查冻结 |  |
+| M-005 | 菜单栏／状态头 | 系统代理已开启，内核未运行 | `apps/macos/Sources/SluiceApp/MenuBar.swift:61` | 非运行状态且系统代理开启时显示警告，运行中改显示流量行 | 否 | 需无Surge机器；构造系统代理开、内核停状态，启动后重开菜单核对替换，关闭代理后核对警告消失 |  |
+| M-006 | 菜单栏／状态头 | 系统代理：其他代理说明 | `apps/macos/Sources/SluiceApp/MenuBar.swift:64`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:28` | `otherSystemProxy` 非空时显示只读说明，空时隐藏 | 否 | 需无Surge机器；用受控本地其他代理配置产生说明，对照系统代理状态；恢复后重开菜单核对隐藏 |  |
+| M-007 | 菜单栏 | 启动 Sluice | `apps/macos/Sources/SluiceApp/MenuBar.swift:67` | 停止／失败时显示启动并启动内核；启动中按钮禁用 | 否 | 仅本地配置点击，核对状态和监听端口；启动失败后可重试；涉及系统代理/TUN 时需无Surge机器 |  |
+| M-008 | 菜单栏 | 停止 Sluice | `apps/macos/Sources/SluiceApp/MenuBar.swift:67` | 活动时显示停止，starting 时禁用；运行时可停止 | 否 | 本地启动后停止，核对端口释放和菜单标题；涉及系统代理/TUN 时需无Surge机器并检查网络恢复 |  |
+| M-009 | 菜单栏 | 出站模式：当前模式（子菜单入口） | `apps/macos/Sources/SluiceApp/MenuBar.swift:73`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:81` | 显示当前模式中文名及对应图标；仅运行中可展开 | 否 | 本地配置运行时展开，核对三项和唯一 ✓；停止、启动中、失败时核对禁用 |  |
+| M-010 | 菜单栏／出站模式 | 直接连接 | `apps/macos/Sources/SluiceApp/MenuBar.swift:74`<br>`apps/macos/Sources/SluiceApp/Views.swift:66` | 设置 `direct`，重新打开显示 ✓，策略页与 D 标记同步 | 否 | 本地 DIRECT/REJECT 配置点击，对照 `/v1/mode` 和本地路由；重复点击不取消选中 |  |
+| M-011 | 菜单栏／出站模式 | 全局代理 | `apps/macos/Sources/SluiceApp/MenuBar.swift:74`<br>`apps/macos/Sources/SluiceApp/Views.swift:66` | 设置 `global`，重新打开显示 ✓，策略页与 G 标记同步 | 否 | FINAL 仅用 DIRECT/REJECT，点击后对照 `/v1/mode` 和 FINAL 路由；重复点击核对唯一选中 |  |
+| M-012 | 菜单栏／出站模式 | 规则判定 | `apps/macos/Sources/SluiceApp/MenuBar.swift:74`<br>`apps/macos/Sources/SluiceApp/Views.swift:66` | 设置 `rule`，重新打开显示 ✓，策略页与 R 标记同步 | 否 | 本地规则配置点击，对照 `/v1/mode` 和两条不同匹配规则；重复点击核对唯一选中 |  |
+| M-013 | 菜单栏／策略组 | 组名：当前选择（每个策略组子菜单模板） | `apps/macos/Sources/SluiceApp/MenuBar.swift:87`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:31` | 每个 select 组显示独立入口及当前选项，非运行时禁用；自动组隐藏，无手动组时整段隐藏 | 否 | 配置两个不同名 select 组及 url-test/fallback/load-balance 组，全部成员只用 DIRECT/REJECT；遍历入口并覆盖空组列表 |  |
+| M-014 | 菜单栏／每个策略组 | 选项名称及延迟（每组选项 Button 模板） | `apps/macos/Sources/SluiceApp/MenuBar.swift:90`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:182` | 每个选项为按钮；名称、延迟和当前选项 ✓ 正确，点击只修改所属组 | 否 | 遍历每个手动组的每个选项，切换 DIRECT/REJECT 后对照 API 和策略页；覆盖中文长组名，核对选中其他组不串组 |  |
+| M-015 | 菜单栏／每个策略组选项 | 延迟彩色圆点及未测试／毫秒数／超时 | `apps/macos/Sources/SluiceApp/MenuBar.swift:98`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:187`<br>`apps/macos/Sources/SluiceApp/Latency.swift:6`<br>`apps/macos/Sources/SluiceApp/Views.swift:487` | nil 为灰色未测试，0…199 ms 为绿色，200…499 ms 为警示色，≥500 ms 和负值超时为失败色；原色圆点不被菜单模板染色 | 否 | 用本地延迟 HTTP 服务或受控 API 夹具覆盖 nil、-1、0、199、200、499、500；遍历各组选项，在浅/深色及选中高亮下核对文字和圆点 |  |
+| M-016 | 菜单栏／每个策略组 | 测试延迟／测试中… | `apps/macos/Sources/SluiceApp/MenuBar.swift:103`<br>`apps/macos/Sources/SluiceApp/Core.swift:813` | 仅测试目标组，进行中禁用该按钮，完成后更新延迟并恢复；错误可见 | 否 | 每个组 url 显式指向本地 HTTP 服务，DIRECT 成功、REJECT 失败；延迟响应期间重开观察测试中，检查其他组独立；真实节点或默认公网 URL 需无Surge机器且需外网 |  |
+| M-017 | 菜单栏 | 设置为系统代理 | `apps/macos/Sources/SluiceApp/MenuBar.swift:115`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:34` | 切换系统代理并反映勾选；无 HTTP/SOCKS 监听配置时禁用 | 否 | 需无Surge机器；用本地监听开关，核对 networksetup 和主窗口同步；分别覆盖仅 HTTP、仅 SOCKS、均无配置，最后恢复系统设置 |  |
+| M-018 | 菜单栏 | 增强模式 | `apps/macos/Sources/SluiceApp/MenuBar.swift:120` | 切换增强模式配置，按需授权和重启；失败写入“增强模式：”错误 | 否 | 需无Surge机器；覆盖开关、批准、取消和失败，对照 TUN/路由/DNS 恢复；内核 apple.com 自检允许失败，验证自检成功另需外网 |  |
+| M-019 | 菜单栏 | 重新载入配置 | `apps/macos/Sources/SluiceApp/MenuBar.swift:130` | 运行时重载；停止、启动中或重载中禁用 | 否 | 修改临时配置规则后点击，对照路由；无效配置显示错误；重开核对禁用态；系统代理/TUN 配置需无Surge机器 |  |
+| M-020 | 菜单栏快捷键 | ⌘R | `apps/macos/Sources/SluiceApp/MenuBar.swift:132` | 触发与重新载入配置按钮相同的动作并遵守禁用条件 | 否 | 本地配置运行、停止、重载中分别按键，对照路由及错误；系统代理/TUN 配置需无Surge机器 |  |
+| M-021 | 菜单栏 | 重启内核 | `apps/macos/Sources/SluiceApp/MenuBar.swift:133` | 活动时重启，非活动时禁用 | 否 | 本地配置点击，对照内核进程和监听端口恢复；停止时核对禁用；系统代理/TUN 场景需无Surge机器 |  |
+| M-022 | 菜单栏 | 菜单栏显示（子菜单入口） | `apps/macos/Sources/SluiceApp/MenuBar.swift:137` | 展开三个显示模式和“显示当前的出站模式”，含分隔线；停止时仍可使用 | 否 | 运行/停止均展开，核对项目、顺序及唯一模式 ✓，逐项点击按 M-023…M-026 检查 |  |
+| M-023 | 菜单栏／菜单栏显示 | 显示图标和实时速度 | `apps/macos/Sources/SluiceApp/MenuBar.swift:138`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:10` | 保存 `menuBarDisplayMode=iconAndSpeed`，该项唯一勾选，图标和两行速度显示 | 否 | 从另外两模式分别切入，对照设置页 Picker；重开应用核对持久化；渲染见 M-035 |  |
+| M-024 | 菜单栏／菜单栏显示 | 仅显示图标 | `apps/macos/Sources/SluiceApp/MenuBar.swift:138`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:11` | 保存 `menuBarDisplayMode=iconOnly`，该项唯一勾选，速度隐藏 | 否 | 从另外两模式分别切入，对照设置页并重开应用；渲染见 M-036 |  |
+| M-025 | 菜单栏／菜单栏显示 | 仅显示实时速度 | `apps/macos/Sources/SluiceApp/MenuBar.swift:138`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:12` | 保存 `menuBarDisplayMode=speedOnly`，该项唯一勾选，只显示两行速度 | 否 | 从另外两模式分别切入，对照设置页并重开应用；渲染见 M-037 |  |
+| M-026 | 菜单栏／菜单栏显示 | 显示当前的出站模式 | `apps/macos/Sources/SluiceApp/MenuBar.swift:147`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:39` | 切换 `menuBarShowOutboundMode` 和 ✓，与设置页同步并持久化；图标模式显示或隐藏徽标 | 否 | 三种显示模式分别开关并重开应用；默认开启，speedOnly 下保留偏好但不绘制徽标；R/D/G 逐项见 M-039…M-044 |  |
+| M-027 | 菜单栏 | 显示主窗口 | `apps/macos/Sources/SluiceApp/MenuBar.swift:155`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:196` | 打开或复用 main 窗口并激活应用 | 否 | 窗口关闭、最小化、后台时分别点击，核对窗口激活及没有重复窗口 |  |
+| M-028 | 菜单栏快捷键 | ⌘0 | `apps/macos/Sources/SluiceApp/MenuBar.swift:156` | 执行显示主窗口动作 | 否 | 窗口关闭及应用不在前台时打开菜单按键，核对 main 窗口激活 |  |
+| M-029 | 菜单栏 | 查看请求 | `apps/macos/Sources/SluiceApp/MenuBar.swift:157`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:196` | 激活主窗口并请求切换到请求页 | 否 | 关闭窗口后点击，再从其他页面点击，核对请求页及侧栏选择 |  |
+| M-030 | 菜单栏 | 编辑当前配置 | `apps/macos/Sources/SluiceApp/MenuBar.swift:158` | 激活主窗口并切换配置页，显示当前配置 | 否 | 切换两份本地配置后分别点击，核对文件名；有未保存草稿时再次进入核对草稿保留 |  |
+| M-031 | 菜单栏 | 导出诊断信息… | `apps/macos/Sources/SluiceApp/MenuBar.swift:159`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:40` | 导出脱敏 ZIP 并在 Finder 显示；导出中禁用；失败显示“导出诊断信息失败：”并打开活动页（overview） | 否 | 隔离目录，运行/停止各导出一次，核对脱敏、Finder、并发禁用及不可写目标错误；系统代理/TUN 快照对照需无Surge机器 |  |
+| M-032 | 菜单栏 | 检查更新… | `apps/macos/Sources/SluiceApp/MenuBar.swift:172`<br>`apps/macos/Sources/SluiceApp/Updater.swift:60` | 调用 Sparkle，`canCheck=false` 时禁用，与应用菜单入口同步 | 是 | 完整 app 覆盖无更新、有更新、失败和检查中禁用；开发构建只核对禁用态 |  |
+| M-033 | 菜单栏 | 退出 Sluice | `apps/macos/Sources/SluiceApp/MenuBar.swift:173`<br>`apps/macos/Sources/SluiceApp/SluiceApp.swift:18` | 退出应用并调用 `stopForQuit` 清理拥有的内核与网络状态 | 否 | 本地配置停止/运行时分别退出，检查进程、端口和状态项消失；系统代理/TUN 恢复需无Surge机器 |  |
+| M-034 | 菜单栏快捷键 | ⌘Q | `apps/macos/Sources/SluiceApp/MenuBar.swift:174`<br>`apps/macos/Sources/SluiceApp/SluiceApp.swift:18` | 执行退出动作和相同清理流程 | 否 | 打开菜单按键，核对应用及内核退出；系统代理/TUN 清理分支需无Surge机器 |  |
+
+### 显示设置与渲染
+
+| ID | 页面 | 控件（界面显示的中文标签） | 源码 file:line | 预期行为 | 需外网 | 测试方法 | 结果 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| M-035 | 菜单栏显示 | 图标和实时速度（iconAndSpeed） | `apps/macos/Sources/SluiceApp/MenuBar.swift:229`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:248` | 默认模式显示左侧图标、可选徽标和右侧两行速度；两区不重叠 | 否 | 使用独立偏好域核对默认值，再明确选择此模式；本地限速流量下截图，徽标开关各测一次；宽度稳定性见 M-053/M-054 |  |
+| M-036 | 菜单栏显示 | 仅图标（iconOnly） | `apps/macos/Sources/SluiceApp/MenuBar.swift:15`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:257` | 仅绘制图标和可选徽标，无速度文本 | 否 | 空闲与本地限速流量下核对速度均隐藏；徽标开关核对布局及点击区域，恢复该模式后偏好一致 |  |
+| M-037 | 菜单栏显示 | 仅实时速度（speedOnly） | `apps/macos/Sources/SluiceApp/MenuBar.swift:15`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:256` | 两行速度从左侧开始，无图标、徽标或其预留空白；灰色图标设置禁用 | 否 | 开关出站标记均截图，核对两行及无多余左间距；进入设置页核对灰色选项禁用；宽度稳定性见 M-057/M-058 |  |
+| M-038 | 菜单栏显示 | 两行速度：上行在上／下行在下 | `apps/macos/Sources/SluiceApp/MenuBar.swift:268`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:307` | iconAndSpeed 与 speedOnly 均在 22 pt 高图像内完整显示两行，上传在上、下载在下，文字不截断 | 否 | 两种模式分别空闲、下载本地大文件，对照 API 上下行数据及截图；覆盖普通/Retina 缩放，iconOnly 不显示两行；当前没有独立两行枚举值 |  |
+| M-039 | 菜单栏／出站标记 | 显示当前的出站模式：开，规则判定 R | `apps/macos/Sources/SluiceApp/MenuBar.swift:285`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:320` | rule 下 iconAndSpeed、iconOnly 显示 R 徽标；speedOnly 不绘制 | 否 | 本地切为 rule，三种显示模式逐一开启标记，对照 `/v1/mode` 和截图 |  |
+| M-040 | 菜单栏／出站标记 | 显示当前的出站模式：关，规则判定 R | `apps/macos/Sources/SluiceApp/MenuBar.swift:230`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:285` | rule 下三种模式均隐藏 R；含图标模式释放徽标间距 | 否 | 本地 rule 下三种模式逐一关闭标记，对照设置和截图，重开应用核对保持关闭 |  |
+| M-041 | 菜单栏／出站标记 | 显示当前的出站模式：开，直接连接 D | `apps/macos/Sources/SluiceApp/MenuBar.swift:285`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:318` | direct 下 iconAndSpeed、iconOnly 显示 D 徽标；speedOnly 不绘制 | 否 | 本地切为 direct，三种模式逐一开启标记，对照 `/v1/mode`；由 R 切换后无残留 R |  |
+| M-042 | 菜单栏／出站标记 | 显示当前的出站模式：关，直接连接 D | `apps/macos/Sources/SluiceApp/MenuBar.swift:230`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:285` | direct 下三种模式均隐藏 D | 否 | 本地 direct 下三种模式逐一关闭标记；切换模式和重开菜单后均无徽标 |  |
+| M-043 | 菜单栏／出站标记 | 显示当前的出站模式：开，全局代理 G | `apps/macos/Sources/SluiceApp/MenuBar.swift:285`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:319` | global 下 iconAndSpeed、iconOnly 显示 G 徽标；speedOnly 不绘制 | 否 | FINAL 为 DIRECT/REJECT，切为 global，三种模式逐一开启标记，对照 API；由 D 切换后无残留 D |  |
+| M-044 | 菜单栏／出站标记 | 显示当前的出站模式：关，全局代理 G | `apps/macos/Sources/SluiceApp/MenuBar.swift:230`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:285` | global 下三种模式均隐藏 G | 否 | 本地 global 下三种模式逐一关闭标记，对照设置及截图；重开应用核对偏好 |  |
+| M-045 | 设置／菜单栏与状态项 | 未启用系统代理和增强模式时，将图标显示为灰色：开 | `apps/macos/Sources/SluiceApp/Views.swift:1116`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:259` | 默认开启；代理与增强模式均关闭时墨色 alpha=0.55，任一开启则恢复；speedOnly 下设置禁用 | 否 | 三种显示模式覆盖两开关均关、仅系统代理开、仅 TUN 开、均开；观察图标及速度墨色，徽标仍清晰；启用系统代理/TUN 的对照需无Surge机器，最后恢复 |  |
+| M-046 | 设置／菜单栏与状态项 | 未启用系统代理和增强模式时，将图标显示为灰色：关 | `apps/macos/Sources/SluiceApp/Views.swift:1095`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:261` | 关闭偏好后，未接管网络也不降低墨色透明度；偏好持久化 | 否 | 系统代理/TUN 均关闭，本地三模式对照 M-045，重开应用核对；speedOnly 中无法改此设置，切回含图标模式核对保存值 |  |
+| M-047 | 菜单栏显示 | 浅色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:258`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:287` | 正常墨色为黑，徽标深底白字；失败用系统红色，灰显仍可辨认 | 否 | 将实际 macOS 菜单栏切为浅色，遍历三模式、R/D/G、标记开关、灰显和失败态；截图核对对比度、两行及裁切；系统代理/TUN 对照需无Surge机器 |  |
+| M-048 | 菜单栏显示 | 深色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:258`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:293` | 正常墨色为白，徽标白底黑字；失败用系统红色，灰显仍可辨认 | 否 | 将实际 macOS 菜单栏切为深色，重复 M-047 全部组合，来回切换核对及时重绘；系统代理/TUN 对照需无Surge机器 |  |
+| M-049 | 菜单栏速度格式 | 0 KB/s／KB/s／MB/s／GB/s／TB/s | `apps/macos/Sources/SluiceApp/MenuBar.swift:21` | 十进制单位；KB/s 整数，MB/s 以上数字最多四字符；负数、NaN、无穷值归零 | 否 | 本地流量核对零值及 KB/MB；离线调用格式函数覆盖负值、非有限值、单位边界及 GB/TB；1,000,000 B/s 当前格式为 1.00 MB/s |  |
+| M-050 | 菜单栏可访问性 | Sluice，状态，出站模式，上传／下载每秒速度 | `apps/macos/Sources/SluiceApp/MenuBar.swift:243` | 可访问标签包含状态；含图标且标记开启时含模式名，含速度的模式含上下行速度 | 否 | 用辅助功能检查器遍历三模式、标记开关及 R/D/G，对照视觉内容和实时数值；iconOnly 不读速度，speedOnly 不读徽标模式名 |  |
+
+### 显示稳定性与菜单跟踪
+
+宽度采样共同方法（M-053…M-064）：沿用本地基线，关闭系统代理及增强模式，仅通过显式 HTTP 代理产生 loopback 流量。在临时目录准备足够大的文件（如 128 MiB），以 `python3 -m http.server 18080 --bind 127.0.0.1 --directory <临时目录>` 服务；用 `curl --noproxy '' --proxy http://127.0.0.1:18081 --limit-rate <每秒字节数> --max-time 5 --output /dev/null http://127.0.0.1:18080/large.bin` 连续分段下载，循环不同限速和短暂空闲共至少 30 秒。空的 `--noproxy` 用来避免 loopback 绕过代理；确认 API 流量增加。限时结束是夹具预期，不记为内核失败。边界采样改为在 999000 与 1000000 B/s 两侧持续往返，并对照 API 实际速率和显示文字；必要时延长稳态段，若实际速率一直低于阈值则略调高上侧限速，直到确实跨越边界。
+
+每个用例固定显示模式、出站标记开关、屏幕缩放和其他状态项，先记录状态项 frame；以约 1 秒间隔连续截图 30 秒（至少 30 帧），同时保存时间、上下行速率、frame x/width。可从 `CGWindowListCopyWindowInfo` 中定位 Sluice 状态项窗口边界；若系统未单列状态项，则用辅助功能 frame 配合 `screencapture` 的固定菜单栏区域裁图定位。不得把整个菜单栏窗口宽度或每帧重新裁出的文字宽度当成状态项宽度。以相同坐标单位比较各帧宽度及相邻状态项位置，保存原图和测量表。每行均分别固定出站标记开、关各跑一轮，设置切换本身允许改变布局；一轮内速率变化不得改变宽度或挤动相邻项。浅/深色指实际菜单栏背景，不能只改变应用窗口主题。当前源码按实时字符串测量 `speedWidth`，已知会导致宽度变化、菜单栏跳动；下面是待执行的回归验收，不能据源码把结果填为通过。
+
+| ID | 页面 | 控件（界面显示的中文标签） | 源码 file:line | 预期行为 | 需外网 | 测试方法 | 结果 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| M-051 | 菜单栏／菜单跟踪 | 菜单及子菜单打开期间的状态快照 | `apps/macos/Sources/SluiceApp/MenuBarModel.swift:69`<br>`apps/macos/Sources/SluiceApp/MenuBarModel.swift:86`<br>`apps/macos/Sources/SluiceApp/SluiceApp.swift:50` | 原生菜单跟踪期间内容冻结、不闪退或自动关闭；独立状态项速度继续更新，全部菜单关闭后快照刷新 | 否 | 持续变化的本地限速流量下保持菜单打开至少 30 秒，往返出站/组/显示子菜单并停留；核对状态头冻结而标签更新，关闭重开显示最新状态 |  |
+| M-052 | 菜单栏／菜单跟踪 | 子菜单选择动作与结束跟踪 | `apps/macos/Sources/SluiceApp/MenuBarModel.swift:75`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:76`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:92` | 跟踪结束后动作仍只执行一次，捕获的模式/组/选项正确，无选择无效或菜单意外关闭 | 否 | 本地流量持续更新时逐项选择三出站模式、每组选项、测试延迟和每个显示设置；每次重开对照 API/偏好，覆盖 Esc 取消及快速往返子菜单 |  |
+| M-053 | 菜单栏／宽度稳定性 | 图标和实时速度 × 浅色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:253`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:257` | iconAndSpeed 在速度变化时 frame 宽度恒定、相邻项不跳动，图标和两行不裁切 | 否 | 按共同方法，浅色、iconAndSpeed，循环空闲及 64000/512000/1200000 B/s，约 1 秒一帧采样 30 秒比较宽度；已知动态测宽问题待回归 |  |
+| M-054 | 菜单栏／宽度稳定性 | 图标和实时速度 × 深色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:253`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:257` | 深色下 iconAndSpeed 宽度恒定、无跳动、无裁切 | 否 | 按共同方法，深色、iconAndSpeed，循环空闲及 64000/512000/1200000 B/s，约 1 秒一帧采样 30 秒比较 frame |  |
+| M-055 | 菜单栏／宽度稳定性 | 仅图标 × 浅色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:257` | iconOnly 宽度不受上下行速度变化影响，无隐藏速度占位变化 | 否 | 按共同方法，浅色、iconOnly，变化限速 30 秒、约 1 秒一帧；对照 API 确有流量变化，比较 frame 及相邻项 |  |
+| M-056 | 菜单栏／宽度稳定性 | 仅图标 × 深色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:257` | 深色下 iconOnly 宽度恒定、相邻项不跳动 | 否 | 按共同方法，深色、iconOnly，变化限速 30 秒、约 1 秒一帧；对照 API 和 frame 记录 |  |
+| M-057 | 菜单栏／宽度稳定性 | 仅实时速度 × 浅色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:253`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:256` | speedOnly 在速度变化时宽度恒定，两行不裁切，无相邻项跳动 | 否 | 按共同方法，浅色、speedOnly，循环空闲及 64000/512000/1200000 B/s，约 1 秒一帧采样 30 秒比较 frame；已知动态测宽问题待回归 |  |
+| M-058 | 菜单栏／宽度稳定性 | 仅实时速度 × 深色菜单栏 | `apps/macos/Sources/SluiceApp/MenuBar.swift:253`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:256` | 深色下 speedOnly 宽度恒定、两行完整、相邻项不跳动 | 否 | 按共同方法，深色、speedOnly，循环空闲及 64000/512000/1200000 B/s，约 1 秒一帧采样 30 秒比较 frame |  |
+| M-059 | 菜单栏／单位边界稳定性 | 图标和实时速度 × 浅色：999 KB/s → 1.0 MB/s | `apps/macos/Sources/SluiceApp/MenuBar.swift:25`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:253` | 跨 KB/MB 边界宽度恒定、无跳动或裁切；当前 1.0 MB/s 对应显示 1.00 MB/s | 否 | 按共同方法，浅色、iconAndSpeed，999000/1000000 B/s 两侧往返；约 1 秒截图一次至少 30 秒，确认实际显示跨单位并比较 frame |  |
+| M-060 | 菜单栏／单位边界稳定性 | 图标和实时速度 × 深色：999 KB/s → 1.0 MB/s | `apps/macos/Sources/SluiceApp/MenuBar.swift:25`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:253` | 深色下跨 KB/MB 边界宽度恒定，1.00 MB/s 完整可见 | 否 | 按共同方法，深色、iconAndSpeed，在边界两侧往返，约 1 秒一帧至少 30 秒，对照实际速率、单位及 frame |  |
+| M-061 | 菜单栏／单位边界稳定性 | 仅图标 × 浅色：999 KB/s → 1.0 MB/s | `apps/macos/Sources/SluiceApp/MenuBar.swift:257` | iconOnly 不显示速率，后台跨单位也不改变宽度 | 否 | 按共同方法，浅色、iconOnly，在边界两侧往返，API 证明跨界；约 1 秒截图一次至少 30 秒比较 frame |  |
+| M-062 | 菜单栏／单位边界稳定性 | 仅图标 × 深色：999 KB/s → 1.0 MB/s | `apps/macos/Sources/SluiceApp/MenuBar.swift:257` | 深色下 iconOnly 在后台跨单位时宽度恒定、无跳动 | 否 | 按共同方法，深色、iconOnly，在边界两侧往返，API 证明跨界；约 1 秒一帧至少 30 秒比较 frame |  |
+| M-063 | 菜单栏／单位边界稳定性 | 仅实时速度 × 浅色：999 KB/s → 1.0 MB/s | `apps/macos/Sources/SluiceApp/MenuBar.swift:25`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:253` | speedOnly 跨 KB/MB 边界宽度恒定，两行完整，1.00 MB/s 不裁切 | 否 | 按共同方法，浅色、speedOnly，在边界两侧往返；约 1 秒一帧至少 30 秒，确认实际显示跨单位并比较 frame |  |
+| M-064 | 菜单栏／单位边界稳定性 | 仅实时速度 × 深色：999 KB/s → 1.0 MB/s | `apps/macos/Sources/SluiceApp/MenuBar.swift:25`<br>`apps/macos/Sources/SluiceApp/MenuBar.swift:253` | 深色下 speedOnly 跨单位宽度恒定、相邻项不跳动、文字不裁切 | 否 | 按共同方法，深色、speedOnly，在边界两侧往返；约 1 秒一帧至少 30 秒，对照实际单位及 frame |  |
+
 ## B. CLI
 
 已实际构建并执行 `cargo run -q -- --help`；随后用同次构建的 `target/debug/sluice` 执行根帮助和 `run`、`check`、`route`、`convert`、`mitm`、`mitm gen-ca`、`diag`、`diag export` 各自的 `--help`。程序用 `std::env::args` 手写分派，没有 clap，也没有 `--version` 或 `-h` 专用分支。下表记录实际行为，不把 `--help` 误列为子命令支持的功能标志。`-h`、`--version` 均落入总帮助分支（退出 2），不作为受支持标志计数。六个叶命令：run、check、route、convert、mitm gen-ca、diag export；六个功能标志：route 的五项和 gen-ca 的 --force。
@@ -438,9 +525,10 @@ FINAL,REJECT
 | 部分 | ID 范围 | 测试项数 |
 | --- | --- | --- |
 | A. GUI | G-001…G-233 | 233 |
+| A2. 菜单栏（MenuBarExtra）功能与显示 | M-001…M-064 | 64 |
 | B. CLI | C-001…C-031 | 31 |
 | C. Control API | A-001…A-035 | 35 |
-| 合计 |  | 299 |
+| 合计 |  | 363 |
 
 GUI 分组明细：
 
@@ -456,6 +544,8 @@ GUI 分组明细：
 | 配置管理与文本编辑 | 31 |
 | 规则与策略组结构化编辑 | 33 |
 | 菜单栏与应用命令 | 25 |
+
+A2 分组明细：菜单及子菜单 34 项（M-001…M-034），显示设置与渲染 16 项（M-035…M-050），显示稳定性与菜单跟踪 14 项（M-051…M-064），共 64 项；均为待执行用例，不沿用原 G 行的历史执行结论。
 
 全部结果待执行后填写；本文没有把扫描、编译或帮助命令检查记为功能通过。
 
