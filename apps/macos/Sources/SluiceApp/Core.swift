@@ -57,6 +57,7 @@ extension Connection {
 /// What the app reads from the config file itself (the core owns the rest).
 struct ConfigSummary {
     var apiPort: Int?
+    var apiListen: String?
     var httpListen: String?
     var socksListen: String?
     var enhancedMode = false
@@ -80,13 +81,18 @@ struct ConfigSummary {
             let key = line[..<eq].trimmingCharacters(in: .whitespaces)
             let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
             switch key {
-            case "api-listen": apiPort = Int(value.split(separator: ":").last ?? "")
+            case "api-listen": apiListen = value; apiPort = Int(value.split(separator: ":").last ?? "")
             case "http-listen": httpListen = value
             case "socks5-listen": socksListen = value
             case "enhanced-mode": enhancedMode = value == "true" || value == "1"
             default: break
             }
         }
+    }
+
+    func requiresRestart(comparedTo running: ConfigSummary) -> Bool {
+        apiListen != running.apiListen || httpListen != running.httpListen
+            || socksListen != running.socksListen || enhancedMode != running.enhancedMode
     }
 }
 
@@ -113,6 +119,12 @@ final class Core: ObservableObject {
     @Published private(set) var groups: [PolicyGroup] = []
     @Published private(set) var logs: [LogLine] = []
     @Published private(set) var connections: [Connection] = []
+    @Published private(set) var activeConnections: [ActiveConnection] = []
+    @Published private(set) var activeConnectionsError: String?
+    @Published private(set) var eventsConnected = false
+    @Published private(set) var testingNodes: Set<String> = []
+    @Published private(set) var nodeTests: [String: NodeTestResult] = [:]
+    @Published private(set) var nodeLatencies: [String: Int] = [:]
     @Published private(set) var summary = ConfigSummary(text: "")
     @Published var lastActionError: String?
     @Published private(set) var systemProxyOn = false
@@ -153,6 +165,13 @@ final class Core: ObservableObject {
     private var logOffset: UInt64 = 0
     private var stopping = false
     private var pollTask: Task<Void, Never>?
+    private var eventTask: Task<Void, Never>?
+    private var eventRefreshTask: Task<Void, Never>?
+    private var monitoringID = UUID()
+    private var observingActiveConnections = false
+    private var runningSummary: ConfigSummary?
+    private var requestsDirty = true
+    private var latencyRevision = 0
     private var pending = ""
     private var nextID = 0
     private let maxLines = 2000
@@ -210,7 +229,9 @@ final class Core: ObservableObject {
         refreshSummary()
     }
 
-    var api: APIClient? { summary.apiPort.map { APIClient(port: $0) } }
+    var api: APIClient? {
+        (isActive ? (runningSummary ?? summary) : summary).apiPort.map { APIClient(port: $0) }
+    }
 
     /// The core binary: bundled in the app, or $SLUICE_CORE, or the repo's release build.
     var coreBinary: URL? {
@@ -267,6 +288,7 @@ final class Core: ObservableObject {
 
         usesConnectionAPI = true
         resetStats()
+        runningSummary = summary
 
         if summary.enhancedMode {
             startPrivileged(binary)
@@ -440,6 +462,16 @@ final class Core: ObservableObject {
 
     private func exited(code: Int32) {
         pollTask?.cancel()
+        eventTask?.cancel()
+        eventTask = nil
+        eventRefreshTask?.cancel()
+        eventRefreshTask = nil
+        runningSummary = nil
+        eventsConnected = false
+        activeConnections = []
+        activeConnectionsError = nil
+        nodeTests = [:]
+        nodeLatencies = [:]
         process = nil
         rootPID = nil
         privileged = false
@@ -500,52 +532,203 @@ final class Core: ObservableObject {
         }
     }
 
+    private func refreshConnections(_ api: APIClient) async {
+        guard usesConnectionAPI else { return }
+        let generation = monitoringID
+        do {
+            let fresh = try await api.connections()
+            guard !Task.isCancelled, state == .running, monitoringID == generation else { return }
+            if let fresh {
+                connections = Array(fresh.filter { !clearedConnectionIDs.contains($0.id) }.suffix(maxLines))
+            } else {
+                usesConnectionAPI = false
+                connections = logs.compactMap { connection(from: $0) }
+            }
+        } catch { /* Preserve the last good snapshot on a transient failure. */ }
+    }
+
+    private func refreshActiveConnections(_ api: APIClient) async {
+        let generation = monitoringID
+        do {
+            let fresh = try await api.activeConnections()
+            guard !Task.isCancelled, state == .running, monitoringID == generation else { return }
+            activeConnections = fresh
+            activeConnectionsError = nil
+        } catch {
+            guard !Task.isCancelled, state == .running, monitoringID == generation else { return }
+            activeConnectionsError = "活动连接刷新失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func followEvents(_ api: APIClient) async {
+        var backoff: Double = 1
+        while !Task.isCancelled {
+            let started = Date()
+            do {
+                try await api.events {
+                    try Task.checkCancellation()
+                    self.eventsConnected = true
+                    // Reconcile events missed during a disconnect before consuming new frames.
+                    await self.refreshConnections(api)
+                    await self.refreshActiveConnections(api)
+                } receive: { frame in
+                    try await self.receiveEvent(frame, api: api)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                // Resume at the end of the root log: SSE already delivered earlier lines.
+                if rootPID != nil, eventsConnected {
+                    logOffset = (try? FileManager.default.attributesOfItem(atPath: rootLog)[.size] as? NSNumber)?.uint64Value ?? logOffset
+                }
+                eventsConnected = false
+                eventRefreshTask?.cancel()
+                eventRefreshTask = nil
+                requestsDirty = true
+            }
+            if Date().timeIntervalSince(started) > 30 { backoff = 1 }
+            do { try await Task.sleep(for: .seconds(backoff)) } catch { return }
+            backoff = min(backoff * 2, 30)
+        }
+    }
+
+    private func receiveEvent(_ frame: SSEFrame, api: APIClient) async throws {
+        try Task.checkCancellation()
+        let data = Data(frame.data.utf8)
+        let decoder = JSONDecoder()
+        switch frame.event {
+        case "traffic":
+            let event = try decoder.decode(TrafficEvent.self, from: data)
+            let time = Date(timeIntervalSince1970: Double(event.timeMs) / 1000)
+            traffic = Traffic(up: event.totalUp, down: event.totalDown, active: event.active)
+            upRate = Double(event.up)
+            downRate = Double(event.down)
+            lastTrafficSampleAt = time
+            rateHistory.append((upRate, downRate))
+            if rateHistory.count > 60 { rateHistory.removeFirst(rateHistory.count - 60) }
+            if let traffic { trafficHistory.record(traffic, at: time) }
+            if statsFallback { statsHistory = trafficHistory.samples }
+            if let stats {
+                var history = stats.history.filter { $0.timeMs < event.timeMs }
+                history.append(TrafficStatsSample(timeMs: event.timeMs, up: event.up, down: event.down, policies: event.policies))
+                self.stats = TrafficStats(up: event.totalUp, down: event.totalDown, active: event.active,
+                                          policies: stats.policies, nodes: stats.nodes, history: Array(history.suffix(600)))
+            }
+            refreshEventSnapshots(api)
+        case "conn_open":
+            let connection = try decoder.decode(ActiveConnection.self, from: data)
+            activeConnections.removeAll { $0.id == connection.id }
+            activeConnections.append(connection)
+            requestsDirty = true
+        case "conn_close":
+            let connection = try decoder.decode(ActiveConnection.self, from: data)
+            activeConnections.removeAll { $0.id == connection.id }
+            requestsDirty = true
+        case "log":
+            let log = try decoder.decode(LogEvent.self, from: data)
+            let time = Self.clock.string(from: Date(timeIntervalSince1970: Double(log.timeMs) / 1000))
+            appendLog(time: time, level: log.level, message: log.message)
+            // Routing decisions include UDP and rejected requests, which have no
+            // active TCP event. A log event invalidates that snapshot as well.
+            requestsDirty = true
+            if !usesConnectionAPI, let line = logs.last, let connection = connection(from: line) {
+                connections.append(connection)
+                if connections.count > maxLines { connections.removeFirst(connections.count - maxLines) }
+            }
+        default: break
+        }
+    }
+
+    /// SSE carries counters at open/close only. While the activity tab is visible,
+    /// fetch its rates after traffic events. Coalesce snapshot requests so a slow
+    /// endpoint never blocks delivery of logs or connection events.
+    private func refreshEventSnapshots(_ api: APIClient) {
+        guard eventRefreshTask == nil else { return }
+        let generation = monitoringID
+        let refreshRequests = requestsDirty
+        requestsDirty = false
+        eventRefreshTask = Task {
+            defer { if monitoringID == generation { eventRefreshTask = nil } }
+            if observingActiveConnections { await refreshActiveConnections(api) }
+            if refreshRequests { await refreshConnections(api) }
+        }
+    }
+
+    func observeActiveConnections(_ observing: Bool) {
+        observingActiveConnections = observing
+        if observing, state == .running, let api {
+            Task { await refreshActiveConnections(api) }
+        }
+    }
+
     private func poll() async {
+        let generation = UUID()
+        monitoringID = generation
         var tick = 0
         var lastStatsPoll = Date.distantPast
-        var connectionsSupported = true
         usesConnectionAPI = true
         clearedConnectionIDs = []
+        defer {
+            if monitoringID == generation {
+                eventTask?.cancel()
+                eventTask = nil
+                eventRefreshTask?.cancel()
+                eventRefreshTask = nil
+                eventsConnected = false
+            }
+        }
         while !Task.isCancelled {
             if let pid = rootPID {
-                followLog()
+                if !eventsConnected { followLog() }
                 if !Core.alive(pid) {
                     followLog()
                     exited(code: stopping ? 0 : 1)
                     return
                 }
             }
-            if let api, state == .starting || tick % 2 == 0, let fresh = try? await api.policies() {
-                groups = fresh
+            if let api, state == .starting || tick % 2 == 0, await refreshPolicies(api) {
                 if state == .starting { state = .running }
                 if let m = try? await api.mode() { mode = m }
             }
+            guard !Task.isCancelled else { return }
             if let api, state == .running {
-                await sampleTraffic(api)
-                if Date().timeIntervalSince(lastStatsPoll) >= 1 {
+                if eventTask == nil { eventTask = Task { await self.followEvents(api) } }
+                if !eventsConnected {
+                    await sampleTraffic(api)
+                    await refreshConnections(api)
+                    if observingActiveConnections { await refreshActiveConnections(api) }
+                }
+                if Date().timeIntervalSince(lastStatsPoll) >= 5 {
                     await sampleStats(api)
                     lastStatsPoll = Date()
                 }
-                if connectionsSupported {
-                    do {
-                        let fresh = try await api.connections()
-                        guard !Task.isCancelled else { return }
-                        if let fresh {
-                            usesConnectionAPI = true
-                            connections = Array(fresh.filter { !clearedConnectionIDs.contains($0.id) }.suffix(maxLines))
-                        } else {
-                            connectionsSupported = false
-                            usesConnectionAPI = false
-                            connections = logs.compactMap { connection(from: $0) }
-                        }
-                    } catch {
-                        // Keep the last records on a transient API or decoding failure.
-                    }
-                }
             }
             tick += 1
-            // Policies every 2 s, traffic every 1 s; faster while starting or following a root log.
-            try? await Task.sleep(for: .seconds(state == .starting || rootPID != nil ? 0.3 : 1))
+            // Low-frequency policy/stats maintenance; live activity uses SSE.
+            try? await Task.sleep(for: .seconds(state == .starting ? 0.3 : 1))
+        }
+    }
+
+    private func refreshPolicies(_ api: APIClient) async -> Bool {
+        let revision = latencyRevision
+        let generation = monitoringID
+        guard let fresh = try? await api.policies(), !Task.isCancelled, generation == monitoringID else { return false }
+        updateGroups(fresh, preferTestResults: revision != latencyRevision)
+        return true
+    }
+
+    private func updateGroups(_ fresh: [PolicyGroup], preferTestResults: Bool = false) {
+        // A request started before a test finished must not overwrite its results.
+        // Subsequent snapshots carry the core's newer automatic health checks.
+        if !preferTestResults {
+            for option in fresh.flatMap(\.options) {
+                if let latency = option.latencyMs { nodeLatencies[option.name] = latency }
+            }
+        }
+        groups = fresh.map { group in
+            PolicyGroup(group: group.group, type: group.type, selected: group.selected,
+                        options: group.options.map { option in
+                            GroupOption(name: option.name, latencyMs: nodeLatencies[option.name] ?? option.latencyMs)
+                        })
         }
     }
 
@@ -557,7 +740,7 @@ final class Core: ObservableObject {
             do {
                 try await body(api)
                 lastActionError = nil
-                if let fresh = try? await api.policies() { groups = fresh }
+                _ = await refreshPolicies(api)
             } catch {
                 lastActionError = "\(what)失败：\(error.localizedDescription)"
             }
@@ -580,11 +763,56 @@ final class Core: ObservableObject {
                 if testingGroups.isEmpty { testingTotal = 0 }
             }
             do {
-                try await api.test(group: group)
-                if let fresh = try? await api.policies() { groups = fresh }
+                let result = try await api.test(group: group)
+                latencyRevision += 1
+                for option in result.results { nodeLatencies[option.name] = option.latencyMs ?? -1 }
+                updateGroups(groups.map { current in
+                    PolicyGroup(group: current.group, type: current.type,
+                                selected: current.group == result.tested ? result.selected : current.selected,
+                                options: current.options)
+                }, preferTestResults: true)
+                lastActionError = nil
             } catch {
                 lastActionError = "测试 \(group) 失败：\(error.localizedDescription)"
             }
+        }
+    }
+
+    func test(node: String) {
+        guard state == .running, let api, !testingNodes.contains(node) else { return }
+        testingNodes.insert(node)
+        Task {
+            defer { testingNodes.remove(node) }
+            do {
+                let result = try await api.test(node: node)
+                latencyRevision += 1
+                nodeTests[node] = result
+                nodeLatencies[node] = result.ok ? (result.latencyMs ?? -1) : -1
+                updateGroups(groups, preferTestResults: true)
+                lastActionError = nil
+            } catch { lastActionError = "测试 \(node) 失败：\(error.localizedDescription)" }
+        }
+    }
+
+    func closeConnection(_ id: UInt64) {
+        guard state == .running, let api else { return }
+        Task {
+            do {
+                try await api.closeConnection(id)
+                activeConnections.removeAll { $0.id == id }
+                lastActionError = nil
+            } catch { lastActionError = "断开连接失败：\(error.localizedDescription)" }
+        }
+    }
+
+    func closeAllConnections() {
+        guard state == .running, let api else { return }
+        Task {
+            do {
+                try await api.closeAllConnections()
+                await refreshActiveConnections(api)
+                lastActionError = nil
+            } catch { lastActionError = "全部断开失败：\(error.localizedDescription)" }
         }
     }
 
@@ -620,8 +848,12 @@ final class Core: ObservableObject {
         reloading = true
         defer { reloading = false }
         try await api.reload()
+        nodeLatencies = [:]
+        nodeTests = [:]
         refreshSummary()
-        if let fresh = try? await api.policies() { groups = fresh }
+        if summary.requiresRestart(comparedTo: runningSummary ?? summary) { restart() }
+        else { runningSummary = summary }
+        _ = await refreshPolicies(api)
     }
 
     func route(_ target: String) async throws -> RouteResult {
@@ -651,12 +883,23 @@ final class Core: ObservableObject {
         refreshProfiles()
     }
 
-    func renameProfile(_ name: String, to newName: String) throws {
+    func renameProfile(_ name: String, to newName: String) async throws {
         let store = try profiles()
         let wasActive = store.activeName == name
         if wasActive { try requireProfileChange() }
         try store.rename(name, to: newName)
-        if wasActive { applyProfilePath(store) }
+        if wasActive {
+            reloading = true
+            defer { reloading = false }
+            do {
+                if state == .running, let api { try await api.switchProfile(path: store.url(for: newName).path) }
+                applyProfilePath(store)
+            } catch {
+                try? store.rename(newName, to: name)
+                refreshProfiles()
+                throw error
+            }
+        }
         refreshProfiles()
     }
 
@@ -665,12 +908,32 @@ final class Core: ObservableObject {
         refreshProfiles()
     }
 
-    func switchProfile(to name: String) throws {
+    func switchProfile(to name: String) async throws {
         try requireProfileChange()
         let store = try profiles()
         guard name != store.activeName else { return }
+        try ProfileStore.validateName(name)
+        guard try store.names().contains(name) else { throw ProfileStore.StoreError.missingProfile }
+        let path = store.url(for: name).path
+        let next = ConfigSummary(text: try String(contentsOfFile: path, encoding: .utf8))
+        let needsRestart = next.requiresRestart(comparedTo: runningSummary ?? summary)
+        let wasRunning = state == .running
+        reloading = true
+        defer { reloading = false }
+        if wasRunning {
+            guard let api else { throw APIError(message: "未配置控制 API") }
+            // The core validates/builds first; a 400 leaves both selections unchanged.
+            try await api.switchProfile(path: path)
+        }
         try store.activate(name)
         applyProfilePath(store)
+        nodeTests = [:]
+        nodeLatencies = [:]
+        if wasRunning && needsRestart { restart() }
+        else if wasRunning {
+            runningSummary = next
+            if let api { _ = await refreshPolicies(api) }
+        }
     }
 
     private func requireProfileChange() throws {
@@ -682,8 +945,6 @@ final class Core: ObservableObject {
         guard configPath != path else { return }
         configPath = path
         refreshSummary()
-        // Reload has no path parameter: restart so `run` receives the new file.
-        if isActive { restart() }
     }
 
     func readConfig() -> String {
@@ -888,6 +1149,7 @@ final class Core: ObservableObject {
             appendLog(level: line.hasPrefix("error:") ? "ERROR" : "OUT", message: line)
             return
         }
+        guard !eventsConnected else { return }
         let (time, level, message) = (String(m.1), String(m.2), String(m.3))
         appendLog(time: time, level: level, message: message)
         if !usesConnectionAPI, let log = logs.last, let connection = connection(from: log) {

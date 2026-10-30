@@ -947,7 +947,7 @@ struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: DS.gap) {
                 SectionTitle(text: "网络接管")
                 LazyVGrid(columns: columns, spacing: DS.gap) {
                     FeatureCard(icon: "network", title: "系统代理",
@@ -959,6 +959,14 @@ struct OverviewView: View {
                                 statusOn: core.systemProxyOn && core.state == .running,
                                 statusTone: core.systemProxyOn && core.state != .running ? DS.warn : nil)
                         .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
+                    FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
+                                detail: "为其他应用提供本机 HTTP 和 SOCKS5 代理。",
+                                status: [core.summary.httpListen.map { "HTTP \($0)" }, core.summary.socksListen.map { "SOCKS5 \($0)" }]
+                                    .compactMap { $0 }.joined(separator: "  ").ifEmpty("已禁用"),
+                                statusOn: core.state == .running && (core.summary.httpListen != nil || core.summary.socksListen != nil))
+                }.entrance(0)
+                SectionTitle(text: "增强模式")
+                LazyVGrid(columns: columns, spacing: DS.gap) {
                     FeatureCard(icon: "shield.lefthalf.filled", title: "增强模式",
                                 detail: "同时接管不遵循系统代理的应用，需要管理员授权。",
                                 isOn: Binding(get: { core.summary.enhancedMode }, set: { on in
@@ -969,21 +977,28 @@ struct OverviewView: View {
                                     }
                                 }),
                                 status: core.privileged ? "增强模式已激活" : core.summary.enhancedMode ? "已启用，启动后生效" : "已禁用",
-                                statusOn: core.privileged)
+                                statusOn: core.privileged, contentHeight: 180)
                         .disabled(enhancedBusy)
-                }.entrance(0)
+                    HelperSettingsCard()
+                }.entrance(1)
                 SectionTitle(text: "代理服务")
                 LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
-                                detail: "为其他应用提供本机 HTTP 和 SOCKS5 代理。",
-                                status: [core.summary.httpListen.map { "HTTP \($0)" }, core.summary.socksListen.map { "SOCKS5 \($0)" }]
-                                    .compactMap { $0 }.joined(separator: "  ").ifEmpty("已禁用"),
-                                statusOn: core.state == .running && (core.summary.httpListen != nil || core.summary.socksListen != nil))
                     FeatureCard(icon: "terminal", title: "控制 API",
                                 detail: "用于切换策略、读取流量和测试规则。",
                                 status: core.summary.apiPort.map { "127.0.0.1:\($0)" } ?? "未配置（应用需要它）",
                                 statusOn: core.state == .running && core.summary.apiPort != nil)
-                }.entrance(1)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 10) {
+                            IconTile(symbol: "doc.text", size: 28)
+                            Text("当前配置").font(DS.heading)
+                        }
+                        Text(core.configPath).font(DS.small).foregroundStyle(DS.ink2)
+                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(core.configPath)
+                        Spacer(minLength: 0)
+                        Button("显示文件") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
+                    }
+                    .frame(minHeight: 120, alignment: .topLeading).card()
+                }.entrance(2)
                 HStack(spacing: 8) {
                     if let listen = core.summary.httpListen, let (host, port) = SystemProxy.split(listen) {
                         Button { copyText("http://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
@@ -1005,17 +1020,11 @@ struct OverviewView: View {
                                 status: core.autoStart ? "已启用" : "已禁用", statusOn: core.autoStart)
                     LoginItemCard()
                 }.entrance(2)
-                AppearanceCard().entrance(3)
-                MenuBarSettingsCard().entrance(4)
-                HStack(spacing: 12) {
-                    IconTile(symbol: "doc.text", size: 30)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("当前配置").font(DS.heading)
-                        Text(core.configPath).font(DS.small).foregroundStyle(DS.ink2).lineLimit(2).textSelection(.enabled)
-                    }
-                    Spacer(minLength: 8)
-                    Button("显示文件") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
-                }.card().entrance(5)
+                UpdateSettingsCard().entrance(3)
+                AppearanceCard().entrance(4)
+                MenuBarSettingsCard().entrance(5)
+                SectionTitle(text: "诊断")
+                DiagnosticsSettingsCard().entrance(6)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -1031,6 +1040,7 @@ struct FeatureCard: View {
     let status: String
     let statusOn: Bool
     var statusTone: Color? = nil
+    var contentHeight: CGFloat = 120
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1044,7 +1054,7 @@ struct FeatureCard: View {
             Spacer(minLength: 8)
             StatusBadge(text: status, tone: statusTone ?? (statusOn ? DS.ok : .secondary))
         }
-        .frame(height: 120, alignment: .topLeading)
+        .frame(height: contentHeight, alignment: .topLeading)
         .card()
     }
 }
@@ -1235,6 +1245,13 @@ struct OptionChip: View {
     @State private var hovering = false
 
     var body: some View {
+        optionContent.contextMenu {
+            Button(core.testingNodes.contains(option.name) ? "测试中…" : "测试节点") { core.test(node: option.name) }
+                .disabled(core.state != .running || core.testingNodes.contains(option.name))
+        }
+    }
+
+    @ViewBuilder private var optionContent: some View {
         if group.isSelectable {
             Button {
                 if group.selected != option.name { core.select(group: group.group, option: option.name) }
@@ -1406,6 +1423,7 @@ struct RequestsView: View {
     @State private var selection: Connection.ID?
     @State private var paused = false
     @State private var frozen: [Connection] = []
+    @State private var activity = false
 
     /// Which outbounds to show.
     enum OutboundKind: Hashable { case all, proxy, direct, reject
@@ -1428,70 +1446,80 @@ struct RequestsView: View {
         let showsProcess = source.contains { !($0.process ?? "").isEmpty }
         let filtering = kind != .all || !filter.isEmpty
         VStack(spacing: 0) {
-            PaneHeader(title: "请求", subtitle: filtering ? "显示 \(rows.count) / \(source.count) 个请求" : "\(source.count) 个请求") {
-                GlassSegmented(options: [(OutboundKind.all, "全部", nil), (.proxy, "代理", nil), (.direct, "直连", nil), (.reject, "拒绝", nil)],
-                               selection: $kind)
-                    .frame(width: 250)
-                SearchField(prompt: "目标、进程、策略或出站", text: $filter)
-                Button {
-                    if !paused { frozen = core.connections }
-                    paused.toggle()
-                } label: { Label(paused ? "继续更新" : "暂停更新", systemImage: paused ? "play.fill" : "pause") }
-                    .labelStyle(.iconOnly).help(paused ? "继续更新请求列表" : "暂停列表更新以查看请求，流量不受影响")
-                Button { core.clearConnections(); frozen = []; selection = nil } label: { Label("清除", systemImage: "trash") }
-                    .labelStyle(.iconOnly).disabled(source.isEmpty)
+            PaneHeader(title: "请求", subtitle: activity ? "\(core.activeConnections.count) 个活动 TCP 连接" : filtering ? "显示 \(rows.count) / \(source.count) 个请求" : "\(source.count) 个请求") {
+                GlassSegmented(options: [(false, "最近", nil), (true, "活动", nil)], selection: $activity)
+                    .frame(width: 140)
             }
-            HStack(spacing: DS.gap) {
-                VStack(spacing: 0) {
-                    if showsProcess {
-                        HStack(spacing: 12) {
-                            Text("目标与路由").frame(maxWidth: .infinity, alignment: .leading)
-                            Text("进程").frame(width: 100, alignment: .leading)
-                        }
-                        .font(DS.caption).foregroundStyle(DS.ink2)
-                        .padding(.horizontal, 18).padding(.vertical, 12)
-                        Divider()
-                    }
-                    ScrollView {
-                        LazyVStack(spacing: 2) {
-                            ForEach(Array(rows)) { c in
-                                RequestRow(connection: c, selected: c.id == selection, showsProcess: showsProcess) {
-                                    withAnimation(DS.spring) { selection = c.id }
-                                }
-                                .contextMenu {
-                                    Button("复制目标") { copyText(c.target) }
-                                    Button("复制匹配规则") { copyText(c.rule) }
-                                }
-                            }
-                        }
-                        .padding(6)
-                    }
-                    .overlay {
-                        if rows.isEmpty {
-                            if !core.isActive && core.connections.isEmpty {
-                                EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                           detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
-                            } else {
-                                EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
-                                           detail: filtering ? "试试其他关键词，或清除筛选查看全部请求。" : "经过 Sluice 的连接会实时显示在这里。",
-                                           action: filtering ? ("清除筛选", { filter = ""; kind = .all }) : nil)
-                            }
-                        }
-                    }
+            if activity {
+                ActiveRequestsView()
+            } else {
+                HStack(spacing: 12) {
+                    GlassSegmented(options: [(OutboundKind.all, "全部", nil), (.proxy, "代理", nil), (.direct, "直连", nil), (.reject, "拒绝", nil)],
+                                   selection: $kind)
+                        .frame(width: 250)
+                    SearchField(prompt: "目标、进程、策略或出站", text: $filter)
+                    Button {
+                        if !paused { frozen = core.connections }
+                        paused.toggle()
+                    } label: { Label(paused ? "继续更新" : "暂停更新", systemImage: paused ? "play.fill" : "pause") }
+                        .labelStyle(.iconOnly).help(paused ? "继续更新请求列表" : "暂停列表更新以查看请求，流量不受影响")
+                    Button { core.clearConnections(); frozen = []; selection = nil } label: { Label("清除", systemImage: "trash") }
+                        .labelStyle(.iconOnly).disabled(source.isEmpty)
                 }
-                .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
-                .glass().entrance(0)
-                RequestDetail(connection: source.first { $0.id == selection })
-                    .frame(width: 240)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .glass().entrance(1)
+                .glassButton()
+                .padding(.horizontal, DS.gutter).padding(.bottom, 12)
+                HStack(spacing: DS.gap) {
+                    VStack(spacing: 0) {
+                        if showsProcess {
+                            HStack(spacing: 12) {
+                                Text("目标与路由").frame(maxWidth: .infinity, alignment: .leading)
+                                Text("进程").frame(width: 100, alignment: .leading)
+                            }
+                            .font(DS.caption).foregroundStyle(DS.ink2)
+                            .padding(.horizontal, 18).padding(.vertical, 12)
+                            Divider()
+                        }
+                        ScrollView {
+                            LazyVStack(spacing: 2) {
+                                ForEach(Array(rows)) { c in
+                                    RequestRow(connection: c, selected: c.id == selection, showsProcess: showsProcess) {
+                                        withAnimation(DS.spring) { selection = c.id }
+                                    }
+                                    .contextMenu {
+                                        Button("复制目标") { copyText(c.target) }
+                                        Button("复制匹配规则") { copyText(c.rule) }
+                                    }
+                                }
+                            }
+                            .padding(6)
+                        }
+                        .overlay {
+                            if rows.isEmpty {
+                                if !core.isActive && core.connections.isEmpty {
+                                    EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
+                                               detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
+                                } else {
+                                    EmptyState(icon: "arrow.up.arrow.down", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
+                                               detail: filtering ? "试试其他关键词，或清除筛选查看全部请求。" : "经过 Sluice 的连接会实时显示在这里。",
+                                               action: filtering ? ("清除筛选", { filter = ""; kind = .all }) : nil)
+                                }
+                            }
+                        }
+                    }
+                    .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
+                    .glass().entrance(0)
+                    RequestDetail(connection: source.first { $0.id == selection })
+                        .frame(width: 240)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .glass().entrance(1)
+                }
+                .padding(.horizontal, DS.gutter).padding(.bottom, 8)
+                HStack {
+                    Circle().fill(paused ? DS.warn : core.state == .running ? DS.ok : DS.off).frame(width: 6, height: 6)
+                    Text(paused ? "列表已暂停 · 网络流量继续运行" : "仅记录最近 2000 条连接事件")
+                    Spacer()
+                }.font(DS.caption).foregroundStyle(DS.ink2).padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
-            .padding(.horizontal, DS.gutter).padding(.bottom, 8)
-            HStack {
-                Circle().fill(paused ? DS.warn : core.state == .running ? DS.ok : DS.off).frame(width: 6, height: 6)
-                Text(paused ? "列表已暂停 · 网络流量继续运行" : "仅记录最近 2000 条连接事件")
-                Spacer()
-            }.font(DS.caption).foregroundStyle(DS.ink2).padding(.horizontal, DS.gutter).padding(.bottom, 12)
         }
         .onChange(of: rows.map(\.id)) {
             if let selection, !rows.contains(where: { $0.id == selection }) { self.selection = nil }
@@ -2135,7 +2163,7 @@ struct ConfigView: View {
                     try core.duplicateProfile(source, as: name)
                 case .rename(let source):
                     let active = core.activeProfileName == source
-                    try core.renameProfile(source, to: name)
+                    try await core.renameProfile(source, to: name)
                     // Renaming the active file preserves its unsaved editor contents.
                     if active { draft.path = core.configPath }
                 }
@@ -2175,14 +2203,19 @@ struct ConfigView: View {
     }
 
     private func switchProfile(_ name: String) {
-        do {
-            try core.switchProfile(to: name)
-            draft.message = nil
-            load()
-        } catch {
-            core.lastActionError = error.localizedDescription
-        }
         pendingSwitch = nil
+        draft.busy = true
+        Task {
+            defer { draft.busy = false }
+            do {
+                try await core.switchProfile(to: name)
+                draft.message = nil
+                load()
+            } catch {
+                draft.message = (error.localizedDescription, false)
+                core.lastActionError = error.localizedDescription
+            }
+        }
     }
 }
 

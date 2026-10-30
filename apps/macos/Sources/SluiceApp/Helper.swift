@@ -1,6 +1,77 @@
+import Combine
 import Foundation
 import ServiceManagement
 import SluiceHelperShared
+
+/// Presentation state is separate from whether enhanced mode is enabled in the config.
+enum HelperStatus: Equatable {
+    case notInstalled, needsApproval, ready, failed(String)
+
+    static func resolve(bundled: Bool, status: SMAppService.Status, error: String? = nil) -> Self {
+        guard bundled else { return .failed("请从完整的 Sluice.app 运行。此构建未包含增强模式辅助程序。") }
+        switch status {
+        case .enabled: return .ready
+        case .requiresApproval: return .needsApproval
+        case .notRegistered:
+            return error.map { .failed($0) } ?? .notInstalled
+        case .notFound:
+            return .failed(error ?? "找不到增强模式辅助程序，请重新安装完整的 Sluice.app 后重试。")
+        @unknown default:
+            return .failed(error ?? "无法识别辅助程序状态，请重试。")
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .notInstalled: "未安装"
+        case .needsApproval: "待批准"
+        case .ready: "已就绪"
+        case .failed: "错误"
+        }
+    }
+
+    var action: String {
+        switch self {
+        case .notInstalled: "安装辅助程序"
+        case .needsApproval: "打开系统设置"
+        case .ready: "刷新状态"
+        case .failed: "重试"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .notInstalled: "安装后可由辅助程序启动增强模式，减少重复的管理员授权。"
+        case .needsApproval: "请在系统设置 › 通用 › 登录项与扩展中允许 Sluice 在后台运行，然后返回此处。"
+        case .ready: "辅助程序已获授权。开启增强模式后，可接管不遵循系统代理的应用。"
+        case .failed(let message): message
+        }
+    }
+}
+
+@MainActor
+final class HelperSettings: ObservableObject {
+    @Published private(set) var status = HelperStatus.resolve(bundled: HelperClient.bundled, status: HelperClient.service.status)
+    private var registrationError: String?
+
+    func refresh() {
+        status = .resolve(bundled: HelperClient.bundled, status: HelperClient.service.status, error: registrationError)
+        if status == .ready || status == .needsApproval { registrationError = nil }
+    }
+
+    func performAction() {
+        switch status {
+        case .needsApproval:
+            SMAppService.openSystemSettingsLoginItems()
+        case .ready:
+            refresh()
+        case .notInstalled, .failed:
+            registrationError = nil
+            if case .unavailable(let message) = HelperClient.prepare() { registrationError = message }
+            refresh()
+        }
+    }
+}
 
 /// Client for the privileged helper daemon that runs the core as root (docs/helper.md).
 /// Enhanced mode falls back to the administrator prompt whenever the helper isn't usable.
@@ -30,7 +101,11 @@ enum HelperClient {
             do { try service.register() } catch {
                 return service.status == .requiresApproval ? .needsApproval : .unavailable(error.localizedDescription)
             }
-            return service.status == .enabled ? .ready : .needsApproval
+            switch service.status {
+            case .enabled: return .ready
+            case .requiresApproval: return .needsApproval
+            default: return .unavailable("辅助程序注册后仍不可用，请重试或重新安装 Sluice.app。")
+            }
         }
     }
 

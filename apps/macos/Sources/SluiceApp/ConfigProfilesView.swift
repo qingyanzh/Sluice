@@ -93,7 +93,7 @@ struct ConfigProfileList: View {
                     }
                 }
             }
-            Text("切换运行中的配置会重新启动内核。")
+            Text("运行中切换会热重载；监听地址或增强模式变化时会重启。")
                 .font(DS.small).foregroundStyle(DS.ink2)
         }
         .frame(maxHeight: .infinity, alignment: .top)
@@ -104,13 +104,14 @@ struct ConfigProfileList: View {
 
 struct ProfileNameSheet: View {
     let action: ProfileEdit
-    let submit: (String) throws -> Void
+    let submit: (String) async throws -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var error: String?
+    @State private var busy = false
     @FocusState private var focused: Bool
 
-    init(action: ProfileEdit, submit: @escaping (String) throws -> Void) {
+    init(action: ProfileEdit, submit: @escaping (String) async throws -> Void) {
         self.action = action
         self.submit = submit
         _name = State(initialValue: action.initialName)
@@ -121,13 +122,13 @@ struct ProfileNameSheet: View {
             SheetHeader(icon: "doc.text", title: action.title,
                         detail: "配置保存在本地 profiles 文件夹中，文件扩展名 .conf 会自动添加。")
             SheetField(label: "配置名称", prompt: "例如 工作、家庭", text: $name)
-                .focused($focused)
+                .focused($focused).disabled(busy)
                 .onSubmit(save)
             if case .create = action {
                 Text("包含编辑器中尚未保存的修改。新建后可在列表中切换。")
                     .font(DS.small).foregroundStyle(DS.ink2)
             }
-            SheetFooter(error: error, primary: "保存", enabled: !name.isEmpty,
+            SheetFooter(error: error, primary: "保存", enabled: !name.isEmpty && !busy,
                         cancel: { dismiss() }, action: save)
         }
         .padding(28).frame(width: 460)
@@ -135,9 +136,14 @@ struct ProfileNameSheet: View {
     }
 
     private func save() {
-        do {
-            try submit(name)
-            dismiss()
-        } catch { self.error = error.localizedDescription }
+        guard !busy else { return }
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await submit(name)
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
     }
 }
