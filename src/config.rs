@@ -32,6 +32,10 @@ pub struct General {
 pub enum ProxyDef {
     Shadowsocks { server: String, port: u16, method: String, password: String, plugin: Option<SsPlugin> },
     Trojan { server: String, port: u16, password: String, sni: Option<String>, skip_cert_verify: bool, layer: Option<Layer> },
+    AnyTls {
+        server: String, port: u16, password: String, sni: Option<String>,
+        skip_cert_verify: bool, tfo: bool, alpn: Vec<String>, udp: bool,
+    },
     Vless {
         server: String,
         port: u16,
@@ -132,6 +136,13 @@ impl ProxyDef {
                 parts.extend(["trojan".into(), server.clone(), port.to_string(), format!("password={password}")]);
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 layer_bits(&mut parts, layer);
+            }
+            ProxyDef::AnyTls { server, port, password, sni, skip_cert_verify, tfo, alpn, udp } => {
+                parts.extend(["anytls".into(), server.clone(), port.to_string(), format!("password={password}")]);
+                tls_bits(&mut parts, sni, *skip_cert_verify);
+                if *tfo { parts.push("tfo=true".into()); }
+                if !alpn.is_empty() { parts.push(format!("alpn={}", alpn.join("|"))); }
+                parts.push(format!("udp={udp}"));
             }
             ProxyDef::Vless { server, port, uuid, tls, sni, skip_cert_verify, layer, reality, flow } => {
                 parts.extend(["vless".into(), server.clone(), port.to_string(), format!("uuid={uuid}")]);
@@ -331,6 +342,15 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
             layer: layer.clone(),
         },
+        "anytls" => ProxyDef::AnyTls {
+            server, port,
+            password: take("password").ok_or_else(|| anyhow!("anytls needs password"))?,
+            sni: take("sni"),
+            skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
+            tfo: matches!(take("tfo").as_deref(), Some("true" | "1")),
+            alpn: take("alpn").map_or_else(Vec::new, |s| s.split('|').filter(|s| !s.is_empty()).map(str::to_string).collect()),
+            udp: !matches!(take("udp").as_deref(), Some("false" | "0")),
+        },
         "vless" => ProxyDef::Vless {
             server,
             port,
@@ -497,6 +517,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anytls_roundtrip_and_defaults() {
+        for options in ["", ", sni=tls.example, skip-cert-verify=true, tfo=true, alpn=h2|http/1.1, udp=false"] {
+            let (name, def) = parse_proxy(&format!("Test = anytls, ::1, 443, password=p@ss:word{options}")).unwrap();
+            let (_, back) = parse_proxy(&def.to_line(&name)).unwrap();
+            assert_proxy_eq(&def, &back);
+            assert!(matches!(def, ProxyDef::AnyTls { udp, .. } if udp == options.is_empty()));
+        }
+        assert!(parse_proxy("Test = anytls, h, 443").unwrap_err().to_string().contains("password"));
+    }
 
     // ProxyDef and Layer do not implement PartialEq; compare every field via Debug.
     fn assert_proxy_eq(actual: &ProxyDef, expected: &ProxyDef) {

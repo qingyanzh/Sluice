@@ -225,6 +225,26 @@ fn parse_trojan(body: &str) -> Result<(Option<String>, ProxyDef)> {
     Ok((l.name, def))
 }
 
+fn parse_anytls(body: &str) -> Result<(Option<String>, ProxyDef)> {
+    let mut l = split_link(body)?;
+    // URI userinfo uses percent escaping, not form encoding: a literal '+' is a password byte.
+    if let Some((user, _)) = body.split(['?', '#']).next().unwrap_or_default().rsplit_once('@') {
+        l.user = Some(percent_decode(&user.replace('+', "%2B")));
+    }
+    if l.host.is_empty() { bail!("anytls link without host"); }
+    let q = &l.query;
+    let def = ProxyDef::AnyTls {
+        server: l.host, port: l.port,
+        password: l.user.ok_or_else(|| anyhow!("anytls link without password"))?,
+        sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
+        skip_cert_verify: truthy(q.get("insecure")) || truthy(q.get("allowinsecure")),
+        tfo: truthy(q.get("tfo")),
+        alpn: q.get("alpn").map_or_else(Vec::new, |s| s.split([',', '|']).filter(|s| !s.is_empty()).map(str::to_string).collect()),
+        udp: !matches!(q.get("udp").map(String::as_str), Some("false" | "0")),
+    };
+    Ok((l.name, def))
+}
+
 fn parse_hy2(body: &str) -> Result<(Option<String>, ProxyDef)> {
     // `host:20000-50000` / `host:443,8443` is a port-hopping spec; the first port stands in
     // as the plain port so split_link can parse the rest.
@@ -271,6 +291,7 @@ pub fn parse_link(line: &str) -> Result<(Option<String>, ProxyDef)> {
         "vmess" => parse_vmess(body),
         "vless" => parse_vless(body),
         "trojan" => parse_trojan(body),
+        "anytls" => parse_anytls(body),
         "hysteria2" | "hy2" => parse_hy2(body),
         other => bail!("{other}:// not supported"),
     }
@@ -435,6 +456,22 @@ mod tests {
         let (back_name, back) = parse_proxy(&line).unwrap();
         assert_eq!(back_name, "Test node");
         assert_eq!(format!("{back:?}"), format!("{expected:?}"), "{line}");
+    }
+
+    #[test]
+    fn anytls_share_links_roundtrip() {
+        assert_link_roundtrip("anytls://p%40ss%3Aword%25@[::1]:443?sni=tls%2Eexample&insecure=1&alpn=h2%2Chttp%2F1.1&udp=0&tfo=1#Test%20node", ProxyDef::AnyTls {
+            server: "::1".into(), port: 443, password: "p@ss:word%".into(), sni: Some("tls.example".into()),
+            skip_cert_verify: true, tfo: true, alpn: vec!["h2".into(), "http/1.1".into()], udp: false,
+        });
+        assert_link_roundtrip("anytls://secret@h:8443#Test%20node", ProxyDef::AnyTls {
+            server: "h".into(), port: 8443, password: "secret".into(), sni: None,
+            skip_cert_verify: false, tfo: false, alpn: vec![], udp: true,
+        });
+        assert!(parse_link("anytls://h:443").is_err());
+        assert!(parse_link("anytls://p@:443").is_err());
+        let (_, def) = parse_link("anytls://a+b%2Bc@h:443").unwrap();
+        assert!(matches!(def, ProxyDef::AnyTls { password, .. } if password == "a+b+c"));
     }
 
     #[test]

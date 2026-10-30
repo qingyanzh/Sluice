@@ -101,7 +101,7 @@ macOS 应用通过 `127.0.0.1` 上的 API 管理内核，应保留示例中的 `
 
 ### 在应用中导入
 
-打开“节点”→“添加节点”，粘贴**一个**分享链接或**一行**代理定义，再点击“添加”。当前可识别 `ss://`、`vmess://`、`vless://`、`trojan://`、`hysteria2://`（也接受 `hy2://`）。具体参数仍需在内核支持范围内，例如 Shadowsocks 插件不受支持。
+打开“节点”→“添加节点”，粘贴**一个**分享链接或**一行**代理定义，再点击“添加”。当前可识别 `ss://`、`vmess://`、`vless://`、`trojan://`、`anytls://`、`hysteria2://`（也接受 `hy2://`）。具体参数仍需在内核支持范围内，例如 Shadowsocks 插件不受支持。
 
 应用会转换并检查输入，保存到 `[Proxy]`，并尝试加入 `FINAL` 指向的 `select` 组。默认配置中的这个组就是 `Proxy`。如果你把 `FINAL` 改成了节点、`DIRECT` 或其他类型的组，需要自行在配置中安排引用。新增节点不会自动取代当前选择；到“策略”中选择它。
 
@@ -112,6 +112,17 @@ macOS 应用通过 `127.0.0.1` 上的 API 管理内核，应保留示例中的 `
 ```
 
 输出是一行可放进 `[Proxy]` 的定义，不会自动修改配置文件。
+
+### AnyTLS
+
+支持 AnyTLS v2（anytls-go、sing-box、mihomo），使用 TLS、流复用与填充；空闲会话最多保留 4 个，30 秒后关闭。UDP 使用 sing-box UoT v2，每个目标地址独立建立流。
+
+```ini
+[Proxy]
+AnyTLS = anytls, proxy.example.com, 443, password=change-me, sni=proxy.example.com, udp=true
+```
+
+可选 `skip-cert-verify=true`、`alpn=h2|http/1.1`；默认校验证书、不发送 ALPN，并启用 UDP。`udp=false` 禁用 UDP。`tfo` 会保留配置值，但当前仍使用普通 TCP 连接。Clash YAML 的 `type: anytls` 也可导入，`client-fingerprint` 接受但忽略（使用 rustls）。分享链接示例：`anytls://password@proxy.example.com:443?sni=proxy.example.com&insecure=1#Name`，其中 `insecure=1` 表示跳过证书验证，密码和名称可使用百分号编码。
 
 ### 手动编辑配置
 
