@@ -45,7 +45,7 @@
 //! `POST /v1/profile` parses the file and builds its router first; on any error it answers
 //! 400 and the current profile stays active. Listen and enhanced-mode settings still need
 //! a restart.
-//!   GET  /v1/diag?path=<out.zip>            write a redacted diagnostics bundle (default under ~/Library/Logs/Sluice)
+//!   POST /v1/diag                           write a redacted diagnostics bundle under ~/Library/Logs/Sluice
 //!
 //! `/v1/route` also takes `process=`, `src=<ip:port>` and `proto=` to test the
 //! PROCESS-NAME, SRC-IP and PROTOCOL rules.
@@ -350,8 +350,10 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
             },
             None => ("400 Bad Request", "{\"error\":\"missing ?path=\"}".to_string()),
         },
-        ("GET", "/v1/diag") => {
-            let out = query_param(query, "path").map(std::path::PathBuf::from).unwrap_or_else(crate::diag::default_export_path);
+        // The output path is not taken from the request: the core may run as root, and any
+        // local process can reach the API, so it must not choose where root writes or deletes.
+        ("POST", "/v1/diag") => {
+            let out = crate::diag::default_export_path();
             let config = reloader.path().to_string();
             match tokio::task::spawn_blocking(move || crate::diag::export(&out, Some(&config))).await? {
                 Ok(p) => ("200 OK", format!("{{\"path\":{}}}", json_str(&p.to_string_lossy()))),

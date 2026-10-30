@@ -68,7 +68,8 @@ fn plugin_opts(v: &Value) -> String {
         let k = k.as_str()?;
         match val {
             Value::Bool(true) => Some(k.to_string()),
-            Value::Bool(false) => None,
+            // Explicit, so options that default on (v2ray-plugin `mux`) can be turned off.
+            Value::Bool(false) => Some(format!("{k}=false")),
             Value::String(x) => Some(format!("{k}={x}")),
             Value::Number(n) => Some(format!("{k}={n}")),
             _ => None,
@@ -214,7 +215,7 @@ proxy-groups:
         assert_eq!(skipped, ["VLESS flow \"xtls-rprx-splice\" not supported", "ss plugin \"kcptun\" not supported"]);
         use crate::obfs::SsPlugin;
         assert!(matches!(&nodes[6].1, ProxyDef::Shadowsocks { plugin: Some(SsPlugin::Obfs { tls: true, host, .. }), .. } if host == "bing.com"));
-        assert!(matches!(&nodes[7].1, ProxyDef::Shadowsocks { plugin: Some(SsPlugin::V2ray { tls: true, path, .. }), .. } if path == "/ws"));
+        assert!(matches!(&nodes[7].1, ProxyDef::Shadowsocks { plugin: Some(SsPlugin::V2ray { tls: true, path, mux: false, .. }), .. } if path == "/ws"));
         assert!(matches!(&nodes[5].1, ProxyDef::Vless { flow: Some(f), reality: Some(_), .. } if f == "xtls-rprx-vision"));
         assert!(matches!(&nodes[0].1, ProxyDef::Shadowsocks { password, .. } if password == "p@ss"));
         match &nodes[1].1 {

@@ -170,7 +170,8 @@ impl Router {
             if g.kind != GroupKind::Select {
                 parse_test_url(&g.url).with_context(|| format!("group {:?}", g.name))?;
             }
-            selected.insert(g.name.clone(), g.options[0].clone());
+            let Some(first) = g.options.first() else { bail!("group {:?} has no options", g.name) };
+            selected.insert(g.name.clone(), first.clone());
         }
         let exists = |p: &str| outbounds.contains_key(p) || selected.contains_key(p);
         for g in &cfg.groups {

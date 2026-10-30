@@ -66,9 +66,8 @@ impl RotatingLog {
     }
 
     fn reopen(&mut self) -> io::Result<()> {
-        let path = self.path(0);
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        readable_by_all(&path);
+        let file = open_log(&self.path(0))?;
+        readable_by_all(&file);
         self.size = file.metadata()?.len();
         self.file = Some(file);
         Ok(())
@@ -76,6 +75,7 @@ impl RotatingLog {
 
     fn rotate(&mut self) -> io::Result<()> {
         self.file = None;
+        // `remove_file` and `rename` act on a symlink itself, never on what it points to.
         let _ = fs::remove_file(self.path(self.keep));
         for n in (0..self.keep).rev() {
             let _ = fs::rename(self.path(n), self.path(n + 1));
@@ -109,10 +109,32 @@ impl Write for RotatingLog {
     }
 }
 
+/// Opens the log for appending without following a symlink at `path`, and only if it is a
+/// regular file owned by us: as root (enhanced mode) the log dir is user-writable, and a
+/// planted link or hard link must not make root append to another file. Anything else
+/// there is removed and a fresh file created.
+fn open_log(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let open = || OpenOptions::new().create(true).append(true).mode(0o644).custom_flags(libc::O_NOFOLLOW).open(path);
+    let ok = |f: &File| f.metadata().is_ok_and(|m| m.is_file() && m.uid() == unsafe { libc::geteuid() } && m.nlink() == 1);
+    if let Ok(f) = open() {
+        if ok(&f) {
+            return Ok(f);
+        }
+    }
+    let _ = fs::remove_file(path);
+    let f = OpenOptions::new().create_new(true).append(true).mode(0o644).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    if !ok(&f) {
+        return Err(io::Error::other("log file is not a private regular file"));
+    }
+    Ok(f)
+}
+
 /// Files written as root (enhanced mode) stay readable for the user's app and exports.
-fn readable_by_all(path: &Path) {
+/// Works on the open file, so it can't be redirected through a symlink.
+fn readable_by_all(file: &File) {
     use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+    let _ = file.set_permissions(fs::Permissions::from_mode(0o644));
 }
 
 /// env_logger to stderr plus the rotating file; falls back to stderr only.
@@ -171,8 +193,10 @@ fn write_crash(report: &str) -> io::Result<PathBuf> {
     let dir = crash_dir();
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("crash-{}-{}.txt", now_secs(), std::process::id()));
-    fs::write(&path, report)?;
-    readable_by_all(&path);
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = OpenOptions::new().write(true).create_new(true).mode(0o644).custom_flags(libc::O_NOFOLLOW).open(&path)?;
+    f.write_all(report.as_bytes())?;
+    readable_by_all(&f);
     Ok(path)
 }
 
@@ -213,7 +237,7 @@ fn kv_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"(?i)([A-Za-z0-9_-]*(?:pass|secret|token|uuid|key|psk|auth|user|p12|sign|cookie|credential|short-?id|\bsid\b|pbk)[A-Za-z0-9_-]*)(["']?[ \t]*[:=][ \t]*["']?)((?:Bearer |Basic )?[^\s,"'&}\]\[|;]+)"#,
+            r#"(?i)([A-Za-z0-9_-]*(?:pass|secret|token|uuid|key|psk|auth|user|p12|sign|cookie|credential|short-?id|\bsid\b|pbk)[A-Za-z0-9_-]*)(["']?[ \t]*[:=][ \t]*)("[^"\n]*"|'[^'\n]*'|(?:Bearer |Basic )?[^\s,"'&}\]\[|;]+)"#,
         )
         .unwrap()
     })
@@ -260,8 +284,14 @@ fn redact_url(scheme: &str, rest: &str) -> String {
 pub fn redact(text: &str) -> String {
     let t = url_re().replace_all(text, |c: &Captures| redact_url(&c[1], &c[2]));
     let t = kv_re().replace_all(&t, |c: &Captures| {
-        if c[3].starts_with(MASK) || c[3].eq_ignore_ascii_case("true") || c[3].eq_ignore_ascii_case("false") {
+        let v = &c[3];
+        let quote = v.chars().next().filter(|q| *q == '"' || *q == '\'');
+        let inner = if quote.is_some() { &v[1..v.len() - 1] } else { v };
+        // Every value is masked, booleans too: `password=true` may be a real password.
+        if inner.is_empty() || inner.starts_with(MASK) {
             c[0].to_string()
+        } else if let Some(q) = quote {
+            format!("{}{}{q}{MASK}{q}", &c[1], &c[2])
         } else {
             format!("{}{}{MASK}", &c[1], &c[2])
         }
@@ -311,15 +341,30 @@ fn copy_dir_redacted(src: &Path, dst: &Path, keep: impl Fn(&str) -> bool) -> Res
     let mut n = 0;
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if !e.path().is_file() || !keep(&name) || name.ends_with(".zip") || name.ends_with(".pid") {
+        // `file_type` doesn't follow symlinks: a link planted in a user-writable dir must not
+        // pull a root-only file into the user-readable bundle.
+        if !e.file_type().is_ok_and(|t| t.is_file()) || !keep(&name) || name.ends_with(".zip") || name.ends_with(".pid") {
             continue;
         }
-        let Ok(bytes) = fs::read(e.path()) else { continue };
+        let Ok(bytes) = read_nofollow(&e.path()) else { continue };
         fs::create_dir_all(dst)?;
         write_redacted(&dst.join(&name), &String::from_utf8_lossy(&bytes))?;
         n += 1;
     }
     Ok(n)
+}
+
+/// Reads a regular file, refusing a symlink swapped in after the directory listing.
+fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    if !f.metadata()?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// The default bundle path: `~/Library/Logs/Sluice/sluice-diag-<time>.zip`.
@@ -332,10 +377,15 @@ pub fn export(out: &Path, config: Option<&str>) -> Result<PathBuf> {
     if out.extension().and_then(|e| e.to_str()) != Some("zip") {
         bail!("output must end in .zip");
     }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = format!("sluice-diag-{}", now_secs());
-    let staging = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    // Unique per export, so concurrent exports never share (and delete) a staging tree.
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = std::env::temp_dir().join(format!("{name}-{}-{seq}-{:08x}", std::process::id(), rand::random::<u32>()));
+    // `create_dir` fails if it already exists (or is a planted link).
+    fs::create_dir(&staging).with_context(|| format!("create {}", staging.display()))?;
     let root = staging.join(&name);
-    fs::create_dir_all(&root)?;
+    fs::create_dir(&root)?;
     let res = fill(&root, config).and_then(|()| zip(&root, out));
     let _ = fs::remove_dir_all(&staging);
     res?;
@@ -398,7 +448,11 @@ fn zip(root: &Path, out: &Path) -> Result<()> {
     if !st.success() {
         bail!("ditto failed: {st}");
     }
-    readable_by_all(out);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(out)?;
+        readable_by_all(&f);
+    }
     Ok(())
 }
 
@@ -487,10 +541,71 @@ mod tests {
     fn mitm_and_misc_keys() {
         let text = "[MITM]\nca-passphrase = capass\nca-p12 = MIIKbase64blob\n[General]\napi-token=apitok\nX-Secret: hdrsecret\n";
         assert_clean(&redact(text), &["capass", "MIIKbase64blob", "apitok", "hdrsecret"]);
-        // Booleans and already-masked values are left alone; idempotent.
+        // Non-secret keys and already-masked values are left alone; idempotent.
         assert_eq!(redact("skip-cert-verify=true"), "skip-cert-verify=true");
         let once = redact("password=x, uuid=y");
         assert_eq!(redact(&once), once);
+    }
+
+    #[test]
+    fn quoted_spaced_and_boolean_values() {
+        assert_clean(&redact(r#"password="&secret1""#), &["secret1"]);
+        assert_clean(&redact(r#"password="alpha beta""#), &["alpha", "beta"]);
+        assert_clean(&redact("password: 'gamma delta'"), &["gamma", "delta"]);
+        assert_clean(&redact("password=true, token=false"), &["true", "false"]);
+        assert_eq!(redact(r#""password":"a b""#), format!(r#""password":"{MASK}""#));
+        let once = redact(r#"password="x y""#);
+        assert_eq!(redact(&once), once);
+    }
+
+    #[test]
+    fn log_open_replaces_symlink() {
+        let dir = std::env::temp_dir().join(format!("sluice-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join(LOG_NAME)).unwrap();
+        let mut log = RotatingLog::open(&dir, 1 << 20, 2).unwrap();
+        log.write_file(b"hello\n").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!fs::symlink_metadata(dir.join(LOG_NAME)).unwrap().file_type().is_symlink());
+        // A hard link to another file is replaced too.
+        drop(log);
+        fs::remove_file(dir.join(LOG_NAME)).unwrap();
+        fs::hard_link(&victim, dir.join(LOG_NAME)).unwrap();
+        let mut log = RotatingLog::open(&dir, 1 << 20, 2).unwrap();
+        log.write_file(b"hello\n").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn copy_skips_symlinks() {
+        let base = std::env::temp_dir().join(format!("sluice-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(base.join("secret.pem"), "PRIVATE").unwrap();
+        fs::write(src.join("a.log"), "ok").unwrap();
+        std::os::unix::fs::symlink(base.join("secret.pem"), src.join("b.log")).unwrap();
+        assert_eq!(copy_dir_redacted(&src, &dst, |_| true).unwrap(), 1);
+        assert!(!dst.join("b.log").exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn concurrent_exports_dont_collide() {
+        let base = std::env::temp_dir().join(format!("sluice-exp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let outs: Vec<PathBuf> = (0..3).map(|i| base.join(format!("o{i}.zip"))).collect();
+        let hs: Vec<_> = outs.iter().cloned().map(|o| std::thread::spawn(move || export(&o, None))).collect();
+        for h in hs {
+            h.join().unwrap().unwrap();
+        }
+        assert!(outs.iter().all(|o| fs::metadata(o).is_ok_and(|m| m.len() > 0)));
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

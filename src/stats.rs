@@ -188,9 +188,12 @@ impl Counted {
     /// Fails I/O once the API closed this connection; otherwise registers for that wake-up.
     fn check_closed(&self, cx: &Context<'_>) -> io::Result<()> {
         match &self.live {
-            Some(c) if c.is_closed() => Err(io::Error::new(io::ErrorKind::ConnectionAborted, "closed via control API")),
             Some(c) => {
+                // Park before checking: a `close` that lands in between then still finds our waker.
                 c.park(cx.waker());
+                if c.is_closed() {
+                    return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "closed via control API"));
+                }
                 Ok(())
             }
             None => Ok(()),

@@ -356,8 +356,9 @@ final class Core: ObservableObject {
         pollTask = Task { await self.poll() }
     }
 
-    /// Asks whoever started the root core to stop it.
-    private static func stopRoot(pid: Int32, viaHelper: Bool) async throws {
+    /// Asks whoever started the root core to stop it. Nonisolated: `stopForQuit` blocks the
+    /// main thread waiting for it, so it must never need the main actor.
+    nonisolated static func stopRoot(pid: Int32, viaHelper: Bool) async throws {
         if viaHelper {
             try await HelperClient.stop()
         } else {

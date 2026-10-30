@@ -75,7 +75,12 @@ impl Fixed {
 /// Checks that `path` is a config Sluice can run, without touching the running one:
 /// it must parse and its proxies, groups and rules must build into a router.
 pub fn validate_profile(path: &str) -> Result<Config> {
-    let cfg = read_config(path)?;
+    let mut cfg = read_config(path)?;
+    // Subscriptions aren't fetched here; stand in for their nodes (REJECT, as `expand`
+    // does for an empty subscription) so `policy-path` groups with no inline options build.
+    for g in cfg.groups.iter_mut().filter(|g| g.policy_path.is_some() && g.options.is_empty()) {
+        g.options.push("REJECT".into());
+    }
     Router::new(&cfg).with_context(|| format!("profile {path}"))?;
     Ok(cfg)
 }
@@ -232,6 +237,10 @@ mod tests {
         assert!(validate_profile(&a).is_ok());
         assert!(validate_profile(&bad).is_err());
         assert!(validate_profile(&garbage).is_err());
+        // A subscription group with no inline options must validate, not panic.
+        let sub = write(&dir, "sub.conf", "[Proxy Group]\nS = select, policy-path=https://example.invalid/sub\n[Rule]\nFINAL,S\n");
+        validate_profile(&sub).unwrap();
+        std::fs::remove_file(&sub).unwrap();
         assert!(validate_profile(&dir.join("missing.conf").to_string_lossy()).is_err());
         assert_eq!(sibling_profiles(&a), vec![a.clone(), b.clone(), bad.clone(), garbage.clone()]);
 

@@ -51,7 +51,7 @@ pub struct LiveConn {
 
 impl LiveConn {
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// Remembers who to wake if the connection is closed while I/O is pending.
@@ -77,7 +77,7 @@ impl LiveConn {
     }
 
     fn close(&self) {
-        self.closed.store(true, Ordering::Relaxed);
+        self.closed.store(true, Ordering::SeqCst);
         for w in self.wakers.lock().unwrap().drain(..) {
             w.wake();
         }
@@ -217,6 +217,25 @@ mod tests {
 
     fn meta(target: &str) -> ConnMeta {
         ConnMeta { network: "tcp", target: target.into(), policy: "P".into(), outbound: "N".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn close_wakes_parked_waker() {
+        use std::sync::atomic::AtomicUsize;
+        use std::task::Wake;
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let n = Arc::new(Count(AtomicUsize::new(0)));
+        let w = Waker::from(n.clone());
+        let c = register(meta("wake-test.example:443"));
+        c.park(&w);
+        assert!(close(c.id));
+        assert_eq!(n.0.load(Ordering::SeqCst), 1);
+        unregister(c.id);
     }
 
     #[test]
