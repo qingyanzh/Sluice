@@ -57,11 +57,44 @@ final class InterfaceStateTests: XCTestCase {
         XCTAssertEqual(node.filter, "HK")
         XCTAssertFalse(node.matches("secret"))
         XCTAssertFalse(node.matches("hidden"))
+        XCTAssertNil(node.copyableEndpoint)
+    }
+
+    func testLocalSubscriptionsHaveNoCopyableServer() {
+        for path in ["./nodes.txt", "file:///tmp/nodes.txt"] {
+            let node = NodeRecord(line: "Local = select, policy-path=\(path)", id: "local")
+            XCTAssertTrue(node.isSubscription)
+            XCTAssertNil(node.copyableEndpoint)
+        }
+    }
+
+    @MainActor
+    func testEditorModeSurvivesNavigationWithoutChangingTheDraft() {
+        let draft = ConfigDraft()
+        draft.refresh(path: "a.conf", disk: "[Rule]\nFINAL,DIRECT\n")
+        draft.text += "# unsaved\n"
+        let unsaved = draft.text
+        draft.editorMode = "规则"
+        draft.refresh(path: "a.conf", disk: draft.saved)
+        XCTAssertEqual(draft.editorMode, "规则")
+        XCTAssertEqual(draft.text, unsaved)
+        XCTAssertTrue(draft.hasChanges)
+    }
+
+    @MainActor
+    func testStructuredSheetTitlesDistinguishAddingAndEditing() {
+        for isNew in [true, false] {
+            let rule = RuleConfigSheet(rule: .init(), isNew: isNew, policies: ["DIRECT"]) { _ in nil }
+            let group = GroupConfigSheet(group: .init(), isNew: isNew, policies: ["DIRECT"]) { _ in nil }
+            XCTAssertEqual(rule.title, isNew ? "添加规则" : "编辑规则")
+            XCTAssertEqual(group.title, isNew ? "添加策略组" : "编辑策略组")
+        }
     }
 
     func testNodeMetadataSupportsIPv6AndTransports() {
         let node = NodeRecord(line: "HK = vless, 2001:db8::1, 443, uuid=test, tls=true, ws=true", id: "1")
         XCTAssertEqual(node.endpoint, "[2001:db8::1]:443")
+        XCTAssertEqual(node.copyableEndpoint, "[2001:db8::1]:443")
         XCTAssertEqual(node.transport, "WebSocket / TLS")
         XCTAssertTrue(node.matches("vLeSs"))
         let hy2 = NodeRecord(line: "HY = hysteria2, example.com, 443, password=private", id: "2")

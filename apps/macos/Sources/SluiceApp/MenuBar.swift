@@ -145,6 +145,7 @@ enum MenuBarLabel {
 @MainActor
 final class MenuBarStatusItem: NSObject, NSMenuDelegate {
     private let core: Core
+    private let menuModel: MenuBarModel
     private let showWindow: (Pane?) -> Void
     private let statusItem: NSStatusItem
     private var layout: MenuBarLayout
@@ -155,6 +156,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 
     init(core: Core, showWindow: @escaping (Pane?) -> Void) {
         self.core = core
+        menuModel = MenuBarModel(core: core, diagnostics: .shared)
         self.showWindow = showWindow
         let defaults = core.preferences
         let mode = MenuBarDisplayMode(rawValue: defaults.string(forKey: "menuBarDisplayMode") ?? "") ?? .iconAndSpeed
@@ -221,66 +223,73 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // Freeze menu choices during tracking; the fixed-width status label
+        // continues receiving live rates independently.
+        menuModel.refresh()
+        let state = menuModel.value
         menu.removeAllItems()
-        menu.addItem(NSMenuItem(title: "Sluice · \(core.state.label)", action: nil, keyEquivalent: ""))
-        let profile = URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent
-        menu.addItem(NSMenuItem(title: "配置：\(profile)", action: nil, keyEquivalent: ""))
-        if core.state == .running {
+        menu.addItem(NSMenuItem(title: "Sluice · \(state.state.label)", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "配置：\(state.profileName)", action: nil, keyEquivalent: ""))
+        if state.state == .running {
             menu.addItem(NSMenuItem(title: "↓ \(core.displayedRates.down.formatted.text)   ↑ \(core.displayedRates.up.formatted.text)   ·   \(core.traffic?.active ?? 0) 个连接", action: nil, keyEquivalent: ""))
-        } else if core.systemProxyOn {
+        } else if state.systemProxyOn {
             menu.addItem(NSMenuItem(title: "系统代理已开启，内核未运行", action: nil, keyEquivalent: ""))
         }
-        if let other = core.otherSystemProxy {
+        if let other = state.otherSystemProxy {
             menu.addItem(NSMenuItem(title: "系统代理：\(other)", action: nil, keyEquivalent: ""))
         }
         menu.addItem(.separator())
-        add(to: menu, core.isActive ? "停止 Sluice" : "启动 Sluice", symbol: core.isActive ? "stop.fill" : "play.fill", enabled: core.state != .starting) { [core] in
+        add(to: menu, state.isActive ? "停止 Sluice" : "启动 Sluice", symbol: state.isActive ? "stop.fill" : "play.fill", enabled: state.state != .starting) { [core] in
             if core.isActive { core.stop() } else { core.start() }
         }
         menu.addItem(.separator())
-        let mode = OutboundMode(rawValue: core.mode) ?? .rule
-        let modes = submenu(in: menu, title: "出站模式：\(mode.title)", symbol: "point.3.connected.trianglepath.dotted", enabled: core.state == .running)
+        let mode = state.mode
+        let modes = submenu(in: menu, title: "出站模式：\(mode.title)", symbol: mode.icon, enabled: state.state == .running)
         for option in OutboundMode.allCases {
-            add(to: modes, option.title, symbol: option.icon, checked: option == mode) { [core] in core.setMode(option.rawValue) }
+            let rawValue = option.rawValue
+            add(to: modes, option.title, symbol: option.icon, checked: option == mode) { [core, rawValue] in core.setMode(rawValue) }
         }
-        if core.groups.contains(where: \.isSelectable) {
+        if !state.groups.isEmpty {
             menu.addItem(.separator())
-            for group in core.groups.filter(\.isSelectable) {
-                let options = submenu(in: menu, title: "\(group.group)：\(group.selected)", symbol: "point.3.connected.trianglepath.dotted", enabled: core.state == .running)
+            for group in state.groups {
+                let groupName = group.group
+                let options = submenu(in: menu, title: "\(groupName)：\(group.selected)", symbol: "point.3.connected.trianglepath.dotted", enabled: state.state == .running)
                 for option in group.options {
-                    let item = add(to: options, "\(option.name)    \(latencyText(option.latencyMs))", checked: group.selected == option.name) { [core] in
-                        core.select(group: group.group, option: option.name)
+                    let optionName = option.name
+                    let item = add(to: options, "\(optionName)    \(latencyText(option.latencyMs))", checked: group.selected == optionName) { [core, groupName, optionName] in
+                        core.select(group: groupName, option: optionName)
                     }
                     item.image = latencyIcon(option.latencyMs)
                 }
                 options.addItem(.separator())
-                let testing = core.testingGroups.contains(group.group)
-                add(to: options, testing ? "测试中…" : "测试延迟", symbol: "speedometer", enabled: !testing) { [core] in core.test(group: group.group) }
+                let testing = state.testingGroups.contains(groupName)
+                add(to: options, testing ? "测试中…" : "测试延迟", symbol: "speedometer", enabled: !testing) { [core, groupName] in core.test(group: groupName) }
             }
         }
         menu.addItem(.separator())
-        add(to: menu, "设置为系统代理", enabled: core.summary.httpListen != nil || core.summary.socksListen != nil,
-            checked: core.systemProxyOn) { [core] in core.setSystemProxy(!core.systemProxyOn) }
-        add(to: menu, "增强模式", checked: core.summary.enhancedMode) { [core] in
+        add(to: menu, "设置为系统代理", enabled: state.canSetSystemProxy,
+            checked: state.systemProxyOn) { [core, on = !state.systemProxyOn] in core.setSystemProxy(on) }
+        add(to: menu, "增强模式", checked: state.enhancedMode) { [core, on = !state.enhancedMode] in
             Task {
-                if let error = await core.setEnhancedMode(!core.summary.enhancedMode) { core.lastActionError = "增强模式：\(error)" }
+                if let error = await core.setEnhancedMode(on) { core.lastActionError = "增强模式：\(error)" }
             }
         }
         menu.addItem(.separator())
-        add(to: menu, "重新载入配置", key: "r", symbol: "arrow.triangle.2.circlepath", enabled: core.state == .running && !core.reloading) { [core] in core.reload() }
-        add(to: menu, "重启内核", symbol: "arrow.clockwise", enabled: core.isActive) { [core] in core.restart() }
+        add(to: menu, "重新载入配置", key: "r", symbol: "arrow.triangle.2.circlepath", enabled: state.state == .running && !state.reloading) { [core] in core.reload() }
+        add(to: menu, "重启内核", symbol: "arrow.clockwise", enabled: state.isActive) { [core] in core.restart() }
         menu.addItem(.separator())
         let display = submenu(in: menu, title: "菜单栏显示")
         for option in MenuBarDisplayMode.allCases {
-            add(to: display, option.title, checked: layout.mode == option) { [weak self] in
-                self?.core.preferences.set(option.rawValue, forKey: "menuBarDisplayMode")
+            let rawValue = option.rawValue
+            add(to: display, option.title, checked: state.displayMode == option) { [weak self, core, rawValue] in
+                core.preferences.set(rawValue, forKey: "menuBarDisplayMode")
                 self?.refreshSettings()
             }
         }
         display.addItem(.separator())
-        add(to: display, "显示当前的出站模式", checked: showsMode) { [weak self] in
+        add(to: display, "显示当前的出站模式", checked: state.showOutboundMode) { [weak self, show = !state.showOutboundMode] in
             guard let self else { return }
-            core.preferences.set(!showsMode, forKey: "menuBarShowOutboundMode")
+            core.preferences.set(show, forKey: "menuBarShowOutboundMode")
             refreshSettings()
         }
         menu.addItem(.separator())
@@ -288,7 +297,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         add(to: menu, "查看请求", symbol: "arrow.up.arrow.down.circle") { [showWindow] in showWindow(.requests) }
         add(to: menu, "编辑当前配置", symbol: "curlybraces.square") { [showWindow] in showWindow(.profile) }
         let diagnostics = DiagnosticsExporter.shared
-        add(to: menu, "导出诊断信息…", symbol: "stethoscope", enabled: !diagnostics.state.isExporting) { [core, showWindow] in
+        add(to: menu, "导出诊断信息…", symbol: "stethoscope", enabled: !state.isExporting) { [core, showWindow] in
             if core.lastActionError?.hasPrefix("导出诊断信息失败：") == true { core.lastActionError = nil }
             Task {
                 await diagnostics.export(api: core.state == .running ? core.api : nil,

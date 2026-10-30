@@ -1,9 +1,92 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import SluiceApp
 
+private final class MenuTrackingView: RowContextMenu.MenuView {
+    var onTrack: ((NSMenu, NSEvent) -> Void)?
+
+    override func track(_ menu: NSMenu, with event: NSEvent) { onTrack?(menu, event) }
+}
+
 final class LiveAPITests: XCTestCase {
     private let active = #"{"id":71,"start_ms":1793286962123,"network":"tcp","target":"example.com:443","src":"127.0.0.1:53721","rule":"FINAL","policy":"Proxy","chain":["Proxy","Auto","HK"],"outbound":"HK","process":"Safari","up":4294967296,"down":9000,"rate_up":1024,"rate_down":2048}"#
+
+    @MainActor
+    func testOpenConnectionMenuRetainsItsTargetAcrossRowRefreshes() throws {
+        let original = try JSONDecoder().decode(ActiveConnection.self, from: Data(active.utf8))
+        let replacement = try JSONDecoder().decode(ActiveConnection.self, from: Data(active.replacingOccurrences(of: #""id":71"#, with: #""id":72"#).utf8))
+        var closed: [UInt64] = []
+        var copied: [String] = []
+        var view: RowContextMenu.MenuView? = RowContextMenu.MenuView()
+        view?.makeMenu = {
+            ActiveConnectionMenu.menu(connection: original, canClose: true, copy: { copied.append($0) }) { closed.append($0) }
+        }
+        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
+                                                  timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0,
+                                                  clickCount: 1, pressure: 0))
+        let menu = try XCTUnwrap(view?.menu(for: event))
+        // A poll can replace/reorder rows while this menu is still tracking.
+        view?.makeMenu = { ActiveConnectionMenu.menu(connection: replacement, canClose: true) { closed.append($0) } }
+        XCTAssertEqual(menu.items.map(\.title), ["复制目标", "复制策略链", "", "断开连接"])
+        XCTAssertTrue(menu.items[3].isEnabled)
+        let refreshedMenu = try XCTUnwrap(view?.menu(for: event))
+        view = nil
+        // Dispatch through AppKit without requiring access to the system pasteboard.
+        for index in [0, 1] {
+            let item = menu.items[index]
+            let target = try XCTUnwrap(item.target)
+            XCTAssertFalse(target === item)
+            XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(item.action), to: target, from: item))
+        }
+        XCTAssertEqual(copied, [original.target, original.policyChain])
+        menu.performActionForItem(at: 3)
+        refreshedMenu.performActionForItem(at: 3)
+        XCTAssertEqual(closed, [71, 72])
+    }
+
+    @MainActor
+    func testRowMenuMouseEventsTrackSnapshotAcrossRefresh() throws {
+        let view = MenuTrackingView()
+        var performed: [String] = []
+        var trackedEvents: [NSEvent.EventType] = []
+        view.makeMenu = {
+            let menu = RowContextMenu.Menu()
+            menu.addAction("Original") { performed.append("original") }
+            return menu
+        }
+        view.onTrack = { menu, event in
+            trackedEvents.append(event.type)
+            // Simulate a SwiftUI update while AppKit is tracking the open menu.
+            view.makeMenu = {
+                let menu = RowContextMenu.Menu()
+                menu.addAction("Replacement") { performed.append("replacement") }
+                return menu
+            }
+            menu.performActionForItem(at: 0)
+        }
+        defer { view.onTrack = nil }
+        let rightClick = try XCTUnwrap(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
+                                                        timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0,
+                                                        clickCount: 1, pressure: 0))
+        let controlClick = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [.control],
+                                                          timestamp: 0, windowNumber: 0, context: nil, eventNumber: 1,
+                                                          clickCount: 1, pressure: 0))
+        view.rightMouseDown(with: rightClick)
+        view.mouseDown(with: controlClick)
+        XCTAssertEqual(trackedEvents, [.rightMouseDown, .leftMouseDown])
+        XCTAssertEqual(performed, ["original", "replacement"])
+    }
+
+    @MainActor
+    func testExpiredOrStoppedConnectionMenuDisablesDisconnect() throws {
+        let connection = try JSONDecoder().decode(ActiveConnection.self, from: Data(active.utf8))
+        let menu = ActiveConnectionMenu.menu(connection: connection, canClose: false) { _ in XCTFail("Cannot close a stale row") }
+        XCTAssertFalse(menu.autoenablesItems)
+        XCTAssertFalse(menu.items[3].isEnabled)
+        XCTAssertTrue(menu.items[0].isEnabled)
+        XCTAssertTrue(menu.items[1].isEnabled)
+    }
 
     func testActiveConnectionDecodesCountersChainAndNullableMetadata() throws {
         let records = try JSONDecoder().decode([ActiveConnection].self, from: Data("[\(active)]".utf8))

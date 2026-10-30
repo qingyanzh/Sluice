@@ -36,13 +36,7 @@ struct ActiveRequestsView: View {
                                                 in: RoundedRectangle(cornerRadius: DS.smallRadius))
                             }
                             .buttonStyle(.plain)
-                            .contextMenu {
-                                Button("复制目标") { copyText(connection.target) }
-                                Button("复制策略链") { copyText(connection.policyChain) }
-                                Divider()
-                                Button("断开连接", role: .destructive) { core.closeConnection(connection.id) }
-                                    .disabled(!canClose(connection.id))
-                            }
+                            .overlay { ActiveConnectionMenu(connection: connection, core: core) }
                         }
                     }.padding(6)
                 }
