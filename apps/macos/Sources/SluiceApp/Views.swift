@@ -36,8 +36,7 @@ enum Pane: String, CaseIterable, Identifiable {
     /// Sidebar sections, Surge-style: an untitled top group, then titled groups.
     static let sections: [(String?, [Pane])] = [
         (nil, [.activity, .overview]),
-        ("客户端", [.requests]),
-        ("代理", [.policy, .nodes, .rule]),
+        ("代理", [.requests, .policy, .nodes, .rule]),
         ("工具", [.logs, .profile]),
     ]
 }
@@ -69,32 +68,67 @@ enum OutboundMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// The sidebar sits on the page colour with no divider, so it reads as part of the
+/// window rather than a separate panel. Selection is a white pill that slides.
+struct Sidebar: View {
+    @Binding var pane: Pane?
+    @Namespace private var ns
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(Pane.sections, id: \.1) { title, panes in
+                        VStack(alignment: .leading, spacing: 2) {
+                            if let title {
+                                Text(title).font(DS.caption).foregroundStyle(.tertiary)
+                                    .padding(.leading, 12).padding(.bottom, 4)
+                            }
+                            ForEach(panes) { row($0) }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12).padding(.top, 52).padding(.bottom, 12)
+            }
+            .scrollIndicators(.never)
+            StatusFooter().padding(12)
+        }
+        .frame(width: 200)
+    }
+
+    private func row(_ p: Pane) -> some View {
+        let on = pane == p
+        return Button {
+            withAnimation(DS.spring) { pane = p }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: p.icon).font(.system(size: 13, weight: on ? .semibold : .regular))
+                    .frame(width: 18)
+                Text(p.title).font(.system(size: 13, weight: on ? .semibold : .regular))
+                Spacer()
+            }
+            .foregroundStyle(on ? Color.primary : Color.secondary)
+            .padding(.horizontal, 12).frame(height: 32)
+            .background {
+                if on {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(DS.surface)
+                        .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
+                        .matchedGeometryEffect(id: "selection", in: ns)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct MainView: View {
     @EnvironmentObject var core: Core
     @State private var pane: Pane? = .activity
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $pane) {
-                ForEach(Pane.sections, id: \.1) { title, panes in
-                    Section {
-                        ForEach(panes) { p in
-                            Label {
-                                Text(p.title).font(DS.label)
-                            } icon: {
-                                Image(systemName: p.icon).font(.system(size: 13, weight: .regular)).frame(width: 20)
-                            }
-                            .labelStyle(BadgeLabelStyle())
-                            .tag(p)
-                        }
-                    } header: {
-                        if let title { Text(title) }
-                    }
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
-            .safeAreaInset(edge: .bottom) { StatusFooter().padding(10) }
-        } detail: {
+        HStack(spacing: 0) {
+            Sidebar(pane: $pane)
             VStack(spacing: 0) {
                 if let err = core.lastActionError {
                     ErrorBanner(message: err) { core.lastActionError = nil }
@@ -116,6 +150,7 @@ struct MainView: View {
             }
             .animation(.smooth(duration: 0.25), value: pane)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 40)
             .background(Backdrop())
             .toolbarBackground(.hidden, for: .windowToolbar)
             .toolbar {
@@ -127,6 +162,8 @@ struct MainView: View {
                 }
             }
         }
+        .background(Backdrop())
+        .ignoresSafeArea(.container, edges: .top)
         .navigationTitle("")
         .frame(minWidth: 860, minHeight: 560)
         .onAppear {
@@ -172,7 +209,7 @@ struct TogglePill: View {
             HStack(spacing: 6) {
                 Circle().fill(on ? Color.green : Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
                     .shadow(color: on ? .green.opacity(0.6) : .clear, radius: 3)
-                Text(title).font(.system(size: 12, weight: .medium))
+                Text(title).font(DS.small.weight(.medium))
             }
             .padding(.horizontal, 4)
         }
@@ -199,16 +236,16 @@ struct StatusFooter: View {
     @EnvironmentObject var core: Core
     var body: some View {
         HStack(spacing: 8) {
-            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 26, height: 26)
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Sluice").font(.callout.weight(.semibold))
+                Text("Sluice").font(DS.label.weight(.semibold))
                 HStack(spacing: 4) {
                     StatusDot(state: core.state)
-                    Text(core.privileged ? "\(core.state.label) · root" : core.state.label).font(.caption).foregroundStyle(.secondary)
+                    Text(core.privileged ? "\(core.state.label) · root" : core.state.label).font(DS.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()
-            StartStopButton(compact: true).buttonStyle(.borderless).font(.title3)
+            StartStopButton(compact: true).buttonStyle(.borderless).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
         }
         .padding(8)
         .liquidGlass(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -226,7 +263,6 @@ struct StartStopButton: View {
         } else {
             Button { core.start() } label: { Label("启动", systemImage: "play.fill") }
                 .labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
-                .keyboardShortcut(compact ? nil : .defaultAction)
                 .help("启动 Sluice")
         }
     }
@@ -262,7 +298,7 @@ struct LatencyBadge: View {
     let latency: Int?
     var body: some View {
         let (text, color) = latencyStyle(latency)
-        Text(latency == nil ? "–" : text).font(.caption.monospacedDigit()).foregroundStyle(color)
+        Text(latency == nil ? "–" : text).font(DS.caption.monospacedDigit()).foregroundStyle(color)
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(color.opacity(0.12), in: Capsule())
     }
@@ -289,8 +325,11 @@ enum DS {
 
     /// Type scale: one face (SF Pro) at a few fixed steps; rounded only for figures.
     static let title = Font.system(size: 24, weight: .semibold)
-    static let caption = Font.system(size: 11, weight: .medium)
+    static let display = Font.system(size: 22, weight: .semibold)
+    static let heading = Font.system(size: 14, weight: .semibold)
     static let label = Font.system(size: 13)
+    static let small = Font.system(size: 12)
+    static let caption = Font.system(size: 11, weight: .medium)
     static func figure(_ size: CGFloat) -> Font { .system(size: size, weight: .medium).monospacedDigit() }
 }
 
@@ -312,7 +351,7 @@ struct SearchField: View {
                     .buttonStyle(.plain)
             }
         }
-        .font(.callout)
+        .font(DS.label)
         .padding(.horizontal, 12).padding(.vertical, 6)
         .frame(width: 220)
         .liquidGlass(in: Capsule())
@@ -384,9 +423,9 @@ extension View {
     @ViewBuilder
     func glassButton(prominent: Bool = false) -> some View {
         if #available(macOS 26, *) {
-            if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
+            if prominent { buttonStyle(PrimaryCapsuleStyle()) } else { buttonStyle(.glass).buttonBorderShape(.capsule) }
         } else {
-            if prominent { buttonStyle(.borderedProminent) } else { buttonStyle(.bordered) }
+            if prominent { buttonStyle(PrimaryCapsuleStyle()) } else { buttonStyle(.bordered).buttonBorderShape(.capsule) }
         }
     }
 
@@ -399,6 +438,23 @@ extension View {
     }
 }
 
+/// The one filled button: a soft accent capsule with white text.
+struct PrimaryCapsuleStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(DS.small.weight(.medium))
+            .lineLimit(1).fixedSize()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 4)
+            .background(Color.accentColor.opacity(enabled ? 1 : 0.4), in: Capsule())
+            .shadow(color: Color.accentColor.opacity(0.25), radius: 4, y: 1)
+            .opacity(configuration.isPressed ? 0.8 : 1)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(DS.spring, value: configuration.isPressed)
+    }
+}
+
 /// Big pane title with optional trailing controls, as at the top of every Surge pane.
 struct PaneHeader<Trailing: View>: View {
     let title: String
@@ -408,7 +464,7 @@ struct PaneHeader<Trailing: View>: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(DS.title).tracking(-0.3)
-                if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+                if let subtitle { Text(subtitle).font(DS.small).foregroundStyle(.secondary) }
             }
             Spacer()
             HStack(spacing: 8) { trailing }.glassButton()
@@ -490,11 +546,11 @@ struct BigNumber: View {
     var unit: String = ""
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
-            Text(value).font(DS.figure(30))
+            Text(value).font(DS.figure(28))
                 .fixedSize()
                 .contentTransition(.numericText())
                 .animation(.smooth(duration: 0.4), value: value)
-            if !unit.isEmpty { Text(unit).font(.callout).foregroundStyle(.secondary).fixedSize() }
+            if !unit.isEmpty { Text(unit).font(DS.label).foregroundStyle(.secondary).fixedSize() }
         }
     }
 }
@@ -557,8 +613,8 @@ struct ActivityView: View {
 
     private func info(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title3.weight(.medium)).lineLimit(1).truncationMode(.middle)
+            Text(label).font(DS.small).foregroundStyle(.secondary)
+            Text(value).font(DS.heading).lineLimit(1).truncationMode(.middle)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -570,11 +626,11 @@ struct ActivityView: View {
                 Spacer()
                 StatusDot(state: core.state)
             }
-            Text(core.state.label).font(.system(size: 26, weight: .semibold))
+            Text(core.state.label).font(DS.display)
             if case .failed(let why) = core.state {
-                Text(why).font(.caption).foregroundStyle(.red).lineLimit(3).textSelection(.enabled)
+                Text(why).font(DS.small).foregroundStyle(.red).lineLimit(3).textSelection(.enabled)
             } else if core.privileged {
-                Text("增强模式 (root)").font(.caption).foregroundStyle(.orange)
+                Text("增强模式 (root)").font(DS.small).foregroundStyle(.orange)
             }
             Spacer(minLength: 0)
             HStack {
@@ -611,10 +667,10 @@ struct ActivityView: View {
 
     private func stat(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(value).font(DS.figure(20))
+            Text(value).font(DS.figure(18))
                 .contentTransition(.numericText())
                 .animation(.smooth, value: value)
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(label).font(DS.small).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -627,23 +683,23 @@ struct ActivityView: View {
             BigNumber(value: n, unit: u)
             HStack {
                 VStack(alignment: .leading) {
-                    Text("上传").font(.caption2).foregroundStyle(.secondary)
-                    Text(formatBytes(up)).font(.callout.monospacedDigit())
+                    Text("上传").font(DS.caption).foregroundStyle(.secondary)
+                    Text(formatBytes(up)).font(DS.label.monospacedDigit())
                 }
                 Spacer()
                 VStack(alignment: .trailing) {
-                    Text("下载").font(.caption2).foregroundStyle(.secondary)
-                    Text(formatBytes(down)).font(.callout.monospacedDigit())
+                    Text("下载").font(DS.caption).foregroundStyle(.secondary)
+                    Text(formatBytes(down)).font(DS.label.monospacedDigit())
                 }
             }
             GeometryReader { geo in
                 let total = max(up + down, 1)
                 HStack(spacing: 3) {
-                    RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.22)).frame(width: max(4, (geo.size.width - 3) * up / total))
-                    RoundedRectangle(cornerRadius: 3).fill(Color.accentColor)
+                    Capsule().fill(Color.primary.opacity(0.15)).frame(width: max(4, (geo.size.width - 3) * up / total))
+                    Capsule().fill(Color.accentColor)
                 }
             }
-            .frame(height: 14)
+            .frame(height: 8)
             .opacity(up + down == 0 ? 0.3 : 1)
         }
         .card()
@@ -660,7 +716,7 @@ struct ActivityView: View {
             HStack {
                 CardTitle(text: "请求排行", icon: "list.bullet")
                 Spacer()
-                Button("查看全部") { pane = .requests }.buttonStyle(.link).font(.caption)
+                Button("查看全部") { pane = .requests }.buttonStyle(.link).font(DS.small)
             }
             GlassSegmented(options: [(0, "域名", nil), (1, "策略", nil)], selection: $topBy)
             if top.isEmpty {
@@ -701,7 +757,7 @@ struct RateCard: View {
             HStack {
                 CardTitle(text: title, icon: title == "上传" ? "arrow.up" : "arrow.down")
                 Spacer()
-                Text("\(formatBytes(peak))/s").font(.caption2).foregroundStyle(.tertiary)
+                Text("\(formatBytes(peak))/s").font(DS.caption).foregroundStyle(.tertiary)
             }
             BigNumber(value: n, unit: u)
             Chart {
@@ -801,15 +857,15 @@ struct FeatureCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(title).font(.headline)
+                Text(title).font(DS.heading)
                 Spacer()
                 if let isOn { Toggle("", isOn: isOn).toggleStyle(.switch).labelsHidden().controlSize(.small) }
             }
-            Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(detail).font(DS.small).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
             HStack(spacing: 6) {
                 Circle().fill(statusOn ? Color.green : Color.primary.opacity(0.2)).frame(width: 6, height: 6)
-                Text(status).font(.caption).lineLimit(1).truncationMode(.middle)
+                Text(status).font(DS.small).lineLimit(1).truncationMode(.middle)
             }
         }
         .frame(minHeight: 110, alignment: .topLeading)
@@ -851,7 +907,7 @@ struct PolicyView: View {
                 GlassSegmented(options: OutboundMode.allCases.map { ($0, $0.title, $0.icon) },
                                selection: Binding(get: { mode }, set: { core.setMode($0.rawValue) }))
                 .disabled(core.state != .running)
-                Text(mode.explanation).font(.caption).foregroundStyle(.secondary)
+                Text(mode.explanation).font(DS.small).foregroundStyle(.secondary)
 
                 HStack {
                     SectionTitle(text: "策略组")
@@ -898,16 +954,16 @@ struct GroupCard: View {
         let latency = group.options.first { $0.name == group.selected }?.latencyMs
         Button { showing = true } label: {
             VStack(alignment: .leading, spacing: 3) {
-                Text(kindLabel).font(.caption2).foregroundStyle(.secondary)
-                Text(group.group).font(.headline).lineLimit(1)
+                Text(kindLabel).font(DS.caption).foregroundStyle(.secondary)
+                Text(group.group).font(DS.heading).lineLimit(1)
                 Spacer(minLength: 8)
                 HStack {
-                    Image(systemName: group.isSelectable ? "hand.point.up.left" : "bolt.horizontal").font(.caption2).foregroundStyle(.tertiary)
-                    Text(group.selected).font(.caption.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
+                    Image(systemName: group.isSelectable ? "hand.point.up.left" : "bolt.horizontal").font(DS.caption).foregroundStyle(.tertiary)
+                    Text(group.selected).font(DS.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     if latency != nil {
                         let (t, c) = latencyStyle(latency)
-                        Text(t).font(.caption2.monospacedDigit()).foregroundStyle(c)
+                        Text(t).font(DS.caption.monospacedDigit()).foregroundStyle(c)
                     }
                 }
             }
@@ -931,8 +987,8 @@ struct GroupOptions: View {
         let g = core.groups.first { $0.group == group.group } ?? group
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(g.group).font(.headline)
-                Text(g.type).font(.caption).foregroundStyle(.secondary)
+                Text(g.group).font(DS.heading)
+                Text(g.type).font(DS.small).foregroundStyle(.secondary)
                 Spacer()
                 Button("测试") { core.test(group: g.group) }.glassButton().controlSize(.small).disabled(g.isSelectable)
             }
@@ -1027,17 +1083,17 @@ struct NodeCard: View {
         // A node's latency, if any group has tested it.
         let latency = core.groups.lazy.flatMap(\.options).first { $0.name == name && $0.latencyMs != nil }?.latencyMs
         VStack(alignment: .leading, spacing: 3) {
-            Text((parts.first ?? "").uppercased()).font(.caption2).foregroundStyle(.secondary)
-            Text(name).font(.headline).lineLimit(1)
+            Text((parts.first ?? "").uppercased()).font(DS.caption).foregroundStyle(.secondary)
+            Text(name).font(DS.heading).lineLimit(1)
             Spacer(minLength: 6)
             HStack {
                 // Server and port only; credentials stay out of the list.
                 Text(parts.dropFirst().prefix(2).filter { !$0.contains("=") }.joined(separator: ":"))
-                    .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .font(.system(size: 11).monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if latency != nil {
                     let (t, c) = latencyStyle(latency)
-                    Text(t).font(.caption2.monospacedDigit()).foregroundStyle(c)
+                    Text(t).font(DS.caption.monospacedDigit()).foregroundStyle(c)
                 }
             }
         }
@@ -1053,7 +1109,7 @@ struct AddCard: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Image(systemName: "plus").font(.title2).foregroundStyle(.secondary)
+            Image(systemName: "plus").font(.system(size: 18, weight: .light)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: 84)
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(.separator))
                 .contentShape(Rectangle())
@@ -1072,7 +1128,7 @@ struct AddNodeSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.gap) {
-            Text("添加节点").font(.title2.bold())
+            Text("添加节点").font(.system(size: 20, weight: .semibold))
             Text("粘贴分享链接（ss://、vmess://、vless://、trojan://、hysteria2://）或代理行，例如 `HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=…`。")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             TextField("分享链接或代理行", text: $input, axis: .vertical)
@@ -1107,13 +1163,13 @@ struct AddSubscriptionSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.gap) {
-            Text("添加订阅").font(.title2.bold())
+            Text("添加订阅").font(.system(size: 20, weight: .semibold))
             Form {
                 TextField("名称", text: $name, prompt: Text("Subscription"))
                 TextField("URL", text: $url, prompt: Text("https://…"))
                 TextField("名称过滤（正则，可选）", text: $filter, prompt: Text("例如 香港|HK"))
             }
-            Text("保存配置前会先下载并检查节点。").font(.caption).foregroundStyle(.secondary)
+            Text("保存配置前会先下载并检查节点。").font(DS.small).foregroundStyle(.secondary)
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
                 Spacer()
@@ -1185,7 +1241,7 @@ struct OutboundTag: View {
     let name: String
     var body: some View {
         let color: Color = name == "REJECT" ? .red : name == "DIRECT" ? .secondary : .accentColor
-        Text(name).font(.caption.weight(.medium)).lineLimit(1)
+        Text(name).font(DS.caption).lineLimit(1)
             .foregroundStyle(color)
             .padding(.horizontal, 6).padding(.vertical, 1)
             .background(color.opacity(0.12), in: Capsule())
@@ -1260,9 +1316,11 @@ struct RuleView: View {
 
     private var routeTest: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("规则测试").font(.headline)
+            Text("规则测试").font(DS.heading)
             HStack {
-                TextField("主机或 主机:端口", text: $target).textFieldStyle(.roundedBorder).onSubmit(check)
+                TextField("主机或 主机:端口", text: $target).textFieldStyle(.plain).font(DS.label).onSubmit(check)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.05), in: Capsule())
                 Button("测试", action: check).glassButton(prominent: true).disabled(target.isEmpty)
             }
             if let result {
@@ -1271,11 +1329,11 @@ struct RuleView: View {
                     LabeledContent("策略", value: result.policy)
                     LabeledContent("出站") { OutboundTag(name: result.outbound) }
                 }
-                .font(.callout)
+                .font(DS.label)
             } else if let error {
-                Text(error).foregroundStyle(.red).font(.callout)
+                Text(error).foregroundStyle(.red).font(DS.label)
             } else {
-                Text("查看目标会匹配哪条规则、使用哪个出站，不会真正建立连接。").font(.caption).foregroundStyle(.secondary)
+                Text("查看目标会匹配哪条规则、使用哪个出站，不会真正建立连接。").font(DS.small).foregroundStyle(.secondary)
             }
         }
         .card()
