@@ -1,7 +1,8 @@
 """Real-use API assertions and local traffic fixtures; Python stdlib only.
 
 CI only: python3 -I scripts/ci/e2e_api.py <api host:port> <socks host:port> <work>
-Fixture modes: --serve (HTTP on 127.0.0.1:18080), --traffic <socks host:port>,
+Fixture modes: --serve (HTTP :18080 and DNS :18053 on loopback), --traffic <socks host:port>,
+--probe-dns <socks host:port> (HTTP requests with core-resolved hostnames),
 --wait-traffic <api host:port> (prove three downloads are transferring).
 No public network destinations, curl configuration, or environment proxies are used.
 """
@@ -12,8 +13,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import socketserver
+import struct
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.parse
@@ -22,6 +26,7 @@ import urllib.parse
 HTTP_URL = "http://127.0.0.1:18080"
 FILE_SIZE = 64 * 1024 * 1024
 MAX_RATE = 256 * 1024
+DNS_NAMES = ("files.sluice.test", "assets.sluice.test")
 CURL_ENV = {k: v for k, v in os.environ.items() if k.lower() not in
             {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
 
@@ -60,6 +65,42 @@ def curl_download(socks, label, source_port=None):
     if source_port is not None:
         args += ["--local-port", str(source_port)]
     return args + [f"{HTTP_URL}/download?{urllib.parse.urlencode({'client': label})}"]
+
+
+def curl_health(socks, hostname):
+    return ["curl", "--disable", "--fail", "--silent", "--show-error",
+            "--connect-timeout", "3", "--max-time", "5", "--noproxy", "",
+            "--socks5-hostname", socks, "--output", os.devnull,
+            f"http://{hostname}:18080/health"]
+
+
+def probe_dns(socks):
+    for name in DNS_NAMES:
+        subprocess.run(curl_health(socks, name), check=True, env=CURL_ENV, timeout=7)
+
+
+class DNSHandler(socketserver.BaseRequestHandler):
+    """A real DNS upstream with stable TTLs, independent of public DNS/internet."""
+    def handle(self):
+        packet, sock = self.request
+        if len(packet) < 12 or struct.unpack_from("!H", packet, 4)[0] != 1:
+            return
+        labels, end = [], 12
+        while end < len(packet) and 0 < packet[end] <= 63:
+            size = packet[end]
+            labels.append(packet[end + 1:end + 1 + size])
+            end += size + 1
+        if end + 5 > len(packet) or packet[end] != 0:
+            return
+        qtype, qclass = struct.unpack_from("!HH", packet, end + 1)
+        end += 5
+        known = b".".join(labels).decode("ascii", errors="replace").lower() in DNS_NAMES
+        answer = known and qtype == 1 and qclass == 1
+        header = packet[:2] + struct.pack("!HHHHH", 0x8180 if known else 0x8183, 1, int(answer), 0, 0)
+        response = header + packet[12:end]
+        if answer:
+            response += b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 600, 4) + b"\x7f\x00\x00\x01"
+        sock.sendto(response, self.client_address)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -127,6 +168,7 @@ class Checks:
         self.downloads = []
         self.samples = []
         self.closed_id = None
+        self.node_tests = []
         self.transcript = (work / "api-exchanges.jsonl").open("w")
 
     def call(self, method, endpoint, **query):
@@ -225,7 +267,21 @@ class Checks:
                     and isinstance(latency, int) and isinstance(connect, int)
                     and 0 <= connect <= latency and latency > 0 and result.get("error") is None,
                     str(result))
+        self.node_tests.append(result)
+        # The app displays these exact API responses, rather than re-testing a
+        # different URL and showing incomparable measurements in screenshots.
+        (self.work / "node-tests.json").write_text(json.dumps(self.node_tests, indent=2) + "\n")
         return json.dumps(result)
+
+    def dns(self):
+        probe_dns(self.socks)
+        cache = self.call("GET", "/v1/dns")
+        require(bool(cache.get("entries")), f"DNS cache is empty after hostname traffic: {cache}")
+        for name in DNS_NAMES:
+            require(any(e.get("name") == name and e.get("type") == "A"
+                        and "127.0.0.1" in e.get("answers", []) and e.get("ttl", 0) > 0
+                        for e in cache["entries"]), f"Missing live cache entry for {name}: {cache}")
+        return json.dumps(cache)
 
     def history(self):
         a = self.call("GET", "/v1/stats")
@@ -307,18 +363,26 @@ def traffic(socks):
     signal.signal(signal.SIGTERM, end)
     signal.signal(signal.SIGINT, end)
     children = []
+    probes = []
+    next_probe = 0
     try:
         while running:
             children = [p for p in children if p.poll() is None]  # poll also reaps
             while len(children) < 3:
                 children.append(subprocess.Popen(curl_download(socks, "hook-traffic"), env=CURL_ENV))
+            probes = [p for p in probes if p.poll() is None]
+            if not probes and time.monotonic() >= next_probe:
+                # New routing logs must arrive after each screenshot app attaches:
+                # SSE has no replay of the long downloads' earlier open events.
+                probes = [subprocess.Popen(curl_health(socks, name), env=CURL_ENV) for name in DNS_NAMES]
+                next_probe = time.monotonic() + 2
             time.sleep(0.2)
     finally:
         # Signal all children before waiting on any one of them.
-        for p in children:
+        for p in children + probes:
             if p.poll() is None:
                 p.terminate()
-        for p in children:
+        for p in children + probes:
             stop(p)
 
 
@@ -364,6 +428,7 @@ def main(api, socks, directory):
                 checks.run(f"node latency {node}", lambda node=node: checks.node_test(node))
             checks.run("stats history and attributed totals grow", checks.history)
             checks.run("profile switch and restore change new connection chains", checks.profile)
+            checks.run("hostname traffic populates core DNS cache", checks.dns)
             checks.run("SSE traffic, conn_open, conn_close and log payloads", checks.events)
         finally:
             for dl in checks.downloads:
@@ -379,11 +444,15 @@ if __name__ == "__main__":
     if os.environ.get("GITHUB_ACTIONS") != "true":
         sys.exit("FAIL e2e: network checks may only run on GitHub Actions")
     if sys.argv[1:] == ["--serve"]:
+        dns = socketserver.UDPServer(("127.0.0.1", 18053), DNSHandler)
+        threading.Thread(target=dns.serve_forever, daemon=True).start()
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 18080), Handler)
         server.daemon_threads = True
         server.serve_forever()
     elif len(sys.argv) == 3 and sys.argv[1] == "--traffic":
         traffic(sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[1] == "--probe-dns":
+        probe_dns(sys.argv[2])
     elif len(sys.argv) == 3 and sys.argv[1] == "--wait-traffic":
         wait_for_traffic(sys.argv[2])
     elif len(sys.argv) == 4:

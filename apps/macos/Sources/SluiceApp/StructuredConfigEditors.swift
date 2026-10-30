@@ -62,32 +62,61 @@ struct StructuredConfigEditors: View {
     }
 
     private var ruleTable: some View {
-        Table(document.rules, selection: $selection) {
-            TableColumn("类型") { Text($0.value.type).font(DS.small) }.width(min: 105, ideal: 130)
-            TableColumn("值") { Text($0.value.value).lineLimit(1).help($0.value.value) }.width(min: 100, ideal: 240)
-            TableColumn("策略") { Text($0.value.policy) }.width(min: 80, ideal: 130)
-            TableColumn("选项") { Text($0.value.options).foregroundStyle(DS.ink2) }.width(min: 70, ideal: 120)
-        }
-        .font(DS.label)
-        .overlay { if document.rules.isEmpty { empty("还没有规则", detail: "添加规则后，流量将按从上到下的顺序匹配。") } }
-        .contextMenu(forSelectionType: Int.self) { items in
-            if let id = items.first { Button("编辑") { edit(id) } }
-        } primaryAction: { items in if let id = items.first { edit(id) } }
+        editorTable(headers: ["类型", "值", "策略", "选项"], weights: [0.25, 0.33, 0.23, 0.19],
+                    rows: document.rules.map { ($0.id, [$0.value.type, $0.value.value, $0.value.policy, $0.value.options]) })
+            .overlay { if document.rules.isEmpty { empty("还没有规则", detail: "添加规则后，流量将按从上到下的顺序匹配。") } }
     }
 
     private var groupTable: some View {
-        Table(document.groups, selection: $selection) {
-            TableColumn("名称") { Text($0.value.name) }.width(min: 90, ideal: 150)
-            TableColumn("类型") { Text($0.value.type).foregroundStyle(DS.ink2) }.width(min: 90, ideal: 120)
-            TableColumn("成员") { Text($0.value.members.joined(separator: ", ")).lineLimit(2) }.width(min: 120, ideal: 280)
-            TableColumn("测试 URL") { Text($0.value.url).lineLimit(1).foregroundStyle(DS.ink2) }.width(min: 100, ideal: 180)
-            TableColumn("间隔（秒）") { Text($0.value.interval).monospacedDigit().foregroundStyle(DS.ink2) }.width(75)
+        editorTable(headers: ["名称", "类型", "成员 / 自动测试"], weights: [0.18, 0.22, 0.60],
+                    rows: document.groups.map { item in
+                        let group = item.value
+                        var detail = group.members.joined(separator: ", ")
+                        if !group.url.isEmpty { detail += "\n" + group.url }
+                        if !group.interval.isEmpty { detail += "\n每 " + group.interval + " 秒测试" }
+                        return (item.id, [group.name, group.type, detail])
+                    })
+            .overlay { if document.groups.isEmpty { empty("还没有策略组", detail: "添加策略组，将节点组合为手动或自动策略。") } }
+    }
+
+    /// Proportional columns and variable-height rows keep all fields readable in
+    /// the space beside the profile list, including long member lists and URLs.
+    private func editorTable(headers: [String], weights: [CGFloat], rows: [(id: Int, cells: [String])]) -> some View {
+        GeometryReader { geometry in
+            let width = max(0, geometry.size.width - 16 - CGFloat(headers.count - 1) * 12)
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(headers.indices, id: \.self) { column in
+                        Text(headers[column]).font(DS.caption).foregroundStyle(DS.ink2)
+                            .frame(width: width * weights[column], alignment: .leading)
+                    }
+                }.padding(.vertical, 10)
+                Divider()
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 2) {
+                        ForEach(rows, id: \.id) { row in
+                            HStack(alignment: .top, spacing: 12) {
+                                ForEach(headers.indices, id: \.self) { column in
+                                    Text(row.cells[column]).font(DS.small)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(width: width * weights[column], alignment: .leading)
+                                        .help(row.cells[column])
+                                }
+                            }
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(selection == row.id ? DS.accent.opacity(0.10) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: DS.smallRadius))
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) { selection = row.id; edit(row.id) }
+                            .onTapGesture { selection = row.id }
+                            .contextMenu { Button("编辑") { edit(row.id) } }
+                            .accessibilityAddTraits(selection == row.id ? [.isSelected] : [])
+                        }
+                    }
+                }
+            }
         }
-        .font(DS.label)
-        .overlay { if document.groups.isEmpty { empty("还没有策略组", detail: "添加策略组，将节点组合为手动或自动策略。") } }
-        .contextMenu(forSelectionType: Int.self) { items in
-            if let id = items.first { Button("编辑") { edit(id) } }
-        } primaryAction: { items in if let id = items.first { edit(id) } }
     }
 
     private func empty(_ title: String, detail: String) -> some View {

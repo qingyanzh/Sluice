@@ -12,10 +12,11 @@ enum HelperStatus: Equatable {
         switch status {
         case .enabled: return .ready
         case .requiresApproval: return .needsApproval
-        case .notRegistered:
+        case .notRegistered, .notFound:
+            // Service Management may not know an unregistered daemon yet. Bundle
+            // validation above determines whether its files are actually missing;
+            // preserve a real registration failure after the user tries installing.
             return error.map { .failed($0) } ?? .notInstalled
-        case .notFound:
-            return .failed(error ?? "找不到增强模式辅助程序，请重新安装完整的 Sluice.app 后重试。")
         @unknown default:
             return .failed(error ?? "无法识别辅助程序状态，请重试。")
         }
@@ -87,8 +88,16 @@ enum HelperClient {
 
     /// Only a built Sluice.app carries the daemon plist; `swift run` doesn't.
     static var bundled: Bool {
-        let plist = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchDaemons/\(SluiceHelperInfo.plistName)")
-        return FileManager.default.fileExists(atPath: plist.path)
+        bundled(in: Bundle.main.bundleURL)
+    }
+
+    static func bundled(in bundle: URL) -> Bool {
+        let plist = bundle.appendingPathComponent("Contents/Library/LaunchDaemons/\(SluiceHelperInfo.plistName)")
+        guard let data = try? Data(contentsOf: plist),
+              let info = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
+              info["Label"] as? String == SluiceHelperInfo.machService,
+              info["BundleProgram"] as? String == "Contents/MacOS/SluiceHelper" else { return false }
+        return FileManager.default.isExecutableFile(atPath: bundle.appendingPathComponent("Contents/MacOS/SluiceHelper").path)
     }
 
     /// Registers the daemon on first use; macOS then asks the user to approve it.
@@ -116,6 +125,7 @@ enum HelperClient {
         switch cmd {
         case "status":
             print("bundled \(bundled), status \(describe(service.status))")
+            status = bundled ? 0 : 1
         case "register":
             print("\(prepare()), status \(describe(service.status))")
         case "unregister":

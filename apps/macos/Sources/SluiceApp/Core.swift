@@ -243,6 +243,9 @@ final class Core: ObservableObject {
                 }
             }
             appendLog(level: "APP", message: "attached to existing core at \(attachment.host):\(attachment.port)")
+            // There is no child stdout/log file in attach mode. Subscribe immediately;
+            // the shared monitor reconnects this stream and consumes its log events.
+            if let api { eventTask = Task { await self.followEvents(api) } }
             pollTask = Task { await self.poll() }
         }
     }
@@ -744,12 +747,16 @@ final class Core: ObservableObject {
         return true
     }
 
-    private func updateGroups(_ fresh: [PolicyGroup], preferTestResults: Bool = false) {
+    func updateGroups(_ fresh: [PolicyGroup], preferTestResults: Bool = false) {
         // A request started before a test finished must not overwrite its results.
-        // Subsequent snapshots carry the core's newer automatic health checks.
+        // Keep explicit node-test measurements aligned with the detail sheet;
+        // automatic group checks may measure a different URL. A group test
+        // explicitly replaces those measurements for its options.
         if !preferTestResults {
             for option in fresh.flatMap(\.options) {
-                if let latency = option.latencyMs { nodeLatencies[option.name] = latency }
+                if nodeTests[option.name] == nil, let latency = option.latencyMs {
+                    nodeLatencies[option.name] = latency
+                }
             }
         }
         groups = fresh.map { group in
@@ -793,7 +800,10 @@ final class Core: ObservableObject {
             do {
                 let result = try await api.test(group: group)
                 latencyRevision += 1
-                for option in result.results { nodeLatencies[option.name] = option.latencyMs ?? -1 }
+                for option in result.results {
+                    nodeTests.removeValue(forKey: option.name)
+                    nodeLatencies[option.name] = option.latencyMs ?? -1
+                }
                 updateGroups(groups.map { current in
                     PolicyGroup(group: current.group, type: current.type,
                                 selected: current.group == result.tested ? result.selected : current.selected,

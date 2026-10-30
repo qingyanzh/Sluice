@@ -42,7 +42,7 @@ final class E2ELaunchTests: XCTestCase {
         otherDefaults.set("Untouched", forKey: ProfileStore.activeNameKey)
         defer { otherDefaults.removePersistentDomain(forName: otherSuite) }
         let testResults = directory.appendingPathComponent("node-tests.json")
-        try #"[{"node":"SS","ok":true,"latency_ms":7}]"#.write(to: testResults, atomically: true, encoding: .utf8)
+        try #"[{"node":"SS","ok":true,"connect_ms":2,"latency_ms":85}]"#.write(to: testResults, atomically: true, encoding: .utf8)
         let launch = E2ELaunch(host: "127.0.0.1", port: 16270, config: config, destination: "nodes",
                                ready: directory.appendingPathComponent("ready.json"), nodeTests: testResults)
         let core = Core(attachment: launch)
@@ -54,8 +54,12 @@ final class E2ELaunchTests: XCTestCase {
         XCTAssertEqual(core.api?.port, 16270)
         XCTAssertEqual(core.requestedPane, .nodes)
         XCTAssertEqual(otherDefaults.string(forKey: ProfileStore.activeNameKey), "Untouched")
-        XCTAssertEqual(core.nodeLatencies["SS"], 7)
+        XCTAssertEqual(core.nodeLatencies["SS"], 85)
         XCTAssertEqual(core.nodeTests["SS"]?.ok, true)
+        core.updateGroups([PolicyGroup(group: "P", type: "select", selected: "SS",
+                                       options: [GroupOption(name: "SS", latencyMs: 2)])])
+        XCTAssertEqual(core.nodeLatencies["SS"], 85, "Health snapshots must not replace the detailed API latency")
+        XCTAssertEqual(core.groups.first?.options.first?.latencyMs, 85)
         XCTAssertFalse(core.autoStart)
         XCTAssertTrue(core.isActive)
         core.start() // Must not spawn a process, even for an enhanced-mode fixture.

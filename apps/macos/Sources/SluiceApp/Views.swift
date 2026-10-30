@@ -1544,7 +1544,7 @@ struct OutboundTag: View {
     }
 }
 
-/// One request: a monogram, the host in emphasis, its route beneath, and the outbound and time at the end.
+/// One request: a destination icon, host:port, route, outbound and time.
 struct RequestRow: View {
     let connection: Connection
     let selected: Bool
@@ -1553,13 +1553,13 @@ struct RequestRow: View {
     @State private var hovering = false
 
     var body: some View {
-        let host = connection.target.split(separator: ":").dropLast().joined(separator: ":").ifEmpty(connection.target)
         Button(action: action) {
             HStack(spacing: 12) {
-                Monogram(text: host, outbound: connection.outbound)
+                RequestDestinationIcon(outbound: connection.outbound)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
-                        Text(host).font(DS.label.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                        Text(connection.target).font(DS.label.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                            .help(connection.target)
                         Spacer(minLength: 4)
                         OutboundTag(name: connection.outbound)
                     }
@@ -1594,19 +1594,17 @@ struct RequestRow: View {
     }
 }
 
-/// A quiet initial in a grey tile standing in for a site's icon.
-struct Monogram: View {
-    let text: String
+/// A network destination; colour follows the outbound, without IP-derived initials.
+struct RequestDestinationIcon: View {
     var outbound = "DIRECT"
     var body: some View {
         let tone: Color? = outbound == "REJECT" ? .red : outbound == "DIRECT" ? nil : DS.accent
-        let parts = text.split(separator: ".")
-        let core = parts.count >= 2 ? parts[parts.count - 2] : Substring(text)
-        Text(String(core.prefix(1)).uppercased())
-            .font(.system(size: 12, weight: .bold))
+        Image(systemName: "network")
+            .font(.system(size: 14, weight: .medium))
             .foregroundStyle(tone ?? DS.ink2)
             .frame(width: 28, height: 28)
             .background((tone ?? .primary).opacity(tone == nil ? 0.07 : 0.12), in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
+            .accessibilityLabel("网络目标")
     }
 }
 
@@ -1711,15 +1709,13 @@ struct RequestDetail: View {
     let connection: Connection?
     var body: some View {
         if let c = connection {
-            let host = c.target.split(separator: ":").dropLast().joined(separator: ":").ifEmpty(c.target)
-            let port = c.target.split(separator: ":").last.map(String.init) ?? ""
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 12) {
-                        Monogram(text: host, outbound: c.outbound)
+                        RequestDestinationIcon(outbound: c.outbound)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(host).font(DS.heading).lineLimit(2).textSelection(.enabled)
-                            Text("\(c.proto) · 端口 \(port)").font(DS.caption).foregroundStyle(DS.ink2)
+                            Text(c.target).font(DS.heading).lineLimit(2).textSelection(.enabled)
+                            Text(c.proto).font(DS.caption).foregroundStyle(DS.ink2)
                         }
                     }
                     detailGroup("路由", [("规则", AnyView(Text(c.rule).textSelection(.enabled))),
@@ -2248,33 +2244,43 @@ final class LineNumberRuler: NSRulerView {
     }
     required init(coder: NSCoder) { fatalError() }
 
+    override var isFlipped: Bool { true }
+
+    /// TextKit lays out visual fragments, while numbers belong to logical lines.
+    /// Start at each logical line's UTF-16 offset and use only its first fragment.
+    static func markers(in tv: NSTextView) -> [(number: Int, rect: NSRect)] {
+        guard let lm = tv.layoutManager, let tc = tv.textContainer else { return [] }
+        lm.ensureLayout(for: tc)
+        let text = tv.string as NSString
+        var markers: [(number: Int, rect: NSRect)] = []
+        var index = 0
+        while index < text.length {
+            let glyph = lm.glyphIndexForCharacter(at: index)
+            let fragment = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            markers.append((markers.count + 1, fragment.offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)))
+            index = NSMaxRange(text.lineRange(for: NSRange(location: index, length: 0)))
+        }
+        if text.length == 0 || text.hasSuffix("\n") || text.hasSuffix("\r") {
+            markers.append((markers.count + 1, lm.extraLineFragmentRect.offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)))
+        }
+        return markers
+    }
+
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        guard let tv = clientView as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer else { return }
-        let s = tv.string as NSString
-        let visible = tv.visibleRect
-        let glyphs = lm.glyphRange(forBoundingRect: visible, in: tc)
-        let chars = lm.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
-        // Line number of the first visible character.
-        var line = 1
-        s.enumerateSubstrings(in: NSRange(location: 0, length: chars.location), options: [.byLines, .substringNotRequired]) { _, _, _, _ in line += 1 }
-        if chars.location > 0, s.character(at: chars.location - 1) != 10 { line -= 1 }
+        guard let tv = clientView as? NSTextView else { return }
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(DS.ink3)]
-        let inset = tv.textContainerOrigin.y
-        var index = chars.location
-        while index < NSMaxRange(chars) || (index == s.length && index == chars.location) {
-            let lineRange = s.lineRange(for: NSRange(location: index, length: 0))
-            let glyph = lm.glyphIndexForCharacter(at: lineRange.location)
-            let frag = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-            let y = convert(NSPoint(x: 0, y: frag.minY + inset), from: tv).y
-            let label = "\(line)" as NSString
+        for marker in Self.markers(in: tv) where marker.rect.intersects(tv.visibleRect) {
+            // Convert the whole fragment, including the text inset and scroll offset.
+            let fragment = convert(marker.rect, from: tv)
+            let label = "\(marker.number)" as NSString
             var a = attrs
-            if line == errorLine { a[.foregroundColor] = NSColor.systemRed; a[.font] = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .bold) }
+            if marker.number == errorLine {
+                a[.foregroundColor] = NSColor.systemRed
+                a[.font] = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .bold)
+            }
             let size = label.size(withAttributes: a)
-            label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y + (frag.height - size.height) / 2), withAttributes: a)
-            line += 1
-            if NSMaxRange(lineRange) <= index { break }
-            index = NSMaxRange(lineRange)
-            if index >= s.length { break }
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 8,
+                                   y: fragment.minY + (fragment.height - size.height) / 2), withAttributes: a)
         }
     }
 }

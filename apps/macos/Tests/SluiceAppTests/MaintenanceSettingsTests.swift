@@ -29,12 +29,27 @@ final class MaintenanceSettingsTests: XCTestCase {
         XCTAssertEqual(failed.detail, error)
         XCTAssertEqual(HelperStatus.resolve(bundled: true, status: .enabled, error: error), .ready)
         XCTAssertEqual(HelperStatus.resolve(bundled: true, status: .requiresApproval, error: error), .needsApproval)
-        if case .failed = HelperStatus.resolve(bundled: true, status: .notFound) {} else {
-            XCTFail("A missing daemon must be an error, not pending approval")
-        }
+        XCTAssertEqual(HelperStatus.resolve(bundled: true, status: .notFound), .notInstalled)
+        XCTAssertEqual(HelperStatus.resolve(bundled: true, status: .notFound, error: error), .failed(error))
         if case .failed(let message) = HelperStatus.resolve(bundled: false, status: .enabled) {
             XCTAssertTrue(message.contains("Sluice.app"))
         } else { XCTFail("An unbundled app cannot advertise a ready helper") }
+    }
+
+    func testHelperLookupValidatesBothPlistAndExecutable() throws {
+        let bundle = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".app")
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        let plist = bundle.appendingPathComponent("Contents/Library/LaunchDaemons/dev.sluice.Sluice.helper.plist")
+        let binary = bundle.appendingPathComponent("Contents/MacOS/SluiceHelper")
+        try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let info = ["Label": "dev.sluice.Sluice.helper", "BundleProgram": "Contents/MacOS/SluiceHelper"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: plist)
+        XCTAssertFalse(HelperClient.bundled(in: bundle), "A plist alone does not constitute a packaged helper")
+        try Data("helper".utf8).write(to: binary)
+        XCTAssertFalse(HelperClient.bundled(in: bundle), "The daemon must be executable")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        XCTAssertTrue(HelperClient.bundled(in: bundle))
     }
 
     func testUpdateInfoUsesFeedRatherThanInstalledVersionForChannel() {

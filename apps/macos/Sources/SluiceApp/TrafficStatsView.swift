@@ -125,7 +125,9 @@ struct TrafficStatsView: View {
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 5)) { _ in
                 AxisGridLine()
-                AxisValueLabel(format: .dateTime.hour().minute().second())
+                AxisValueLabel(format: .dateTime.hour().minute().second(),
+                               collisionResolution: .greedy,
+                               horizontalSpacing: 4)
                     .foregroundStyle(DS.ink3)
             }
         }
@@ -139,6 +141,8 @@ struct TrafficStatsView: View {
                 }
             }
         }
+        // Leave room for the endpoint timestamp, including locales with AM/PM.
+        .padding(.trailing, 40)
         .frame(height: 200)
         .overlay {
             if samples.isEmpty {

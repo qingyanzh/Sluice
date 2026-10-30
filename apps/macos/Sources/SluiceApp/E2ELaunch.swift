@@ -76,6 +76,7 @@ struct E2ELaunch {
                 window.makeKeyAndOrderFront(nil)
                 if core.state == .running, core.traffic != nil, core.stats != nil,
                    !core.connections.isEmpty, core.rateHistory.count >= 4,
+                   destination != "logs" || (core.eventsConnected && core.logs.contains { $0.level != "APP" }),
                    destination != "requests-active" || !core.activeConnections.isEmpty {
                     // Let pane-local DNS/rules loads, scrolling and entrance animations settle.
                     try? await Task.sleep(for: .seconds(3))
@@ -83,6 +84,15 @@ struct E2ELaunch {
                         "pane": destination, "window": window.windowNumber,
                         "requests": core.connections.count, "active": core.activeConnections.count,
                         "groups": core.groups.count, "latencies": core.nodeLatencies.count,
+                        "eventsConnected": core.eventsConnected,
+                        "coreLogs": core.logs.filter { $0.level != "APP" }.count,
+                        "nodeLatencies": core.nodeLatencies,
+                        "policyLatencies": Dictionary(uniqueKeysWithValues: core.groups.map { group in
+                            (group.group, Dictionary(uniqueKeysWithValues: group.options.compactMap { option in
+                                option.latencyMs.map { (option.name, $0) }
+                            }))
+                        }),
+                        "helperBundled": HelperClient.bundled,
                         "config": core.configPath,
                     ]
                     do { try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]).write(to: ready, options: .atomic) }

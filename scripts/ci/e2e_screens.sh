@@ -57,14 +57,18 @@ fi
 executable="$PWD/$app/Contents/MacOS/$binary"
 [[ -x $executable ]] || { echo "missing app binary: $executable" >&2; exit 1; }
 
+stage='verify packaged helper using the app lookup'
+"$executable" --helper status > "$work/app/helper-status.txt" 2>&1
+cat "$work/app/helper-status.txt"
+
 # Select the contract's main fixture via the API: the editor hook may have left the
 # core on alt.conf. Read real node names instead of assuming fixture-specific names.
 # Save raw API evidence alongside screenshots; no synthetic UI fixtures are generated.
-stage="prepare profile, node latency tests and API evidence; diagnostics: $work/app"
+stage="prepare profile, measured node latencies and API evidence; diagnostics: $work/app"
 python3 - "$api" "$work" <<'PY'
-import concurrent.futures
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import urllib.parse
@@ -91,52 +95,24 @@ config = Path(profile['path']).resolve()
 if not config.is_file():
     raise SystemExit(f'Active core profile is unavailable: {config}')
 (work / 'app/active-config-path').write_text(str(config))
-text = config.read_text()
-section, nodes, test_url = '', [], os.environ.get('SLUICE_E2E_TEST_URL')
-for raw in text.splitlines():
-    line = raw.strip()
-    if line.startswith('[') and line.endswith(']'):
-        section = line[1:-1]
-    elif line and not line.startswith(('#', ';', '//')):
-        if section == 'Proxy' and '=' in line:
-            nodes.append(line.split('=', 1)[0].strip())
-        if section == 'Proxy Group' and not test_url:
-            for part in line.split(',')[1:]:
-                key, _, value = part.strip().partition('=')
-                if key in ('url', 'test-url') and value.startswith('http://127.0.0.1:'):
-                    test_url = value
-if not nodes:
-    raise SystemExit('No real proxy nodes available for latency screenshots')
-# The API itself is a local HTTP target shared by every fixture node. Its response
-# to HEAD is 404, which still measures a complete proxy handshake + HTTP round trip.
-# A fixture's local group URL or explicit override takes precedence.
-if not test_url:
-    test_url = base + '/v1/traffic'
-
-def test(node):
-    query = {'timeout': '5000'}
-    if test_url:
-        query['url'] = test_url
-    return request('/v1/nodes/' + urllib.parse.quote(node, safe='') + '/test?'
-                   + urllib.parse.urlencode(query), post=True)
-
-with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-    results = list(pool.map(test, nodes))
+# Reuse the exact measured responses printed/asserted by e2e_api.py. Re-testing
+# against the API port used to skip the HTTP fixture's response delay entirely.
+results = json.loads((work / 'node-tests.json').read_text())
+nodes = {line.split('=', 1)[0].strip() for line in config.read_text().split('[Proxy]')[1].split('[Proxy Group]')[0].splitlines()
+         if '=' in line and not line.lstrip().startswith(('#', ';', '//'))}
+if {result.get('node') for result in results} != nodes:
+    raise SystemExit('API node test results do not cover the active profile nodes')
 (work / 'app/node-tests.json').write_text(json.dumps(results, indent=2))
 if not any(result.get('ok') and result.get('latency_ms') is not None for result in results):
     raise SystemExit('No successful node latency test; see app/node-tests.json')
-# Populate the core's resolver cache through a real DIRECT request even when
-# fixture downloads use numeric loopback addresses. This hook only runs in CI.
-if not request('/v1/dns').get('entries'):
-    dns_probe = request('/v1/nodes/DIRECT/test?' + urllib.parse.urlencode({
-        'url': 'http://example.com/', 'timeout': '5000',
-    }), post=True)
-    (work / 'app/dns-probe.json').write_text(json.dumps(dns_probe, indent=2))
+# A profile reload clears DNS; repopulate through the same real SOCKS hostname
+# traffic as the API checks, using the deterministic local DNS upstream.
+subprocess.run([sys.executable, '-I', 'scripts/ci/e2e_api.py', '--probe-dns', os.environ['E2E_SOCKS']], check=True)
 for endpoint in ('policies', 'connections', 'connections/active', 'traffic', 'stats', 'dns'):
     result = request('/v1/' + endpoint)
     (work / ('app/' + endpoint.replace('/', '-') + '.json')).write_text(json.dumps(result, indent=2))
     if endpoint == 'dns' and not result.get('entries'):
-        print('DNS cache remains empty (system resolver fixtures do not cache); capturing its real state.', file=sys.stderr)
+        raise SystemExit('DNS cache is empty after core-resolved hostname traffic')
 PY
 config=$(cat "$work/app/active-config-path")
 
@@ -189,6 +165,26 @@ for pane in "${panes[@]}"; do
     screencapture -x "$shots/$name-failed.png" 2>> "$work/app/$name.log" || true
     stop_app
     continue
+  fi
+  if ! python3 - "$ready" "$work/app/node-tests.json" <<'PY'
+import json
+import sys
+report, results = (json.load(open(path)) for path in sys.argv[1:])
+if not report['helperBundled']:
+    raise SystemExit('App lookup cannot find its packaged helper')
+if report['pane'] == 'logs' and (not report['eventsConnected'] or not report['coreLogs']):
+    raise SystemExit('Logs pane did not receive real core log events')
+expected = {r['node']: r['latency_ms'] if r['ok'] else -1 for r in results}
+if report['nodeLatencies'] != expected:
+    raise SystemExit(f"Displayed node latencies differ from API: {report['nodeLatencies']} != {expected}")
+for group in report['policyLatencies'].values():
+    for node, latency in group.items():
+        if node in expected and latency != expected[node]:
+            raise SystemExit(f'Policy latency for {node} differs from node test: {latency}')
+PY
+  then
+    echo "FAIL: $pane app data assertions; see $ready" >&2
+    failures=$((failures + 1))
   fi
   expected_window=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$ready")
   window_id=$("$work/app/window-id" "$app_pid" "$expected_window")

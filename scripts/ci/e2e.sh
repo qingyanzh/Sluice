@@ -81,6 +81,7 @@ cat > "$work/main.conf" <<EOF
 [General]
 socks5-listen = 127.0.0.1:16253
 api-listen = 127.0.0.1:16270
+dns-server = 127.0.0.1:18053
 [Proxy]
 SS-AES256 = ss, 127.0.0.1, 18388, encrypt-method=aes-256-gcm, password=ss
 VMess = vmess, 127.0.0.1, 19001, username=$uuid
@@ -89,7 +90,14 @@ Hysteria2 = hysteria2, 127.0.0.1, 19443, password=hy, sni=test.local, skip-cert-
 Broken = ss, 127.0.0.1, 18388, encrypt-method=aes-256-gcm, password=deliberately-wrong
 [Proxy Group]
 P = select, SS-AES256, VMess, VLESS, Hysteria2, DIRECT, Broken
+Auto = url-test, SS-AES256, VMess, VLESS, Hysteria2, url=http://127.0.0.1:18080/health, interval=600
 [Rule]
+DOMAIN,files.sluice.test,DIRECT
+DOMAIN-SUFFIX,sluice.test,DIRECT
+DOMAIN-SUFFIX,example.com,Auto
+DOMAIN-KEYWORD,telemetry,REJECT
+IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
 FINAL,P
 EOF
 sed 's/^FINAL,P$/FINAL,DIRECT/' "$work/main.conf" > "$work/alt.conf"
@@ -99,7 +107,9 @@ cat > "$work/fixtures.txt" <<EOF
 API: $E2E_API
 SOCKS5: $E2E_SOCKS
 HTTP: $E2E_HTTP_URL (/health; /download is 64 MiB, throttled to at most 256 KiB/s)
-main.conf: FINAL,P -> SS-AES256; alt.conf: FINAL,DIRECT
+main.conf: loopback downloads hit FINAL,P -> SS-AES256; alt.conf: FINAL,DIRECT
+DNS: 127.0.0.1:18053 resolves files.sluice.test and assets.sluice.test to the HTTP fixture
+Auto: url-test across the four working proxy nodes
 Nodes: SS-AES256, VMess, VLESS, Hysteria2, Broken (wrong SS password)
 EOF
 ./target/release/sluice check "$work/main.conf" > "$work/config-check.log" 2>&1
