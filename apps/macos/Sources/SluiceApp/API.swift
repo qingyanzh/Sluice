@@ -75,8 +75,8 @@ struct APIClient {
         URL(string: "http://127.0.0.1:\(port)\(path)")!
     }
 
-    private func request(_ method: String, _ path: String) async throws -> Data {
-        var req = URLRequest(url: url(path), timeoutInterval: 15)
+    private func request(_ method: String, _ path: String, timeout: TimeInterval = 15) async throws -> Data {
+        var req = URLRequest(url: url(path), timeoutInterval: timeout)
         req.httpMethod = method
         let (data, response) = try await session.data(for: req)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -187,6 +187,14 @@ struct APIClient {
 
     func reload() async throws {
         _ = try await request("POST", "/v1/reload")
+    }
+
+    func exportDiagnostics(to output: URL) async throws -> URL {
+        struct BundlePath: Decodable { let path: String }
+        let data = try await request("GET", "/v1/diag?path=\(Self.escape(output.path))", timeout: 180)
+        let result = try JSONDecoder().decode(BundlePath.self, from: data)
+        guard result.path.hasPrefix("/") else { throw APIError(message: "诊断导出返回了无效的文件路径。") }
+        return URL(fileURLWithPath: result.path)
     }
 
     func route(_ target: String) async throws -> RouteResult {
