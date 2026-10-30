@@ -11,6 +11,40 @@
 //!   GET  /v1/dns                            cached DNS answers with their remaining TTL
 //!   POST /v1/dns/flush                      empty the DNS cache
 //!   GET  /v1/connections                    recent routing decisions, newest last
+//!   GET  /v1/connections/active             open TCP connections, oldest first
+//!   DELETE /v1/connections/<id>             close one open connection
+//!   DELETE /v1/connections                  close every open connection
+//!   GET  /v1/stats                          per-policy/per-node totals and the last 10 min of rates
+//!   POST /v1/nodes/<name>/test              latency of one node (or group) right now
+//!   GET  /v1/events                         Server-Sent Events: traffic, conn_open, conn_close, log
+//!   GET  /v1/profile                        active config file and the other .conf files beside it
+//!   POST /v1/profile?path=<file>            validate and switch to another config file
+//!
+//! `/v1/connections/active` items: `id`, `start_ms` (Unix ms), `network`, `target`, `src`,
+//! `rule`, `policy`, `chain` (the rule's policy through each group's selection down to the
+//! node, node last), `outbound`, `process`, `up`/`down` (bytes so far) and `rate_up`/
+//! `rate_down` (bytes/s over the last second). UDP associations are not listed.
+//!
+//! `/v1/stats` is `{"up","down","active","policies":[{name,up,down}],"nodes":[{name,up,down}],
+//! "history":[{time_ms,up,down,policies:[{policy,up,down}]}]}`: totals in bytes since start,
+//! history one sample per second (bytes/s, oldest first, at most 600), with only the policies
+//! that moved data in that second.
+//!
+//! `/v1/policies/<group>/test` answers `{"tested","selected","results":[{name,latency_ms}]}`,
+//! `latency_ms` null for a failed option. `/v1/nodes/<name>/test` takes `url=` (http://,
+//! default the group default test URL) and `timeout=` (ms, default 5000) and answers
+//! `{"node","outbound","ok","connect_ms","latency_ms","status","error"}`: `connect_ms` is
+//! the time to open a stream through the node (TCP connect plus its handshake), `latency_ms`
+//! until the HTTP status line came back.
+//!
+//! `/v1/events` sends `event: <kind>` / `data: <json>` frames: `traffic` once a second (a
+//! history sample plus `total_up`, `total_down`, `active`), `conn_open`/`conn_close` with a
+//! connection item as above, and `log` (`time_ms`, `level`, `message`). `?types=traffic,log`
+//! limits the kinds; a comment line every 15 s keeps idle streams open.
+//!
+//! `POST /v1/profile` parses the file and builds its router first; on any error it answers
+//! 400 and the current profile stays active. Listen and enhanced-mode settings still need
+//! a restart.
 //!
 //! `/v1/route` also takes `process=`, `src=<ip:port>` and `proto=` to test the
 //! PROCESS-NAME, SRC-IP and PROTOCOL rules.
@@ -80,6 +114,41 @@ fn query_param(query: &str, key: &str) -> Option<String> {
     })
 }
 
+fn totals_json(kind: crate::stats::Kind) -> String {
+    let items: Vec<String> = crate::stats::totals(kind)
+        .iter()
+        .map(|(n, u, d)| format!("{{\"name\":{},\"up\":{u},\"down\":{d}}}", json_str(n)))
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+fn latency_json(l: Option<u64>) -> String {
+    l.map_or("null".to_string(), |ms| ms.to_string())
+}
+
+/// Streams events until the client goes away.
+async fn events(mut sock: TcpStream, query: &str) -> Result<()> {
+    let types: Option<Vec<String>> = query_param(query, "types").map(|t| t.split(',').map(str::to_string).collect());
+    let mut rx = crate::live::subscribe();
+    sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n: sluice events\n\n").await?;
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(15));
+    loop {
+        tokio::select! {
+            e = rx.recv() => match e {
+                Ok(e) if types.as_ref().is_none_or(|t| t.iter().any(|k| k == e.kind)) => {
+                    sock.write_all(format!("event: {}\ndata: {}\n\n", e.kind, e.data).as_bytes()).await?;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    sock.write_all(format!(": dropped {n} events\n\n").as_bytes()).await?;
+                }
+                Err(_) => return Ok(()),
+            },
+            _ = keepalive.tick() => sock.write_all(b": keepalive\n\n").await?,
+        }
+    }
+}
+
 async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
     let router = reloader.handle.current();
     let mut buf = vec![0u8; 8192];
@@ -88,6 +157,9 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
     let mut parts = req.lines().next().unwrap_or_default().split_whitespace();
     let (method, uri) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
     let (path, query) = uri.split_once('?').unwrap_or((uri, ""));
+    if (method, path) == ("GET", "/v1/events") {
+        return events(sock, query).await;
+    }
 
     let (status, body) = match (method, path) {
         ("GET", "/v1/policies") => {
@@ -120,8 +192,55 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
         }
         ("POST", p) if p.starts_with("/v1/policies/") && p.ends_with("/test") => {
             let group = percent_decode(&p["/v1/policies/".len()..p.len() - "/test".len()]);
-            router.check_group(&group).await;
-            ("200 OK", format!("{{\"tested\":{}}}", json_str(&group)))
+            match router.check_group(&group).await {
+                Some(results) => {
+                    let items: Vec<String> = results
+                        .iter()
+                        .map(|(n, l)| format!("{{\"name\":{},\"latency_ms\":{}}}", json_str(n), latency_json(*l)))
+                        .collect();
+                    let selected = router.groups().into_iter().find(|g| g.name == group).map(|g| g.selected).unwrap_or_default();
+                    (
+                        "200 OK",
+                        format!(
+                            "{{\"tested\":{},\"selected\":{},\"results\":[{}]}}",
+                            json_str(&group),
+                            json_str(&selected),
+                            items.join(",")
+                        ),
+                    )
+                }
+                None => ("404 Not Found", format!("{{\"error\":{}}}", json_str(&format!("no such group {group:?}")))),
+            }
+        }
+        ("POST", p) if p.starts_with("/v1/nodes/") && p.ends_with("/test") && p.len() > "/v1/nodes//test".len() => {
+            let node = percent_decode(&p["/v1/nodes/".len()..p.len() - "/test".len()]);
+            let url = query_param(query, "url").unwrap_or_else(|| crate::config::DEFAULT_TEST_URL.to_string());
+            let ms = query_param(query, "timeout").and_then(|t| t.parse().ok()).unwrap_or(5000u64).clamp(100, 60_000);
+            match router.test_node(&node, &url, std::time::Duration::from_millis(ms)).await {
+                Ok(t) => (
+                    "200 OK",
+                    format!(
+                        "{{\"node\":{},\"outbound\":{},\"ok\":true,\"connect_ms\":{},\"latency_ms\":{},\"status\":{},\"error\":null}}",
+                        json_str(&node),
+                        json_str(&t.outbound),
+                        t.connect_ms,
+                        t.latency_ms,
+                        t.status
+                    ),
+                ),
+                Err(e) if e.to_string().starts_with("no such node") => {
+                    ("404 Not Found", format!("{{\"error\":{}}}", json_str(&e.to_string())))
+                }
+                Err(e) => (
+                    "200 OK",
+                    format!(
+                        "{{\"node\":{},\"outbound\":{},\"ok\":false,\"connect_ms\":null,\"latency_ms\":null,\"status\":null,\"error\":{}}}",
+                        json_str(&node),
+                        json_opt(router.resolve(&node).ok().as_deref()),
+                        json_str(&format!("{e:#}"))
+                    ),
+                ),
+            }
         }
         ("POST" | "PUT", p) if p.starts_with("/v1/policies/") => {
             let group = percent_decode(&p["/v1/policies/".len()..]);
@@ -187,6 +306,47 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                 .collect();
             ("200 OK", format!("[{}]", items.join(",")))
         }
+        ("GET", "/v1/connections/active") => {
+            let items: Vec<String> = crate::live::active().iter().map(|c| crate::live::conn_json(c)).collect();
+            ("200 OK", format!("[{}]", items.join(",")))
+        }
+        ("DELETE", "/v1/connections") => ("200 OK", format!("{{\"closed\":{}}}", crate::live::close_all())),
+        ("DELETE", p) if p.starts_with("/v1/connections/") => match p["/v1/connections/".len()..].parse::<u64>() {
+            Ok(id) if crate::live::close(id) => ("200 OK", format!("{{\"closed\":1,\"id\":{id}}}")),
+            Ok(id) => ("404 Not Found", format!("{{\"error\":\"no open connection {id}\"}}")),
+            Err(_) => ("400 Bad Request", "{\"error\":\"bad connection id\"}".to_string()),
+        },
+        ("GET", "/v1/stats") => {
+            let (up, down, active) = crate::stats::snapshot();
+            let history: Vec<String> = crate::stats::history().iter().map(crate::stats::sample_json).collect();
+            (
+                "200 OK",
+                format!(
+                    "{{\"up\":{up},\"down\":{down},\"active\":{active},\"policies\":{},\"nodes\":{},\"history\":[{}]}}",
+                    totals_json(crate::stats::Kind::Policy),
+                    totals_json(crate::stats::Kind::Node),
+                    history.join(",")
+                ),
+            )
+        }
+        ("GET", "/v1/profile") => {
+            let path = reloader.path();
+            let others: Vec<String> = crate::reload::sibling_profiles(&path).iter().map(|p| json_str(p)).collect();
+            ("200 OK", format!("{{\"path\":{},\"profiles\":[{}]}}", json_str(&path), others.join(",")))
+        }
+        ("POST" | "PUT", "/v1/profile") => match query_param(query, "path") {
+            Some(p) => match reloader.switch_profile(&p).await {
+                Ok(summary) => (
+                    "200 OK",
+                    format!("{{\"path\":{},\"reloaded\":true,\"summary\":{}}}", json_str(&reloader.path()), json_str(&summary)),
+                ),
+                Err(e) => (
+                    "400 Bad Request",
+                    format!("{{\"error\":{},\"path\":{}}}", json_str(&format!("{e:#}")), json_str(&reloader.path())),
+                ),
+            },
+            None => ("400 Bad Request", "{\"error\":\"missing ?path=\"}".to_string()),
+        },
         ("GET", "/v1/route") => match query_param(query, "target").map(|t| Target::parse_authority(&t, 443)) {
             Some(Ok(t)) => match router.decide_with(&t, &route_ctx(query)).await {
                 Ok(d) => (
@@ -217,6 +377,7 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
 pub async fn serve(addr: String, reloader: Arc<Reloader>) -> Result<()> {
     let listener = TcpListener::bind(&addr).await.map_err(|e| anyhow::anyhow!("bind api on {addr}: {e}"))?;
     info!("control API listening on http://{addr}");
+    crate::stats::spawn_sampler();
     loop {
         let (sock, _) = listener.accept().await?;
         let reloader = reloader.clone();
