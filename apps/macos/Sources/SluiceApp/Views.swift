@@ -909,13 +909,13 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 10) {
                 SectionTitle(text: "网络接管")
                 LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(title: "系统代理",
+                    FeatureCard(icon: "network", title: "系统代理",
                                 detail: "大多数应用的流量可以通过将 Sluice 设置为系统代理接管。具有最佳的兼容性和性能。",
                                 isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }),
                                 status: core.systemProxyOn ? "Sluice 当前被设置为系统代理" : "未设置为系统代理",
                                 statusOn: core.systemProxyOn)
                         .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
-                    FeatureCard(title: "增强模式",
+                    FeatureCard(icon: "shield.lefthalf.filled", title: "增强模式",
                                 detail: "部分应用可能不遵循系统代理设置。增强模式以 root 运行内核，接管所有应用的流量（需要管理员密码）。",
                                 isOn: Binding(get: { core.summary.enhancedMode }, set: { on in
                                     enhancedBusy = true
@@ -930,19 +930,19 @@ struct OverviewView: View {
                 }
                 SectionTitle(text: "代理服务")
                 LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(title: "HTTP & SOCKS5 代理",
+                    FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
                                 detail: "Sluice 在本机提供 HTTP 和 SOCKS5 代理服务，可以手动配置给其他应用使用。",
                                 status: [core.summary.httpListen.map { "HTTP \($0)" }, core.summary.socksListen.map { "SOCKS5 \($0)" }]
                                     .compactMap { $0 }.joined(separator: "  ").ifEmpty("已禁用"),
                                 statusOn: core.state == .running && (core.summary.httpListen != nil || core.summary.socksListen != nil))
-                    FeatureCard(title: "控制 API",
+                    FeatureCard(icon: "terminal", title: "控制 API",
                                 detail: "本应用通过控制 API 切换策略、读取流量和测试规则。",
                                 status: core.summary.apiPort.map { "127.0.0.1:\($0)" } ?? "未配置（应用需要它）",
                                 statusOn: core.state == .running && core.summary.apiPort != nil)
                 }
                 SectionTitle(text: "通用")
                 LazyVGrid(columns: columns, spacing: DS.gap) {
-                    FeatureCard(title: "打开应用时启动",
+                    FeatureCard(icon: "power", title: "打开应用时启动",
                                 detail: "打开 Sluice 时自动启动代理内核。",
                                 isOn: $core.autoStart,
                                 status: core.autoStart ? "已启用" : "已禁用", statusOn: core.autoStart)
@@ -956,6 +956,7 @@ struct OverviewView: View {
 }
 
 struct FeatureCard: View {
+    var icon: String = "circle"
     let title: String
     let detail: String
     var isOn: Binding<Bool>?
@@ -964,7 +965,12 @@ struct FeatureCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(statusOn ? Color.accentColor : Color.secondary)
+                    .frame(width: 32, height: 32)
+                    .background((statusOn ? Color.accentColor : Color.primary).opacity(statusOn ? 0.10 : 0.05), in: Circle())
+                    .animation(DS.spring, value: statusOn)
                 Text(title).font(DS.heading)
                 Spacer()
                 if let isOn { Toggle("", isOn: isOn).toggleStyle(.switch).labelsHidden().controlSize(.small) }
@@ -983,7 +989,7 @@ struct LoginItemCard: View {
     @State private var enabled = SMAppService.mainApp.status == .enabled
     @State private var error: String?
     var body: some View {
-        FeatureCard(title: "登录时打开",
+        FeatureCard(icon: "person.crop.circle", title: "登录时打开",
                     detail: SMAppService.mainApp.status == .requiresApproval
                         ? "请在 系统设置 › 通用 › 登录项 中允许 Sluice。" : "登录 macOS 时自动打开 Sluice。",
                     isOn: Binding(get: { enabled }, set: set),
@@ -1023,10 +1029,10 @@ struct PolicyView: View {
                         .disabled(core.groups.allSatisfy(\.isSelectable))
                 }
                 if core.groups.isEmpty {
-                    ContentUnavailableView(core.state == .running ? "没有策略组" : "Sluice 未运行",
-                                           systemImage: "arrow.triangle.branch",
-                                           description: Text(core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。"))
-                        .frame(minHeight: 240)
+                    EmptyState(icon: "point.topleft.down.to.point.bottomright.curvepath",
+                               title: core.state == .running ? "没有策略组" : "Sluice 未运行",
+                               detail: core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。")
+                        .frame(minHeight: 260)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
                         ForEach(core.groups) { GroupCard(group: $0) }
@@ -1311,29 +1317,28 @@ struct RequestsView: View {
                 Button { core.clearConnections() } label: { Label("清除", systemImage: "trash") }
             }
             HStack(spacing: DS.gap) {
-                Table(rows, selection: $selection) {
-                    TableColumn("时间", value: \.time).width(min: 60, ideal: 70)
-                    TableColumn("", value: \.proto).width(34)
-                    TableColumn("目标", value: \.target).width(min: 160, ideal: 240)
-                    TableColumn("策略", value: \.policy).width(min: 60, ideal: 90)
-                    TableColumn("出站") { OutboundTag(name: $0.outbound) }
-                    .width(min: 60, ideal: 90)
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(rows)) { c in
+                            RequestRow(connection: c, selected: c.id == selection) {
+                                withAnimation(DS.spring) { selection = c.id }
+                            }
+                        }
+                    }
+                    .padding(6)
                 }
                 .overlay {
-                    if core.connections.isEmpty {
-                        ContentUnavailableView("还没有请求", systemImage: "list.bullet.rectangle",
-                                               description: Text("经过 Sluice 的连接会实时显示在这里。"))
+                    if rows.isEmpty {
+                        EmptyState(icon: "arrow.left.arrow.right", title: core.connections.isEmpty ? "还没有请求" : "没有匹配的请求",
+                                   detail: "经过 Sluice 的连接会实时显示在这里。")
                     }
                 }
-                .frame(minWidth: 420)
-                .scrollContentBackground(.hidden)
-                .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
                 .glass()
                 RequestDetail(connection: core.connections.first { $0.id == selection })
-                    .scrollContentBackground(.hidden)
                     .frame(width: 280)
+                    .frame(maxHeight: .infinity, alignment: .top)
                     .glass()
-                    .animation(DS.spring, value: selection)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -1349,27 +1354,117 @@ struct OutboundTag: View {
     }
 }
 
+/// One request: a monogram, the host in emphasis, its route beneath, and the outbound and time at the end.
+struct RequestRow: View {
+    let connection: Connection
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let host = connection.target.split(separator: ":").dropLast().joined(separator: ":").ifEmpty(connection.target)
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Monogram(text: host)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(host).font(DS.label.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                    Text("\(connection.proto) · \(connection.policy) · \(connection.rule)")
+                        .font(DS.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                }
+                Spacer(minLength: 8)
+                OutboundTag(name: connection.outbound)
+                Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                    .frame(width: 70, alignment: .trailing)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(selected ? Color.accentColor.opacity(0.09) : hovering ? Color.primary.opacity(0.04) : .clear)
+            }
+            .overlay(alignment: .leading) { if selected { FlowMark().padding(.leading, 1) } }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle())
+        .onHover { hovering = $0 }
+    }
+}
+
+/// A quiet round initial standing in for a site's icon.
+struct Monogram: View {
+    let text: String
+    var body: some View {
+        let parts = text.split(separator: ".")
+        let core = parts.count >= 2 ? parts[parts.count - 2] : Substring(text)
+        Text(String(core.prefix(1)).uppercased())
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 28, height: 28)
+            .background(Color.primary.opacity(0.06), in: Circle())
+    }
+}
+
+/// Centered placeholder used by every empty list.
+struct EmptyState: View {
+    let icon: String
+    let title: String
+    var detail: String = ""
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 22, weight: .light)).foregroundStyle(.tertiary)
+                .frame(width: 52, height: 52).background(Color.primary.opacity(0.04), in: Circle())
+            Text(title).font(DS.heading).foregroundStyle(.secondary)
+            if !detail.isEmpty { Text(detail).font(DS.small).foregroundStyle(.tertiary) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 struct RequestDetail: View {
     let connection: Connection?
     var body: some View {
-        Group {
-            if let c = connection {
-                Form {
-                    Section("请求") {
-                        LabeledContent("目标") { Text(c.target).textSelection(.enabled) }
-                        LabeledContent("协议", value: c.proto)
-                        LabeledContent("时间", value: c.time)
+        if let c = connection {
+            let host = c.target.split(separator: ":").dropLast().joined(separator: ":").ifEmpty(c.target)
+            let port = c.target.split(separator: ":").last.map(String.init) ?? ""
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 12) {
+                        Monogram(text: host).scaleEffect(1.3).frame(width: 36, height: 36)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(host).font(DS.heading).lineLimit(2).textSelection(.enabled)
+                            Text("\(c.proto) · 端口 \(port)").font(DS.caption).foregroundStyle(.secondary)
+                        }
                     }
-                    Section("路由") {
-                        LabeledContent("规则") { Text(c.rule).textSelection(.enabled) }
-                        LabeledContent("策略", value: c.policy)
-                        LabeledContent("出站") { OutboundTag(name: c.outbound) }
-                    }
+                    detailGroup("路由", [("规则", AnyView(Text(c.rule).textSelection(.enabled))),
+                                         ("策略", AnyView(Text(c.policy))),
+                                         ("出站", AnyView(OutboundTag(name: c.outbound)))])
+                    detailGroup("请求", [("时间", AnyView(Text(c.time).monospacedDigit())),
+                                         ("目标", AnyView(Text(c.target).textSelection(.enabled)))])
                 }
-                .formStyle(.grouped)
-            } else {
-                Text("选择一个请求查看详情").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(16)
             }
+            .id(c.id)
+            .transition(.opacity)
+        } else {
+            EmptyState(icon: "sidebar.right", title: "未选择请求", detail: "选择左侧的请求查看详情")
+        }
+    }
+
+    private func detailGroup(_ title: String, _ rows: [(String, AnyView)]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(DS.caption).foregroundStyle(.tertiary)
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(row.0).font(DS.small).foregroundStyle(.secondary)
+                        Spacer(minLength: 12)
+                        row.1.font(DS.small).lineLimit(2).multilineTextAlignment(.trailing)
+                    }
+                    .padding(.vertical, 8)
+                    if i < rows.count - 1 { Divider().opacity(0.5) }
+                }
+            }
+            .padding(.horizontal, 12)
+            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
         }
     }
 }
@@ -1401,13 +1496,33 @@ struct RuleView: View {
             PaneHeader(title: "规则", subtitle: "规则将按照从上至下的顺序进行测试。") {
                 SearchField(prompt: "搜索", text: $filter)
             }
-            Table(rows) {
-                TableColumn("ID") { Text("\($0.id)").monospacedDigit().foregroundStyle(.secondary) }.width(36)
-                TableColumn("类型", value: \.type).width(min: 90, ideal: 130)
-                TableColumn("值", value: \.value).width(min: 140, ideal: 260)
-                TableColumn("策略", value: \.policy).width(min: 70, ideal: 110)
-                TableColumn("选项", value: \.options).width(min: 60, ideal: 90)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(rows) { rule in
+                        HStack(spacing: 12) {
+                            Text("\(rule.id)").font(DS.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                                .frame(width: 24, alignment: .trailing)
+                            Text(rule.type.uppercased()).font(.system(size: 10, weight: .semibold).monospaced())
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .background(Color.primary.opacity(0.05), in: Capsule())
+                                .frame(width: 150, alignment: .leading)
+                            Text(rule.value.ifEmpty("其余所有请求")).font(DS.label)
+                                .foregroundStyle(rule.value.isEmpty ? Color.secondary : Color.primary)
+                                .lineLimit(1).truncationMode(.middle)
+                            if !rule.options.isEmpty {
+                                Text(rule.options).font(DS.caption).foregroundStyle(.tertiary)
+                            }
+                            Spacer(minLength: 8)
+                            OutboundTag(name: rule.policy)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        if rule.id != rows.last?.id { Divider().padding(.leading, 50).opacity(0.5) }
+                    }
+                }
+                .padding(.vertical, 4)
             }
+            .overlay { if rows.isEmpty { EmptyState(icon: "list.bullet.rectangle", title: "没有规则") } }
             .glassPanel()
             routeTest.padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
@@ -1484,7 +1599,10 @@ struct LogsView: View {
                 List(lines) { l in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(l.time).foregroundStyle(.secondary)
-                        Text(l.level).foregroundStyle(color(l.level)).frame(width: 44, alignment: .leading)
+                        Text(l.level).font(.system(size: 9, weight: .bold)).foregroundStyle(color(l.level))
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(color(l.level).opacity(0.10), in: Capsule())
+                            .frame(width: 52, alignment: .leading)
                         Text(l.message).textSelection(.enabled)
                     }
                     .font(.system(.callout, design: .monospaced))
