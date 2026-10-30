@@ -593,6 +593,48 @@ final class Core: ObservableObject {
         }
     }
 
+    @Published private(set) var exportingDiagnostics = false
+
+    /// Runs `sluice diag export` (logs, crash reports incl. the app's own from DiagnosticReports,
+    /// redacted config, network snapshot) and reveals the zip in Finder.
+    func exportDiagnostics() {
+        guard !exportingDiagnostics else { return }
+        guard let binary = coreBinary else {
+            lastActionError = "导出诊断信息失败：找不到 Sluice 内核"
+            return
+        }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let out = Core.logDir.appendingPathComponent("Sluice-diag-\(stamp).zip")
+        let args = ["diag", "export", out.path] + (FileManager.default.fileExists(atPath: configPath) ? [configPath] : [])
+        exportingDiagnostics = true
+        Task.detached {
+            let result = Result { () throws -> String in
+                let p = Process()
+                p.executableURL = binary
+                p.arguments = args
+                let pipe = Pipe()
+                p.standardOutput = pipe
+                p.standardError = pipe
+                try p.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                let text = String(data: data, encoding: .utf8) ?? ""
+                guard p.terminationStatus == 0 else { throw APIError(message: text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                return text
+            }
+            await MainActor.run {
+                self.exportingDiagnostics = false
+                switch result {
+                case .success:
+                    self.lastActionError = nil
+                    NSWorkspace.shared.activateFileViewerSelecting([out])
+                case .failure(let error):
+                    self.lastActionError = "导出诊断信息失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     func clearLogs() { logs = [] }
     func clearConnections() { connections = [] }
 

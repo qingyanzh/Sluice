@@ -103,6 +103,11 @@ impl Reloader {
         })
     }
 
+    /// The config file this reloader reads.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
     /// Rebuilds from the config file and swaps the new router in; on error the
     /// current one stays. Returns a short summary.
     pub async fn reload(&self, reason: &str) -> Result<String> {
