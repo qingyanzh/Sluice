@@ -136,7 +136,11 @@ for node in DIRECT SS-AES256 SS-CHACHA VMess VLESS Trojan-TLS VMess-WS-TLS VLESS
     [[ "$udp" == "replies 23/23"* ]] || ok=no
     [[ "$cone" == "full-cone ok"* ]] || ok=no
     if [ "$node" = Hy2-Hopping ]; then
-        # The connection must have lived through real hops (interval 1s), not just one port.
+        # The connection must live through real hops (interval 1s): keep it busy for ~5s.
+        for _ in $(seq 5); do
+            sleep 1
+            [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:16153 https://example.com/)" = 200 ] || ok=no
+        done
         hops=$(tail -n +$((log_start + 1)) "$work/sluice.log" | grep -c "hysteria2 port hop")
         conns=$(tail -n +$((log_start + 1)) "$work/sluice.log" | grep -c "hysteria2 connected")
         [ "$hops" -ge 2 ] && [ "$conns" = 1 ] || ok=no
