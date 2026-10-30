@@ -13,6 +13,7 @@ use tun::AbstractDevice;
 use crate::dns::FakeDns;
 use crate::reload::RouterHandle;
 use crate::router::Router;
+use crate::udp::Packet;
 use crate::util::{Host, Target};
 
 /// Creates the utun device as a point-to-point link `address -> peer`; returns it and its name.
@@ -75,18 +76,20 @@ async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<Fa
     let Some(target) = to_target(dst, &fake) else { return Ok(()) };
     let Some(mut pipe) = router.dispatch_udp(&target).await? else { return Ok(()) };
     debug!("TUN UDP {} -> {target}: flow open", udp.local_addr());
-    // ipstack ends the stream after its UDP idle timeout, which closes the pipe.
+    // ipstack ends the stream after its UDP idle timeout, which closes the pipe. Each
+    // ipstack stream is one 5-tuple, so replies from other sources are answered as if
+    // from `dst` (the app sees a restricted cone, as before).
     loop {
         tokio::select! {
             r = udp.read(&mut buf) => {
                 let n = r?;
-                if n == 0 || pipe.tx.send(buf[..n].to_vec()).await.is_err() { return Ok(()); }
+                if n == 0 || pipe.tx.send(Packet { addr: target.clone(), data: buf[..n].to_vec() }).await.is_err() { return Ok(()); }
                 crate::stats::add_up(n);
             }
             p = pipe.rx.recv() => match p {
                 Some(p) => {
-                    crate::stats::add_down(p.len());
-                    udp.write_all(&p).await?
+                    crate::stats::add_down(p.data.len());
+                    udp.write_all(&p.data).await?
                 }
                 None => return Ok(()),
             },

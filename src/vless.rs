@@ -5,16 +5,16 @@
 //! Response: ver addons_len addons..., then payload.
 
 use std::io;
-use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::{bail, Result};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::transport::Transport;
-use crate::udp::{over_stream, Framing, UdpPipe};
-use crate::util::{BoxStream, Host, Target};
+use crate::udp::{write_port_addr, UdpPipe};
+use crate::util::{BoxStream, Target};
 
 pub fn parse_uuid(s: &str) -> Result<[u8; 16]> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
@@ -26,10 +26,11 @@ pub fn parse_uuid(s: &str) -> Result<[u8; 16]> {
 }
 
 const CMD_TCP: u8 = 1;
-const CMD_UDP: u8 = 2;
 
-/// VLESS uses its own address types: 1=IPv4, 2=domain, 3=IPv6.
-fn request_header(uuid: &[u8; 16], flow: Option<&str>, cmd: u8, target: &Target) -> Result<Vec<u8>> {
+const CMD_MUX: u8 = 3;
+
+/// Addresses use Xray's `port type addr`; Mux (XUDP) requests carry none.
+fn request_header(uuid: &[u8; 16], flow: Option<&str>, cmd: u8, target: Option<&Target>) -> Result<Vec<u8>> {
     let mut h = Vec::with_capacity(64);
     h.push(0);
     h.extend_from_slice(uuid);
@@ -39,24 +40,8 @@ fn request_header(uuid: &[u8; 16], flow: Option<&str>, cmd: u8, target: &Target)
     }
     h.extend_from_slice(flow.unwrap_or_default().as_bytes());
     h.push(cmd);
-    h.extend_from_slice(&target.port.to_be_bytes());
-    match &target.host {
-        Host::Ip(IpAddr::V4(v4)) => {
-            h.push(1);
-            h.extend_from_slice(&v4.octets());
-        }
-        Host::Domain(d) => {
-            if d.len() > 255 {
-                bail!("domain too long");
-            }
-            h.push(2);
-            h.push(d.len() as u8);
-            h.extend_from_slice(d.as_bytes());
-        }
-        Host::Ip(IpAddr::V6(v6)) => {
-            h.push(3);
-            h.extend_from_slice(&v6.octets());
-        }
+    if let Some(t) = target {
+        write_port_addr(t, &mut h)?;
     }
     Ok(h)
 }
@@ -133,7 +118,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessStream<S> {
 
 pub struct VlessServer {
     uuid: [u8; 16],
-    transport: Transport,
+    transport: Arc<Transport>,
     vision: bool,
 }
 
@@ -144,26 +129,35 @@ impl VlessServer {
             f if crate::vision::is_vision(f) => true,
             other => bail!("unsupported VLESS flow {other:?}"),
         };
-        Ok(VlessServer { uuid: parse_uuid(uuid)?, transport, vision })
+        Ok(VlessServer { uuid: parse_uuid(uuid)?, transport: Arc::new(transport), vision })
     }
 
     pub async fn connect(&self, target: &Target) -> Result<BoxStream> {
         if !self.vision {
             return self.connect_cmd(target, CMD_TCP).await;
         }
-        let header = request_header(&self.uuid, Some(crate::vision::FLOW), CMD_TCP, target)?;
+        let header = request_header(&self.uuid, Some(crate::vision::FLOW), CMD_TCP, Some(target))?;
         let (raw, tls) = self.transport.connect_records().await?;
         Ok(crate::vision::connect(raw, tls, self.uuid, header))
     }
 
-    /// UDP: packets are `len(u16) payload` inside the stream. Vision doesn't apply: Xray
-    /// servers take UDP without a flow even from Vision users.
-    pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
-        Ok(over_stream(self.connect_cmd(target, CMD_UDP).await?, Framing::LengthPrefixed))
+    /// UDP is XUDP (command Mux, no address in the header), so one connection reaches
+    /// any number of remotes. Vision doesn't apply: Xray takes XUDP without a flow even
+    /// from Vision users, as long as the first Mux frame comes with the header.
+    pub fn open_udp(&self, target: &Target) -> UdpPipe {
+        let (uuid, transport) = (self.uuid, self.transport.clone());
+        crate::udp::xudp(target, move |first| async move {
+            let mut req = request_header(&uuid, None, CMD_MUX, None)?;
+            req.extend_from_slice(&first);
+            let mut stream = transport.connect().await?;
+            stream.write_all(&req).await?;
+            stream.flush().await?;
+            Ok(Box::new(VlessStream { inner: stream, head: Head::Version }) as BoxStream)
+        })
     }
 
     async fn connect_cmd(&self, target: &Target, cmd: u8) -> Result<BoxStream> {
-        let header = request_header(&self.uuid, None, cmd, target)?;
+        let header = request_header(&self.uuid, None, cmd, Some(target))?;
         let mut stream = self.transport.connect().await?;
         stream.write_all(&header).await?;
         stream.flush().await?;
@@ -181,12 +175,13 @@ mod tests {
         let u = parse_uuid("b831381d-6324-4d53-ad4f-8cda48b30811").unwrap();
         assert_eq!(u[0], 0xb8);
         assert!(parse_uuid("1234").is_err());
-        let h = request_header(&u, None, CMD_TCP, &Target::new("a.com", 443)).unwrap();
+        let h = request_header(&u, None, CMD_TCP, Some(&Target::new("a.com", 443))).unwrap();
         assert_eq!(&h[17..], &[0, 1, 1, 187, 2, 5, b'a', b'.', b'c', b'o', b'm']);
-        let h = request_header(&u, Some("xtls-rprx-vision"), CMD_TCP, &Target::new("a.com", 443)).unwrap();
+        let h = request_header(&u, Some("xtls-rprx-vision"), CMD_TCP, Some(&Target::new("a.com", 443))).unwrap();
         assert_eq!(&h[17..20], &[18, 0x0a, 16]);
         assert_eq!(&h[20..36], b"xtls-rprx-vision");
         assert_eq!(&h[36..], &[1, 1, 187, 2, 5, b'a', b'.', b'c', b'o', b'm']);
+        assert_eq!(&request_header(&u, None, CMD_MUX, None).unwrap()[17..], &[0, 3]);
     }
 
     #[tokio::test]

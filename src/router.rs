@@ -256,20 +256,33 @@ impl Router {
         Ok(self.open(&d.outbound, target).await?.map(crate::stats::counted))
     }
 
-    /// UDP counterpart of [`dispatch`]; `None` means rejected.
-    pub async fn dispatch_udp(&self, target: &Target) -> Result<Option<crate::udp::UdpPipe>> {
+    /// The outbound for UDP to `target`; `None` means rejected. Every outbound's UDP is
+    /// full-cone, so an inbound association needs one [`open_udp`](Self::open_udp) per outbound.
+    pub async fn route_udp(&self, target: &Target) -> Result<Option<String>> {
         let d = self.decide(target).await?;
         info!("UDP {target} -> {} [{}] via {}", d.policy, d.rule, d.outbound);
-        let pipe = match &self.outbounds[&d.outbound] {
-            Outbound::Reject => return Ok(None),
-            Outbound::Direct => crate::udp::direct(target).await?,
-            Outbound::Shadowsocks(s) => s.open_udp(target).await?,
-            Outbound::Trojan(t) => t.open_udp(target).await?,
-            Outbound::Vless(v) => v.open_udp(target).await?,
-            Outbound::Vmess(v) => v.open_udp(target).await?,
-            Outbound::Hysteria2(h) => h.open_udp(target).await?,
-        };
-        Ok(Some(pipe))
+        Ok((!matches!(self.outbounds[&d.outbound], Outbound::Reject)).then_some(d.outbound))
+    }
+
+    /// Opens a UDP association through `outbound`; `first` is where its first packet goes.
+    pub async fn open_udp(&self, outbound: &str, first: &Target) -> Result<crate::udp::UdpPipe> {
+        Ok(match self.outbounds.get(outbound).ok_or_else(|| anyhow!("unknown outbound {outbound:?}"))? {
+            Outbound::Reject => bail!("{outbound} rejects UDP"),
+            Outbound::Direct => crate::udp::direct(),
+            Outbound::Shadowsocks(s) => s.open_udp().await?,
+            Outbound::Trojan(t) => t.open_udp(first).await?,
+            Outbound::Vless(v) => v.open_udp(first),
+            Outbound::Vmess(v) => v.open_udp(first),
+            Outbound::Hysteria2(h) => h.open_udp().await?,
+        })
+    }
+
+    /// UDP counterpart of [`dispatch`](Self::dispatch); `None` means rejected.
+    pub async fn dispatch_udp(&self, target: &Target) -> Result<Option<crate::udp::UdpPipe>> {
+        match self.route_udp(target).await? {
+            Some(o) => Ok(Some(self.open_udp(&o, target).await?)),
+            None => Ok(None),
+        }
     }
 
     async fn open(&self, outbound: &str, target: &Target) -> Result<Option<BoxStream>> {

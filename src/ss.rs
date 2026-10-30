@@ -11,7 +11,7 @@ use rand::RngCore;
 use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::udp::{parse_socks_addr, pipe_pair, UdpPipe, MAX_PACKET};
+use crate::udp::{parse_socks_addr, pipe_pair, Packet, UdpPipe, MAX_PACKET};
 use crate::util::{connect_tcp, resolve, udp_socket, BoxStream, Target};
 
 const TAG: usize = 16;
@@ -213,12 +213,11 @@ impl SsServer {
         Ok(SsServer { server, port, method, key })
     }
 
-    pub async fn open_udp(&self, target: &Target) -> Result<UdpPipe> {
+    /// Full-cone: every packet carries its destination, and replies their source.
+    pub async fn open_udp(&self) -> Result<UdpPipe> {
         let addr = *resolve(&self.server, self.port).await?.first().ok_or_else(|| anyhow!("{}: no address", self.server))?;
         let sock = udp_socket(&addr)?;
         sock.connect(addr).await?;
-        let mut header = Vec::new();
-        target.write_socks_addr(&mut header)?;
         let (method, key) = (self.method, self.key.clone());
         let (app, mut side) = pipe_pair();
         tokio::spawn(async move {
@@ -227,7 +226,9 @@ impl SsServer {
                 tokio::select! {
                     p = side.rx.recv() => match p {
                         Some(p) => {
-                            let plain = [header.as_slice(), &p].concat();
+                            let mut plain = Vec::with_capacity(p.data.len() + 32);
+                            if p.addr.write_socks_addr(&mut plain).is_err() { continue }
+                            plain.extend_from_slice(&p.data);
                             let _ = sock.send(&udp_seal(method, &key, &plain)).await;
                         }
                         None => break,
@@ -235,8 +236,8 @@ impl SsServer {
                     r = sock.recv(&mut buf) => match r {
                         Ok(n) => match udp_open(method, &key, &buf[..n]) {
                             Ok(plain) => {
-                                let Some((_, off)) = parse_socks_addr(&plain) else { continue };
-                                if side.tx.send(plain[off..].to_vec()).await.is_err() { break }
+                                let Some((addr, off)) = parse_socks_addr(&plain) else { continue };
+                                if side.tx.send(Packet { addr, data: plain[off..].to_vec() }).await.is_err() { break }
                             }
                             Err(e) => debug!("ss UDP: {e}"),
                         },
