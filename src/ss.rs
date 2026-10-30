@@ -57,6 +57,8 @@ pub fn evp_bytes_to_key(password: &[u8], len: usize) -> Vec<u8> {
     key
 }
 
+// Built once per connection and never moved on a hot path; boxing would only add an indirection.
+#[allow(clippy::large_enum_variant)]
 enum Cipher {
     A128(Aes128Gcm),
     A256(Aes256Gcm),

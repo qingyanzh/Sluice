@@ -134,7 +134,7 @@ fn parse_vless(body: &str) -> Result<(Option<String>, ProxyDef)> {
     let l = split_link(body)?;
     let q = &l.query;
     let flow = q.get("flow").cloned().filter(|f| !f.is_empty());
-    if let Some(f) = flow.as_deref().filter(|f| *f != crate::vision::FLOW) {
+    if let Some(f) = flow.as_deref().filter(|f| !crate::vision::is_vision(f)) {
         bail!("VLESS flow {f:?} not supported");
     }
     let reality = match q.get("security").map(String::as_str) {
@@ -353,6 +353,15 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        for flow in ["xtls-rprx-vision", "xtls-rprx-vision-udp443"] {
+            let (n, skipped) = parse(&format!("{}&flow={flow}", good.replace("#R", "")));
+            assert!(skipped.is_empty(), "{skipped:?}");
+            assert!(matches!(&n[0].1, ProxyDef::Vless { flow: Some(f), .. } if f == flow));
+            let back = crate::config::parse_proxy(&n[0].1.to_line("V")).unwrap().1;
+            assert_eq!(format!("{back:?}"), format!("{:?}", n[0].1));
+        }
+        let (_, splice) = parse(&format!("{}&flow=xtls-rprx-splice", good.replace("#R", "")));
+        assert_eq!(splice, ["VLESS flow \"xtls-rprx-splice\" not supported"]);
         let (_, bad_skipped) = parse("vless://b831381d-6324-4d53-ad4f-8cda48b30811@r.example:443?security=reality&pbk=x&sni=a.com#Bad");
         assert_eq!(bad_skipped, ["bad REALITY public key"]);
         assert!(matches!(&nodes[1].1, ProxyDef::Shadowsocks { password, port: 443, .. } if password == "p@ss"));

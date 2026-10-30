@@ -169,6 +169,8 @@ fn request_header(sec: Security, key: &[u8; 16], iv: &[u8; 16], resp_v: u8, cmd:
     Ok(h)
 }
 
+// Built once per connection and never moved on a hot path; boxing would only add an indirection.
+#[allow(clippy::large_enum_variant)]
 enum BodyCipher {
     Aes(Aes128Gcm),
     Chacha(ChaCha20Poly1305),

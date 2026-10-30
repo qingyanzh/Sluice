@@ -141,7 +141,7 @@ impl VlessServer {
     pub fn new(transport: Transport, uuid: &str, flow: Option<&str>) -> Result<Self> {
         let vision = match flow.unwrap_or_default() {
             "" => false,
-            crate::vision::FLOW => true,
+            f if crate::vision::is_vision(f) => true,
             other => bail!("unsupported VLESS flow {other:?}"),
         };
         Ok(VlessServer { uuid: parse_uuid(uuid)?, transport, vision })
