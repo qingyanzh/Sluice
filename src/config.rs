@@ -461,6 +461,310 @@ impl Config {
 mod tests {
     use super::*;
 
+    // ProxyDef and Layer do not implement PartialEq; compare every field via Debug.
+    fn assert_proxy_eq(actual: &ProxyDef, expected: &ProxyDef) {
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+
+    #[test]
+    fn every_proxy_and_transport_parses_and_roundtrips() {
+        let mut cases = vec![
+            (
+                "ss, ss.example, 8388, encrypt-method=chacha20-ietf-poly1305, password=secret:with=punctuation".to_string(),
+                ProxyDef::Shadowsocks {
+                    server: "ss.example".into(), port: 8388,
+                    method: "chacha20-ietf-poly1305".into(), password: "secret:with=punctuation".into(),
+                },
+            ),
+            (
+                "hy2, ::1, 8443, password=secret, sni=tls.example, skip-cert-verify=1, obfs=salamander, obfs-password=mask, ports=443;5000-5002, hop-interval=15s".to_string(),
+                ProxyDef::Hysteria2 {
+                    server: "::1".into(), port: 8443, password: "secret".into(),
+                    sni: Some("tls.example".into()), skip_cert_verify: true, obfs: Some("mask".into()),
+                    ports: Some("443,5000-5002".into()), hop_interval: Some(15),
+                },
+            ),
+            (
+                "hysteria2, h.example, 443, password=secret, obfs=none".to_string(),
+                ProxyDef::Hysteria2 {
+                    server: "h.example".into(), port: 443, password: "secret".into(),
+                    sni: None, skip_cert_verify: false, obfs: None, ports: None, hop_interval: None,
+                },
+            ),
+        ];
+        let mut transports = vec![
+            (String::new(), None),
+            (
+                ", ws=1, ws-path=/socket, ws-headers=host:cdn.example|User-Agent:sluice|X-Test:a:b".into(),
+                Some(Layer::Ws(WsOpts {
+                    path: "/socket".into(), host: Some("cdn.example".into()),
+                    headers: vec![("User-Agent".into(), "sluice".into()), ("X-Test".into(), "a:b".into())],
+                })),
+            ),
+            (", grpc=true, grpc-service-name=tunnel".into(), Some(Layer::Grpc { service: "tunnel".into() })),
+        ];
+        for mode in [XhttpMode::Auto, XhttpMode::PacketUp, XhttpMode::StreamUp, XhttpMode::StreamOne] {
+            transports.push((
+                format!(", xhttp=1, xhttp-path=/upload, xhttp-host=cdn.example, xhttp-mode={}, xhttp-padding-bytes=12-24", mode.as_str()),
+                Some(Layer::Xhttp(XhttpOpts { path: "/upload".into(), host: Some("cdn.example".into()), mode, padding: (12, 24) })),
+            ));
+        }
+        for (transport, layer) in transports {
+            for tls in [false, true] {
+                let opts = format!("sni=tls.example, skip-cert-verify=true, tls={tls}{transport}");
+                cases.extend([
+                    (
+                        format!("trojan, proxy.example, 443, password=secret, {opts}"),
+                        ProxyDef::Trojan {
+                            server: "proxy.example".into(), port: 443, password: "secret".into(),
+                            sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                        },
+                    ),
+                    (
+                        format!("vmess, proxy.example, 443, username=test-uuid, encrypt-method=aes-128-gcm, {opts}"),
+                        ProxyDef::Vmess {
+                            server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(), method: "aes-128-gcm".into(),
+                            tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(),
+                        },
+                    ),
+                    (
+                        format!("vless, proxy.example, 443, uuid=test-uuid, {opts}"),
+                        ProxyDef::Vless {
+                            server: "proxy.example".into(), port: 443, uuid: "test-uuid".into(),
+                            tls, sni: Some("tls.example".into()), skip_cert_verify: true, layer: layer.clone(), reality: None, flow: None,
+                        },
+                    ),
+                ]);
+            }
+        }
+        // Exercise the section parser as well as individual proxy lines.
+        let text = cases.iter().enumerate().map(|(i, (line, _))| format!("Node {i} = {line}\n")).collect::<String>();
+        let cfg = Config::parse(&format!("[Proxy]\n{text}")).unwrap();
+        assert_eq!(cfg.proxies.len(), cases.len());
+        for (i, ((name, actual), (_, expected))) in cfg.proxies.iter().zip(&cases).enumerate() {
+            assert_eq!(name, &format!("Node {i}"));
+            assert_proxy_eq(actual, expected);
+            let rendered = actual.to_line(name);
+            let (back_name, back) = parse_proxy(&rendered).unwrap();
+            assert_eq!(&back_name, name, "{rendered}");
+            assert_proxy_eq(&back, expected);
+        }
+    }
+
+    #[test]
+    fn proxy_defaults_and_aliases() {
+        for (line, expected) in [
+            ("V = VMESS, h, 1, UUID=u", ProxyDef::Vmess {
+                server: "h".into(), port: 1, uuid: "u".into(), method: "auto".into(),
+                tls: false, sni: None, skip_cert_verify: false, layer: None,
+            }),
+            ("V = VLESS, h, 1, USERNAME=\"u\"", ProxyDef::Vless {
+                server: "h".into(), port: 1, uuid: "u".into(), tls: false, sni: None,
+                skip_cert_verify: false, layer: None, reality: None, flow: None,
+            }),
+            ("T = trojan, h, 1, password=p, ws=true", ProxyDef::Trojan {
+                server: "h".into(), port: 1, password: "p".into(), sni: None, skip_cert_verify: false,
+                layer: Some(Layer::Ws(WsOpts { path: "/".into(), host: None, headers: vec![] })),
+            }),
+            ("T = trojan, h, 1, password=p, xhttp=true", ProxyDef::Trojan {
+                server: "h".into(), port: 1, password: "p".into(), sni: None, skip_cert_verify: false,
+                layer: Some(Layer::Xhttp(XhttpOpts::default())),
+            }),
+        ] {
+            let (name, actual) = parse_proxy(line).unwrap();
+            assert_proxy_eq(&actual, &expected);
+            assert_proxy_eq(&parse_proxy(&actual.to_line(&name)).unwrap().1, &expected);
+        }
+    }
+
+    #[test]
+    fn reality_and_vision_roundtrip() {
+        for flow in ["xtls-rprx-vision", "xtls-rprx-vision-udp443"] {
+            for short_id in ["", "abcd"] {
+                let expected = ProxyDef::Vless {
+                    server: "r.example".into(), port: 443, uuid: "u".into(), tls: false,
+                    sni: Some("www.example.com".into()), skip_cert_verify: false, layer: None,
+                    reality: Some(RealityDef {
+                        public_key: "9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4".into(), short_id: short_id.into(),
+                    }),
+                    flow: Some(flow.into()),
+                };
+                let line = expected.to_line("Reality");
+                let (name, actual) = parse_proxy(&line).unwrap();
+                assert_eq!(name, "Reality");
+                assert_proxy_eq(&actual, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_proxies_are_rejected_with_line_context() {
+        for (proxy, reason) in [
+            ("ss, h, 1, password=p", "ss needs encrypt-method"),
+            ("ss, h, 1, encrypt-method=aes-128-gcm", "ss needs password"),
+            ("trojan, h, 1", "trojan needs password"),
+            ("vless, h, 1", "vless needs uuid"),
+            ("vmess, h, 1", "vmess needs username"),
+            ("hysteria2, h, 1", "hysteria2 needs password"),
+            ("socks5, h, 1", "unsupported proxy type"),
+            ("ss, h", "proxy needs"),
+            ("trojan, h, 65536, password=p", "bad port"),
+            ("trojan, h, 1, password", "expected `key = value`"),
+            ("trojan, h, 1, password=p, grpc=true", "grpc=true needs grpc-service-name"),
+            ("trojan, h, 1, password=p, xhttp=true, xhttp-mode=invalid", "unknown xhttp mode"),
+            ("trojan, h, 1, password=p, xhttp=true, xhttp-padding-bytes=20-10", "bad xhttp padding range"),
+            ("hy2, h, 1, password=p, obfs=unknown", "unsupported hysteria2 obfs"),
+            ("hy2, h, 1, password=p, obfs=salamander", "obfs=salamander needs obfs-password"),
+            ("hy2, h, 1, password=p, ports=5-3", "bad port range"),
+            ("hy2, h, 1, password=p, hop-interval=abc", "bad port-hopping-interval"),
+        ] {
+            let err = Config::parse(&format!("[Proxy]\nBad = {proxy}\n")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("line 2"), "{message}");
+            assert!(message.contains(reason), "{proxy}: {message}");
+        }
+    }
+
+    #[test]
+    fn stream_flags_defaults_and_disabled_transports() {
+        for (value, enabled) in [("true", true), ("1", true), ("false", false), ("0", false)] {
+            for (kind, credentials) in [("vmess", "username=u"), ("vless", "uuid=u")] {
+                let line = format!("Test = {kind}, h, 443, {credentials}, tls={value}, skip-cert-verify={value}");
+                let (_, def) = parse_proxy(&line).unwrap();
+                match def {
+                    ProxyDef::Vmess { tls, skip_cert_verify, layer: None, .. }
+                    | ProxyDef::Vless { tls, skip_cert_verify, layer: None, .. } => {
+                        assert_eq!((tls, skip_cert_verify), (enabled, enabled), "{line}");
+                    }
+                    other => panic!("{line}: {other:?}"),
+                }
+            }
+        }
+        for flags in ["ws=false, grpc=false, xhttp=false", "ws=0, grpc=0, xhttp=0"] {
+            let (_, def) = parse_proxy(&format!("Test = trojan, h, 443, password=p, {flags}")).unwrap();
+            assert!(matches!(def, ProxyDef::Trojan { layer: None, .. }));
+        }
+        let (_, def) = parse_proxy("Test = trojan, h, 443, password=p, grpc=1, grpc-service-name=\"\"").unwrap();
+        assert!(matches!(def, ProxyDef::Trojan { layer: Some(Layer::Grpc { service }), .. } if service.is_empty()));
+    }
+
+    #[test]
+    fn credential_alias_precedence_and_duplicate_parameters() {
+        let (_, def) = parse_proxy("Test = vless, h, 443, username=fallback, uuid=preferred, tls=false, TLS=1").unwrap();
+        assert!(matches!(def, ProxyDef::Vless { uuid, tls: true, .. } if uuid == "preferred"));
+        let (_, def) = parse_proxy("Test = vmess, h, 443, uuid=fallback, username=preferred").unwrap();
+        assert!(matches!(def, ProxyDef::Vmess { uuid, .. } if uuid == "preferred"));
+        let (_, def) = parse_proxy("Test = hy2, h, 443, password=p, ports=9000, port-hopping=443;8443, hop-interval=20, port-hopping-interval=5s").unwrap();
+        assert!(matches!(def, ProxyDef::Hysteria2 { ports: Some(p), hop_interval: Some(5), .. } if p == "443,8443"));
+    }
+
+    #[test]
+    fn all_group_kinds_defaults_subscription_options_and_limits() {
+        for (kind, expected) in [
+            ("SELECT", GroupKind::Select),
+            ("url-test", GroupKind::UrlTest { tolerance_ms: 100 }),
+            ("fallback", GroupKind::Fallback),
+            ("load-balance", GroupKind::LoadBalance),
+        ] {
+            let cfg = Config::parse(&format!("[Proxy Group]\nTest = {kind}, A, DIRECT, , REJECT\n")).unwrap();
+            let g = &cfg.groups[0];
+            assert_eq!(g.name, "Test");
+            assert_eq!(g.kind, expected);
+            assert_eq!(g.options, ["A", "DIRECT", "REJECT"]);
+            assert_eq!(g.url, DEFAULT_TEST_URL);
+            assert_eq!((g.interval_secs, g.update_interval_secs), (600, 86400));
+            assert!(g.policy_path.is_none() && g.policy_filter.is_none());
+        }
+        let cfg = Config::parse("[Proxy Group]\nAuto = url-test, tolerance=25, url=\"https://test.example/check?a=b\", interval=1, policy-path=\"nodes.txt\", policy-regex-filter=\"^(JP|US)\", update-interval=2\n").unwrap();
+        let g = &cfg.groups[0];
+        assert_eq!(g.kind, GroupKind::UrlTest { tolerance_ms: 25 });
+        assert!(g.options.is_empty());
+        assert_eq!(g.url, "https://test.example/check?a=b");
+        assert_eq!((g.interval_secs, g.update_interval_secs), (10, 60));
+        assert_eq!(g.policy_path.as_deref(), Some("nodes.txt"));
+        assert_eq!(g.policy_filter.as_deref(), Some("^(JP|US)"));
+    }
+
+    #[test]
+    fn malformed_groups_report_line_and_reason() {
+        for (body, reason) in [
+            ("", "empty group"),
+            ("unsupported, DIRECT", "unsupported group type"),
+            ("select", "has no options"),
+            ("url-test, DIRECT, tolerance=bad", "bad tolerance"),
+            ("select, DIRECT, interval=-1", "bad interval"),
+            ("select, DIRECT, update-interval=bad", "bad update-interval"),
+            ("select, policy-path=nodes.txt, policy-regex-filter=[", "bad policy-regex-filter"),
+        ] {
+            let err = Config::parse(&format!("# comment\n[Proxy Group]\nBad = {body}\n")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("line 3"), "{message}");
+            assert!(message.contains(reason), "{body}: {message}");
+        }
+    }
+
+    #[test]
+    fn general_settings_comments_unknown_sections_and_hosts() {
+        let cfg = Config::parse(r#"
+# comment
+; comment
+// comment
+ignored before a section
+[ General ]
+http-listen = 8080
+socks5-listen = [::1]:1080
+api-listen = 127.0.0.2:9090
+geoip-db = geoip.mmdb
+asn-db = asn.mmdb
+loglevel = debug
+enhanced-mode = 1
+tun-mtu = 1500
+fake-ip-range = 198.18.0.0/15
+rule-set-update-interval = 3600
+dns-server = system, 1.1.1.1, , 8.8.8.8
+encrypted-dns-server = https://dns.example/query, , tls://dns.example
+encrypted-dns-follow-outbound-mode = 1
+hijack-dns = *:53, , 8.8.8.8:53
+future-option = tolerated
+[Unknown]
+this is ignored
+[Host]
+example.com = 1.2.3.4, ::1
+*.lan = server:192.168.1.1
+"#).unwrap();
+        let expected = General {
+            http_listen: Some("127.0.0.1:8080".into()), socks5_listen: Some("[::1]:1080".into()),
+            api_listen: Some("127.0.0.2:9090".into()), geoip_db: Some("geoip.mmdb".into()),
+            asn_db: Some("asn.mmdb".into()), loglevel: Some("debug".into()), enhanced_mode: true,
+            tun_mtu: Some(1500), fake_ip_range: Some("198.18.0.0/15".into()),
+            dns_server: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+            encrypted_dns_server: vec!["https://dns.example/query".into(), "tls://dns.example".into()],
+            encrypted_dns_follow_outbound_mode: true, hijack_dns: vec!["*:53".into(), "8.8.8.8:53".into()],
+            rule_set_update_interval: Some(3600),
+        };
+        assert_eq!(format!("{:?}", cfg.general), format!("{expected:?}"));
+        assert_eq!(cfg.hosts, [("example.com".into(), "1.2.3.4, ::1".into()), ("*.lan".into(), "server:192.168.1.1".into())]);
+        assert!(cfg.proxies.is_empty() && cfg.groups.is_empty() && cfg.rules.is_empty());
+        let empty = Config::parse("").unwrap();
+        assert_eq!(format!("{:?}", empty.general), format!("{:?}", General::default()));
+    }
+
+    #[test]
+    fn malformed_general_and_host_settings_report_line_context() {
+        for (section, line, reason) in [
+            ("General", "http-listen", "expected `key = value`"),
+            ("General", "tun-mtu = bad", "bad tun-mtu"),
+            ("General", "tun-mtu = 65536", "bad tun-mtu"),
+            ("General", "rule-set-update-interval = -1", "bad rule-set-update-interval"),
+            ("Host", "example.com", "expected `key = value`"),
+        ] {
+            let err = Config::parse(&format!("[{section}]\n{line}\n")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("line 2"), "{message}");
+            assert!(message.contains(reason), "{message}");
+        }
+    }
+
     #[test]
     fn parse_sample() {
         let cfg = Config::parse(include_str!("../examples/sluice.conf")).unwrap();
