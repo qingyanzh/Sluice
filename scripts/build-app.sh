@@ -8,8 +8,12 @@ cargo build --release
 
 app=dist/Sluice.app
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$(cd apps/macos && swift build -c release --show-bin-path)/SluiceApp" "$app/Contents/MacOS/Sluice"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Library/LaunchDaemons"
+bin=$(cd apps/macos && swift build -c release --show-bin-path)
+cp "$bin/SluiceApp" "$app/Contents/MacOS/Sluice"
+# Privileged helper for enhanced mode, registered by the app with SMAppService (docs/helper.md).
+cp "$bin/SluiceHelper" "$app/Contents/MacOS/SluiceHelper"
+cp apps/macos/Helper/dev.sluice.Sluice.helper.plist "$app/Contents/Library/LaunchDaemons/"
 cp target/release/sluice "$app/Contents/Resources/sluice"
 cp apps/macos/Icon/Sluice.icns "$app/Contents/Resources/Sluice.icns"
 cp apps/macos/Icon/SluiceMenuBarIcon.png "$app/Contents/Resources/SluiceMenuBarIcon.png"
@@ -33,5 +37,6 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 codesign --force --sign - "$app/Contents/Resources/sluice"
+codesign --force --sign - --identifier dev.sluice.Sluice.helper "$app/Contents/MacOS/SluiceHelper"
 codesign --force --sign - "$app"
 echo "built $app"
