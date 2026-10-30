@@ -23,7 +23,7 @@ func menuBarSpeed(_ bytesPerSecond: Double) -> String {
 }
 
 /// Value-independent geometry. Measure the actual drawing font once, reserving
-/// both arrows and every supported unit, including the widest five-column number.
+/// every supported unit, including the widest five-column number.
 /// The badge always has room, so toggling it cannot move neighbouring items.
 struct MenuBarLayout {
     let font: NSFont
@@ -36,10 +36,8 @@ struct MenuBarLayout {
     init(mode: MenuBarDisplayMode, font: NSFont) {
         self.mode = mode
         self.font = font
-        speedWidth = ceil(["↑", "↓"].flatMap { arrow in
-            ["B", "KB", "MB", "GB", "TB"].map { unit in
-                ("\(arrow) 999.9 \(unit)/s" as NSString).size(withAttributes: [.font: font]).width
-            }
+        speedWidth = ceil(["B", "KB", "MB", "GB", "TB"].map { unit in
+            ("999.9 \(unit)/s" as NSString).size(withAttributes: [.font: font]).width
         }.max() ?? 0)
         speedX = mode.showsIcon ? 33 : 0
         let width = mode.showsSpeed ? speedX + speedWidth : 23
@@ -79,6 +77,11 @@ struct SluiceMark: Shape {
 
 /// Two rows drawn inside a cached rectangle; changing either rate only changes ink.
 enum MenuBarLabel {
+    /// Drawing order is top to bottom: upload, then download.
+    static func speedRows(mode: MenuBarDisplayMode, upload: String, download: String) -> [String] {
+        mode.showsSpeed ? [upload, download] : []
+    }
+
     private static let statusIcon: NSImage? = {
         guard let url = Bundle.main.url(forResource: "SluiceMenuBarIcon", withExtension: "png"),
               let image = NSImage(contentsOf: url) else { return nil }
@@ -128,8 +131,10 @@ enum MenuBarLabel {
                     .foregroundColor: ink,
                     .paragraphStyle: aligned,
                 ]
-                ("↑ \(upload)" as NSString).draw(in: NSRect(x: layout.speedX, y: 11, width: layout.speedWidth, height: 11), withAttributes: attributes)
-                ("↓ \(download)" as NSString).draw(in: NSRect(x: layout.speedX, y: 0, width: layout.speedWidth, height: 11), withAttributes: attributes)
+                for (index, row) in speedRows(mode: layout.mode, upload: upload, download: download).enumerated() {
+                    (row as NSString).draw(in: NSRect(x: layout.speedX, y: CGFloat(11 - index * 11),
+                                                     width: layout.speedWidth, height: 11), withAttributes: attributes)
+                }
             }
             return true
         }

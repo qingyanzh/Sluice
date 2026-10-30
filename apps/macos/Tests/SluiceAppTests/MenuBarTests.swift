@@ -22,15 +22,13 @@ final class MenuBarTests: XCTestCase {
                     for showsMode in [true, false] {
                         let image = MenuBarLabel.image(layout: layout, upload: upText, download: downText,
                                                        modeMark: "R", showsMode: showsMode, dark: false, ink: .black)
-                        XCTAssertEqual(image.size.width + 12, width, "\(mode), ↑\(up), ↓\(down)")
+                        XCTAssertEqual(image.size.width + 12, width, "\(mode), upload \(up), download \(down)")
                         XCTAssertEqual(image.size.height, 22)
                     }
-                    // Check actual two-line content fits, including both arrows.
-                    if mode.showsSpeed {
-                        for row in ["↑ \(upText)", "↓ \(downText)"] {
-                            XCTAssertLessThanOrEqual((row as NSString).size(withAttributes: [.font: font]).width,
-                                                     layout.speedWidth, row)
-                        }
+                    // Check the actual strings used by the renderer fit.
+                    for row in MenuBarLabel.speedRows(mode: mode, upload: upText, download: downText) {
+                        XCTAssertLessThanOrEqual((row as NSString).size(withAttributes: [.font: font]).width,
+                                                 layout.speedWidth, row)
                     }
                 }
             }
@@ -46,10 +44,29 @@ final class MenuBarTests: XCTestCase {
         XCTAssertGreaterThan(menuBarStatusItemWidth(mode: .speedOnly,
                                                   font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular)),
                              speed.statusItemLength)
-        for unit in ["B", "KB", "MB", "GB", "TB"] {
-            for arrow in ["↑", "↓"] {
-                let row = "\(arrow) 999.9 \(unit)/s" as NSString
-                XCTAssertLessThanOrEqual(row.size(withAttributes: [.font: font]).width, speed.speedWidth)
+        let widths = ["B", "KB", "MB", "GB", "TB"].map { unit in
+            ("999.9 \(unit)/s" as NSString).size(withAttributes: [.font: font]).width
+        }
+        XCTAssertEqual(speed.speedWidth, ceil(widths.max()!))
+        XCTAssertEqual(speed.statusItemLength, speed.speedWidth + 12)
+        XCTAssertLessThan(speed.speedWidth,
+                          ("↑ 999.9 MB/s" as NSString).size(withAttributes: [.font: font]).width)
+        for width in widths {
+            XCTAssertLessThanOrEqual(width, speed.speedWidth)
+        }
+    }
+
+    func testRenderedSpeedStringsHaveNoArrowsAndKeepUploadAboveDownload() {
+        let samples: [Double] = [0, 999, 1_000, 1_000_000, 1_000_000_000, 1_000_000_000_000]
+        for mode in MenuBarDisplayMode.allCases {
+            for rate in samples {
+                let upload = menuBarSpeed(rate)
+                let download = menuBarSpeed(rate * 2)
+                let rows = MenuBarLabel.speedRows(mode: mode, upload: upload, download: download)
+                XCTAssertEqual(rows, mode.showsSpeed ? [upload, download] : [])
+                for row in rows {
+                    XCTAssertFalse(row.contains { "↑↓↟↡⇑⇓⬆⬇".contains($0) }, row)
+                }
             }
         }
     }
