@@ -103,8 +103,12 @@ pub fn register(meta: ConnMeta) -> Arc<LiveConn> {
         closed: AtomicBool::new(false),
         wakers: Mutex::new(Vec::new()),
     });
-    ACTIVE.lock().unwrap().insert(c.id, c.clone());
-    publish("conn_open", &conn_json(&c));
+    {
+        let mut active = ACTIVE.lock().unwrap();
+        active.insert(c.id, c.clone());
+        // Publish before another thread can observe and unregister this connection.
+        publish("conn_open", &conn_json(&c));
+    }
     c
 }
 
@@ -220,6 +224,18 @@ mod tests {
         ConnMeta { network: "tcp", target: target.into(), policy: "P".into(), outbound: "N".into(), ..Default::default() }
     }
 
+    fn next_conn_event(rx: &mut broadcast::Receiver<Event>, id: u64) -> Event {
+        loop {
+            let event = rx.try_recv().expect("expected a connection event");
+            if matches!(event.kind, "conn_open" | "conn_close") {
+                let data: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+                if data["id"].as_u64() == Some(id) {
+                    return event;
+                }
+            }
+        }
+    }
+
     #[test]
     fn close_wakes_parked_waker() {
         use std::sync::atomic::AtomicUsize;
@@ -242,22 +258,22 @@ mod tests {
     #[test]
     fn register_close_unregister() {
         let mut rx = subscribe();
+        // The bus is process-wide: unrelated tests and streams publish here too.
+        let other = register(meta("live-test.example:443"));
+        unregister(other.id);
         let c = register(meta("live-test.example:443"));
         assert!(active().iter().any(|x| x.id == c.id));
-        assert_eq!(rx.try_recv().unwrap().kind, "conn_open");
+        assert_eq!(next_conn_event(&mut rx, c.id).kind, "conn_open");
         c.add(10, 20);
         let j: serde_json::Value = serde_json::from_str(&conn_json(&c)).unwrap();
         assert_eq!((j["up"].as_u64(), j["down"].as_u64()), (Some(10), Some(20)));
         assert_eq!(j["target"], "live-test.example:443");
         assert!(close(c.id) && c.is_closed());
         assert!(!close(u64::MAX));
+        let other = register(meta("live-test.example:443"));
+        unregister(other.id);
         unregister(c.id);
         assert!(!active().iter().any(|x| x.id == c.id));
-        loop {
-            let e = rx.try_recv().unwrap();
-            if e.kind == "conn_close" && e.data.contains("live-test.example") {
-                break;
-            }
-        }
+        assert_eq!(next_conn_event(&mut rx, c.id).kind, "conn_close");
     }
 }
