@@ -7,18 +7,33 @@ func shellQuote(_ s: String) -> String {
 
 /// Runs a command and returns (status, combined output).
 func runTool(_ path: String, _ args: [String]) async -> (Int32, String) {
-    await withCheckedContinuation { cont in
+    await Task.detached(priority: .utility) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
-        p.terminationHandler = { proc in
-            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            cont.resume(returning: (proc.terminationStatus, out))
+        do {
+            try p.run()
+            // Drain while the child is running; waiting for termination first can
+            // deadlock once check/diagnostics output fills the pipe buffer.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+        } catch {
+            return (Int32(-1), error.localizedDescription)
         }
-        do { try p.run() } catch { cont.resume(returning: (-1, error.localizedDescription)) }
+    }.value
+}
+
+enum ConfigValidation {
+    static func check(binary: URL?, path: String) async -> String? {
+        guard let binary else { return "找不到 Sluice 内核，请重新安装应用。" }
+        let (status, output) = await runTool(binary.path, ["check", path])
+        guard status != 0 else { return nil }
+        let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return detail.isEmpty ? "配置检查失败（退出码 \(status)）。" : detail
     }
 }
 

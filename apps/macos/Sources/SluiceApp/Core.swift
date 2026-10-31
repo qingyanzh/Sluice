@@ -19,13 +19,21 @@ struct Connection: Decodable, Identifiable {
     let outbound: String
     let process: String?
     let src: String?
+    var up: UInt64? = nil
+    var down: UInt64? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, network, target, src, policy, rule, outbound, process
+        case id, network, target, src, policy, rule, outbound, process, up, down
         case timeMs = "time_ms"
     }
 
     var policyChain: String { policy == outbound ? policy : "\(policy) → \(outbound)" }
+
+    var byteCounts: [(String, String)] {
+        [("↑ 上传", up), ("↓ 下载", down)].compactMap { label, bytes in
+            bytes.map { (label, formatBytes(Double($0))) }
+        }
+    }
 
     func matches(_ query: String) -> Bool {
         query.isEmpty || [target, policy, outbound, process ?? ""].contains { $0.localizedCaseInsensitiveContains(query) }
@@ -51,6 +59,8 @@ extension Connection {
         rule = try fields.decode(String.self, forKey: .rule)
         outbound = try fields.decode(String.self, forKey: .outbound)
         process = try fields.decodeIfPresent(String.self, forKey: .process)
+        up = try fields.decodeIfPresent(UInt64.self, forKey: .up)
+        down = try fields.decodeIfPresent(UInt64.self, forKey: .down)
     }
 }
 
@@ -132,6 +142,8 @@ final class Core: ObservableObject {
     @Published private(set) var summary = ConfigSummary(text: "")
     @Published var lastActionError: String?
     @Published private(set) var systemProxyOn = false
+    @Published private(set) var settingSystemProxy = false
+    @Published private(set) var validatingStart = false
     @Published private(set) var otherSystemProxy: String?
     @Published private(set) var privileged = false
     /// Smoothed display values. Charts below retain the accepted raw samples.
@@ -178,6 +190,7 @@ final class Core: ObservableObject {
     private var monitoringID = UUID()
     private var systemProxyRefreshID = UUID()
     private var observingActiveConnections = false
+    private var windowVisible = true
     private var runningSummary: ConfigSummary?
     private var requestsDirty = true
     private var latencyRevision = 0
@@ -713,18 +726,21 @@ final class Core: ObservableObject {
     private func followEvents(_ api: APIClient) async {
         var backoff: Double = 1
         let generation = monitoringID
-        while !Task.isCancelled, monitoringID == generation {
+        while !Task.isCancelled, monitoringID == generation,
+              MonitoringPolicy.shouldFollowEvents(state: state, windowVisible: windowVisible) {
             let started = Date()
             do {
                 try await api.events {
                     try Task.checkCancellation()
-                    guard self.monitoringID == generation else { throw CancellationError() }
+                    guard self.monitoringID == generation,
+                          MonitoringPolicy.shouldFollowEvents(state: self.state, windowVisible: self.windowVisible) else { throw CancellationError() }
                     self.setEventsConnected(true)
                     // Reconcile events missed during a disconnect before consuming new frames.
                     await self.refreshConnections(api)
                     await self.refreshActiveConnections(api)
                 } receive: { frame in
-                    guard self.monitoringID == generation else { throw CancellationError() }
+                    guard self.monitoringID == generation,
+                          MonitoringPolicy.shouldFollowEvents(state: self.state, windowVisible: self.windowVisible) else { throw CancellationError() }
                     try await self.receiveEvent(frame, api: api)
                 }
             } catch {
@@ -792,7 +808,7 @@ final class Core: ObservableObject {
     /// fetch its rates after traffic events. Coalesce snapshot requests so a slow
     /// endpoint never blocks delivery of logs or connection events.
     private func refreshEventSnapshots(_ api: APIClient) {
-        guard eventRefreshTask == nil else { return }
+        guard eventRefreshTask == nil, windowVisible, state == .running else { return }
         let generation = monitoringID
         let refreshRequests = requestsDirty
         requestsDirty = false
@@ -805,12 +821,26 @@ final class Core: ObservableObject {
 
     func observeActiveConnections(_ observing: Bool) {
         observingActiveConnections = observing
-        if observing, state == .running, let api {
+        if observing, windowVisible, state == .running, let api {
             Task { await refreshActiveConnections(api) }
         }
     }
 
+    func setWindowVisible(_ visible: Bool) {
+        guard windowVisible != visible else { return }
+        windowVisible = visible
+        if !visible {
+            eventTask?.cancel()
+            eventTask = nil
+            eventRefreshTask?.cancel()
+            eventRefreshTask = nil
+            trafficPollTask?.cancel()
+            setEventsConnected(false)
+        }
+    }
+
     private func poll() async {
+        guard MonitoringPolicy.shouldPoll(state: state) else { return }
         let generation = UUID()
         monitoringID = generation
         var tick = 0
@@ -826,7 +856,7 @@ final class Core: ObservableObject {
                 setEventsConnected(false)
             }
         }
-        while !Task.isCancelled {
+        while !Task.isCancelled, MonitoringPolicy.shouldPoll(state: state) {
             if let pid = rootPID {
                 if !eventsConnected { followLog() }
                 if !Core.alive(pid) {
@@ -835,20 +865,23 @@ final class Core: ObservableObject {
                     return
                 }
             }
-            if let api, state == .starting || tick % 2 == 0, await refreshPolicies(api) {
+            let maintenanceDue = MonitoringPolicy.maintenanceDue(windowVisible: windowVisible, tick: tick)
+            if let api, state == .starting || (maintenanceDue && tick % 2 == 0), await refreshPolicies(api) {
                 if state == .starting {
                     state = .running
                     refreshSystemProxy()
                 }
-                if let m = try? await api.mode() { mode = m }
+                if let m = try? await api.mode(), mode != m { mode = m }
             }
             guard !Task.isCancelled else { return }
-            if let api, state == .running {
-                if eventTask == nil { eventTask = Task { await self.followEvents(api) } }
+            if let api, state == .running, maintenanceDue {
+                if MonitoringPolicy.shouldFollowEvents(state: state, windowVisible: windowVisible), eventTask == nil {
+                    eventTask = Task { await self.followEvents(api) }
+                }
                 if !eventsConnected { await sampleTraffic(api) }
-                if !eventsConnected { await refreshConnections(api) }
-                if !eventsConnected, observingActiveConnections { await refreshActiveConnections(api) }
-                if Date().timeIntervalSince(lastStatsPoll) >= 5 {
+                if windowVisible, !eventsConnected { await refreshConnections(api) }
+                if windowVisible, !eventsConnected, observingActiveConnections { await refreshActiveConnections(api) }
+                if windowVisible, Date().timeIntervalSince(lastStatsPoll) >= 5 {
                     await sampleStats(api)
                     lastStatsPoll = Date()
                 }
@@ -872,22 +905,25 @@ final class Core: ObservableObject {
         // Keep explicit node-test measurements aligned with the detail sheet;
         // automatic group checks may measure a different URL. A group test
         // explicitly replaces those measurements for its options.
+        var latencies = nodeLatencies
         if !preferTestResults {
             for option in fresh.flatMap(\.options) {
                 if !testingNodes.contains(option.name),
                    !fresh.contains(where: { testingGroups.contains($0.group) && $0.options.contains(where: { $0.name == option.name }) }),
                    nodeTests[option.name] == nil, let latency = option.latencyMs {
-                    nodeLatencies[option.name] = latency
+                    latencies[option.name] = latency
                 }
             }
         }
-        policiesLoaded = true
-        groups = fresh.map { group in
+        if nodeLatencies != latencies { nodeLatencies = latencies }
+        if !policiesLoaded { policiesLoaded = true }
+        let next = fresh.map { group in
             PolicyGroup(group: group.group, type: group.type, selected: group.selected,
                         options: group.options.map { option in
                             GroupOption(name: option.name, latencyMs: nodeLatencies[option.name] ?? option.latencyMs)
                         })
         }
+        if groups != next { groups = next }
     }
 
     // MARK: actions
@@ -1031,6 +1067,58 @@ final class Core: ObservableObject {
     }
 
     // MARK: config editing
+
+    /// Validate at the UI boundary without changing the process/helper lifecycle.
+    func requestStart() {
+        Task { await startValidated() }
+    }
+
+    func requestAutoStart() {
+        guard autoStart, !autoStarted, !isActive else { return }
+        autoStarted = true
+        requestStart()
+    }
+
+    func startValidated(check: (URL?, String) async -> String? = ConfigValidation.check) async {
+        guard !isActive, !validatingStart else { return }
+        validatingStart = true
+        defer { validatingStart = false }
+        let path = configPath
+        let error = await check(coreBinary, path)
+        guard configPath == path, !isActive else { return }
+        if let error {
+            let message = "启动失败：\(error)"
+            lastActionError = message
+            appendLog(level: "ERROR", message: message)
+            return
+        }
+        lastActionError = nil
+        start()
+    }
+
+    /// Copy the editor contents to the selected destination, never to the source.
+    /// Restore the destination if validation/hot reload fails, leaving the draft available.
+    func copyDraftAndSwitch(to name: String, text: String,
+                            check: (String) async -> String?) async throws {
+        try requireProfileChange()
+        let store = try profiles()
+        guard name != store.activeName else { return }
+        let sourcePath = configPath
+        let original = try store.read(name)
+        if let error = await check(text) { throw APIError(message: error) }
+        try requireProfileChange()
+        guard configPath == sourcePath else { throw APIError(message: "当前配置文件已切换，请重试。") }
+        try store.replace(name, contents: text, expected: original)
+        do { try await switchProfile(to: name) }
+        catch {
+            try store.replace(name, contents: original, expected: text)
+            throw error
+        }
+    }
+
+    func copyDraftAndSwitch(to name: String, text: String) async throws {
+        try await copyDraftAndSwitch(to: name, text: text, check: { await self.validate($0) })
+    }
 
     private func profiles() throws -> ProfileStore {
         guard let profileStore else { throw APIError(message: "配置目录不可用，请检查权限后重新打开应用。") }
@@ -1237,37 +1325,50 @@ final class Core: ObservableObject {
     // MARK: system proxy
 
     func refreshSystemProxy() {
-        guard attachment == nil else { return }
+        guard attachment == nil, !settingSystemProxy else { return }
         let config = isActive ? (runningSummary ?? summary) : summary
         let coreRunning = state == .running
         let refreshID = UUID()
         systemProxyRefreshID = refreshID
         Task {
             let status = await SystemProxy.status(http: config.httpListen, socks: config.socksListen, coreRunning: coreRunning)
-            guard systemProxyRefreshID == refreshID, (state == .running) == coreRunning else { return }
-            systemProxyOn = status.isSluice
-            otherSystemProxy = status.otherProxy
+            guard systemProxyRefreshID == refreshID, !settingSystemProxy, (state == .running) == coreRunning else { return }
+            if systemProxyOn != status.isSluice { systemProxyOn = status.isSluice }
+            if otherSystemProxy != status.otherProxy { otherSystemProxy = status.otherProxy }
         }
     }
 
     func setSystemProxy(_ on: Bool) {
-        guard attachment == nil else { return }
+        Task { await applySystemProxy(on) }
+    }
+
+    func applySystemProxy(_ on: Bool,
+                          readStatus: (String?, String?, Bool) async -> SystemProxy.Status = SystemProxy.status,
+                          set: (Bool, (String, Int)?, (String, Int)?) async throws -> Void = SystemProxy.set) async {
+        guard attachment == nil, !settingSystemProxy else { return }
         let config = isActive ? (runningSummary ?? summary) : summary
         let http = SystemProxy.split(config.httpListen)
         let socks = SystemProxy.split(config.socksListen)
+        let coreRunning = state == .running
         guard !on || http != nil || socks != nil else {
             lastActionError = "无法开启系统代理：配置的 [General] 中没有 http-listen 或 socks5-listen。"
             return
         }
-        Task {
-            do {
-                try await SystemProxy.set(enabled: on, http: http, socks: socks)
-                lastActionError = nil
-            } catch {
-                lastActionError = "设置系统代理失败：\(error.localizedDescription)"
-            }
-            refreshSystemProxy()
+        let previous = systemProxyOn
+        systemProxyRefreshID = UUID()
+        settingSystemProxy = true
+        systemProxyOn = on
+        do {
+            try await set(on, http, socks)
+            let confirmed = await readStatus(config.httpListen, config.socksListen, coreRunning)
+            systemProxyOn = confirmed.isSluice
+            otherSystemProxy = confirmed.otherProxy
+            lastActionError = confirmed.isSluice == on ? nil : "系统代理状态与请求不一致，请检查系统网络设置后重试。"
+        } catch {
+            systemProxyOn = previous
+            lastActionError = "设置系统代理失败：\(error.localizedDescription)"
         }
+        settingSystemProxy = false
     }
 
     @Published private(set) var exportingDiagnostics = false

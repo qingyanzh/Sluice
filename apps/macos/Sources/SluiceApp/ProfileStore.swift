@@ -92,6 +92,18 @@ final class ProfileStore {
         try files.copyItem(at: source, to: url(for: newName))
     }
 
+    func read(_ name: String) throws -> String {
+        try String(contentsOf: existingURL(name), encoding: .utf8)
+    }
+
+    func replace(_ name: String, contents: String, expected: String) throws {
+        let destination = try existingURL(name)
+        guard try String(contentsOf: destination, encoding: .utf8) == expected else {
+            throw APIError(message: "目标配置已被其他操作修改，没有覆盖。请刷新后重试。")
+        }
+        try contents.write(to: destination, atomically: true, encoding: .utf8)
+    }
+
     func rename(_ name: String, to newName: String) throws {
         let source = try existingURL(name)
         if name == newName { return }

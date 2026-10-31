@@ -54,7 +54,7 @@ struct TrafficStatsView: View {
                 if core.state != .running {
                     EmptyState(icon: "chart.xyaxis.line", title: core.state == .starting ? "Sluice 启动中" : "Sluice 未运行",
                                detail: "内核运行后可查看策略速率和累计流量。",
-                               action: core.isActive ? nil : ("启动 Sluice", { core.start() }))
+                               action: core.isActive ? nil : ("启动 Sluice", { core.requestStart() }))
                         .frame(height: 180)
                 } else {
                     if core.statsFallback {

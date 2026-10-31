@@ -209,12 +209,17 @@ struct MainView: View {
                         .font(.callout).foregroundStyle(.secondary)
                         .padding(.horizontal, DS.gutter).padding(.top, 8)
                 }
-                if core.systemProxyOn && core.state != .running && core.state != .starting {
+                if (core.systemProxyOn || core.settingSystemProxy) && core.state != .running && core.state != .starting {
                     // Inconsistent and harmful: the system sends traffic to a port nobody listens on.
                     Notice(tone: DS.warn, icon: "exclamationmark.triangle.fill", title: "系统代理已开启，但内核未运行",
                            detail: "此时经过系统代理的网络请求都会失败。启动 Sluice，或关闭系统代理恢复直接上网。") {
-                        Button("关闭系统代理") { core.setSystemProxy(false) }.glassButton()
-                        Button("启动 Sluice") { core.start() }.glassButton(prominent: true)
+                        if core.settingSystemProxy {
+                            ProgressView().controlSize(.small)
+                            Text(core.systemProxyOn ? "正在开启…" : "正在关闭…").font(DS.small)
+                        } else {
+                            Button("关闭系统代理") { core.setSystemProxy(false) }.glassButton()
+                        }
+                        Button("启动 Sluice") { core.requestStart() }.glassButton(prominent: true)
                     }
                     .padding(.horizontal, DS.gutter).padding(.top, 8)
                 }
@@ -245,12 +250,13 @@ struct MainView: View {
                 ToolbarItemGroup(placement: .primaryAction) {
                     TogglePill(title: "系统代理", on: core.systemProxyOn,
                                warning: core.systemProxyOn && core.state != .running && core.state != .starting) { core.setSystemProxy(!core.systemProxyOn) }
-                        .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
+                        .disabled(core.settingSystemProxy || (core.summary.httpListen == nil && core.summary.socksListen == nil))
                         .help(core.systemProxyOn && core.state != .running ? "系统代理已开启，但内核未运行：网络请求会失败" : "把系统的 HTTP/HTTPS/SOCKS 代理指向 Sluice")
                     EnhancedModePill()
                 }
             }
         }
+        .background(WindowVisibilityObserver { core.setWindowVisible($0) })
         .background(Backdrop())
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle("")
@@ -264,7 +270,7 @@ struct MainView: View {
                 core.requestedPane = nil
             }
             core.refreshSystemProxy()
-            core.startIfAutoStart()
+            core.requestAutoStart()
         }
         .onChange(of: core.requestedPane) { _, requested in
             if let requested {
@@ -443,7 +449,7 @@ struct StartStopButton: View {
                 .labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
                 .help("停止 Sluice")
         } else {
-            Button { core.start() } label: { Label("启动", systemImage: "play.fill").contentTransition(.symbolEffect(.replace)) }
+            Button { core.requestStart() } label: { Label("启动", systemImage: "play.fill").contentTransition(.symbolEffect(.replace)) }
                 .labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
                 .help("启动 Sluice")
         }
@@ -1180,7 +1186,7 @@ struct PolicyView: View {
                     EmptyState(icon: "signpost.right",
                                title: core.state == .running ? "没有策略组" : "Sluice 未运行",
                                detail: core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。",
-                               action: core.isActive ? nil : ("启动 Sluice", { core.start() }) as (String, () -> Void)?)
+                               action: core.isActive ? nil : ("启动 Sluice", { core.requestStart() }) as (String, () -> Void)?)
                         .frame(minHeight: 260)
                 } else if groups.isEmpty {
                     EmptyState(icon: "magnifyingglass", title: "没有匹配的策略", detail: "按策略组名称或节点名称搜索。", action: ("清除搜索", { filter = "" }))
@@ -1523,7 +1529,7 @@ struct RequestsView: View {
                             if rows.isEmpty {
                                 if !core.isActive && core.connections.isEmpty {
                                     EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                               detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.start() }))
+                                               detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.requestStart() }))
                                 } else if !core.connectionsLoaded {
                                     ProgressView("正在加载请求…").font(DS.small)
                                 } else {
@@ -1587,6 +1593,10 @@ struct RequestRow: View {
                         Text("\(connection.proto) · \(connection.rule)")
                             .font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 4)
+                        ForEach(connection.byteCounts, id: \.0) { label, bytes in
+                            Text("\(label.prefix(1)) \(bytes)").font(DS.caption.monospacedDigit())
+                                .foregroundStyle(DS.ink2).fixedSize()
+                        }
                         Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3).fixedSize()
                     }
                 }
@@ -1742,6 +1752,9 @@ struct RequestDetail: View {
                     detailGroup("路由", [("规则", AnyView(Text(c.rule).textSelection(.enabled))),
                                          ("策略链", AnyView(Text(c.policyChain).textSelection(.enabled))),
                                          ("出站", AnyView(OutboundTag(name: c.outbound)))])
+                    if !c.byteCounts.isEmpty {
+                        detailGroup("流量", c.byteCounts.map { ($0.0, AnyView(Text($0.1).monospacedDigit())) })
+                    }
                     detailGroup("请求", [("时间", AnyView(Text(c.time).monospacedDigit())),
                                          ("进程", AnyView(Text(c.process ?? "—").textSelection(.enabled))),
                                          ("来源", AnyView(Text(c.src ?? "—").textSelection(.enabled))),
@@ -2184,9 +2197,11 @@ struct ConfigView: View {
             get: { pendingSwitch != nil }, set: { if !$0 { pendingSwitch = nil } })) {
             if let name = pendingSwitch {
                 Button("放弃修改并切换到「\(name)」", role: .destructive) { switchProfile(name) }
-                Button("复制草稿并切换") { copyText(draft.text); switchProfile(name) }
+                Button("复制草稿并切换到「\(name)」") { switchProfile(name, copyingDraft: true) }
             }
             Button("取消", role: .cancel) { pendingSwitch = nil }
+        } message: {
+            Text("复制草稿会覆盖目标配置，原配置文件保持不变。")
         }
         .confirmationDialog("删除「\(pendingDelete ?? "")」？", isPresented: Binding(
             get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
@@ -2253,13 +2268,16 @@ struct ConfigView: View {
         if draft.hasChanges { pendingSwitch = name } else { switchProfile(name) }
     }
 
-    private func switchProfile(_ name: String) {
+    private func switchProfile(_ name: String, copyingDraft: Bool = false) {
+        guard !draft.busy else { return }
+        let submitted = draft.text
         pendingSwitch = nil
         draft.busy = true
         Task {
             defer { draft.busy = false }
             do {
-                try await core.switchProfile(to: name)
+                if copyingDraft { try await core.copyDraftAndSwitch(to: name, text: submitted) }
+                else { try await core.switchProfile(to: name) }
                 draft.message = nil
                 load()
             } catch {

@@ -58,3 +58,23 @@ final class ConnectionTests: XCTestCase {
         XCTAssertFalse(records[1].matches("Safari"))
     }
 }
+
+extension ConnectionTests {
+    func testOptionalByteCountsIncludeZeroAndFullUInt64Range() throws {
+        let base = """
+        {"id":1,"time_ms":0,"network":"tcp","target":"example.com:443",
+         "policy":"DIRECT","rule":"FINAL","outbound":"DIRECT"
+        """
+        func decode(_ fields: String) throws -> Connection {
+            try JSONDecoder().decode(Connection.self, from: Data((base + fields + "}").utf8))
+        }
+        XCTAssertTrue(try decode("").byteCounts.isEmpty)
+        XCTAssertTrue(try decode(",\"up\":null,\"down\":null").byteCounts.isEmpty)
+        let record = try decode(",\"up\":0,\"down\":18446744073709551615")
+        XCTAssertEqual(record.up, 0)
+        XCTAssertEqual(record.down, UInt64.max)
+        XCTAssertEqual(record.byteCounts.map(\.0), ["↑ 上传", "↓ 下载"])
+        XCTAssertEqual(record.byteCounts.first?.1, "0 B")
+        XCTAssertEqual(try decode(",\"down\":1024").byteCounts.map(\.1), ["1.0 KB"])
+    }
+}
