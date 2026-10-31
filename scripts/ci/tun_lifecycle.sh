@@ -28,8 +28,6 @@ cleanup() {
 }
 trap cleanup EXIT
 uuid=b831381d-6324-4d53-ad4f-8cda48b30811
-iface=$(route -n get default | awk '/interface:/{print $2}')
-local_ip=$(ipconfig getifaddr "$iface")
 conf=$work/lifecycle.conf
 # Keep lifecycle listeners separate from tun.sh and the other CI scripts.
 api_port=16470
@@ -125,22 +123,35 @@ restart_mode() {
     kill "$watchdog" 2>/dev/null || true
     start_core "$1" "$2"
 }
-python3 -I scripts/ci/tun_udp_check.py server "$local_ip" 19302 > ci-logs/tun-stun-server.log 2>&1 & responder=$!
-# Resolve test domains in Xray to the physical host address. The client resolves
-# them through Sluice to fake IPs, forcing its packets through TUN (never loopback).
+python3 -I scripts/ci/tun_udp_check.py server 127.0.0.1 19302 > ci-logs/tun-stun-server.log 2>&1 & responder=$!
+# Only the server side uses loopback, so Xray's outbound cannot re-enter TUN. The
+# client still resolves these names to fake IPs and must traverse Sluice's UDP path.
+# Xray now blocks private destinations by default: allow just this UDP responder.
+# Drop unrelated system traffic rather than recursively proxying it back into TUN.
 cat > "$work/xray.json" <<EOF
 {"log":{"loglevel":"debug"},
- "dns":{"hosts":{"vmess.sluice.test":"$local_ip","vless.sluice.test":"$local_ip"}},
+ "dns":{"hosts":{"vmess.sluice.test":"127.0.0.1","vless.sluice.test":"127.0.0.1"},"servers":[]},
  "inbounds":[
  {"listen":"127.0.0.1","port":19001,"protocol":"vmess","settings":{"clients":[{"id":"$uuid"}]}},
  {"listen":"127.0.0.1","port":19002,"protocol":"vless","settings":{"clients":[{"id":"$uuid"}],"decryption":"none"}}],
- "outbounds":[{"protocol":"freedom","settings":{"domainStrategy":"UseIPv4"}}]}
+ "outbounds":[
+ {"tag":"drop","protocol":"blackhole"},
+ {"tag":"stun","protocol":"freedom",
+  "settings":{"finalRules":[{"action":"allow","network":"udp","ip":["127.0.0.1/32"],"port":"19302"}]},
+  "streamSettings":{"sockopt":{"domainStrategy":"UseIPv4"}}}],
+ "routing":{"rules":[{"type":"field","network":"udp","port":"19302",
+  "domain":["full:vmess.sluice.test","full:vless.sluice.test"],"outboundTag":"stun"}]}}
 EOF
 xray run -c "$work/xray.json" > ci-logs/tun-xray.log 2>&1 & server=$!
 sleep 1
 kill -0 "$server" "$responder"
 write_config false
 start_core false initial
+curl -fsS -X POST "$api/v1/policies/Proxy?select=VMess"
+# Prove the responder and both proxy protocols work before changing routes/DNS.
+python3 -I scripts/ci/tun_udp_check.py proxy vmess.sluice.test 19302 "$socks_port"
+curl -fsS -X POST "$api/v1/policies/Proxy?select=VLESS"
+python3 -I scripts/ci/tun_udp_check.py proxy vless.sluice.test 19302 "$socks_port"
 curl -fsS -X POST "$api/v1/policies/Proxy?select=VMess"
 restart_mode true enabled
 assert_selection VMess

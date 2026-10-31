@@ -480,6 +480,140 @@ mod tests {
         assert_eq!(fnv1a32(b"a"), 0xe40c292c);
     }
 
+    /// Server-side AEAD request reader, including authentication and the addressless
+    /// Mux command. Tests use the public open_udp path, not a pre-negotiated stream.
+    async fn mock_mux_session(wire: &mut BoxStream, cmd_key: &[u8; 16], sec: Security) -> Session {
+        let mut prefix = [0u8; 42]; // AuthID, sealed length, nonce
+        wire.read_exact(&mut prefix).await.unwrap();
+        let (id, nonce) = (&prefix[..16], &prefix[34..]);
+        let open = |label_key: &'static [u8], label_iv: &'static [u8], data: &[u8]| {
+            let key = kdf16(cmd_key, &[label_key, id, nonce]);
+            let iv = kdf(cmd_key, &[label_iv, id, nonce]);
+            Aes128Gcm::new((&key).into()).decrypt(GenericArray::from_slice(&iv[..12]), Payload { msg: data, aad: id }).unwrap()
+        };
+        let len = open(b"VMess Header AEAD Key_Length", b"VMess Header AEAD Nonce_Length", &prefix[16..34]);
+        let mut enc = vec![0; u16::from_be_bytes(len.try_into().unwrap()) as usize + TAG];
+        wire.read_exact(&mut enc).await.unwrap();
+        let head = open(b"VMess Header AEAD Key", b"VMess Header AEAD Nonce", &enc);
+        assert_eq!(head[0], 1);
+        assert_eq!(&head[34..38], &[5, (head[35] & 0xf0) | sec.id(), 0, 3]);
+        assert_eq!(head.len(), 38 + (head[35] >> 4) as usize + 4, "Mux request must have no target address");
+        let end = head.len() - 4;
+        assert_eq!(&head[end..], &fnv1a32(&head[..end]).to_be_bytes());
+        let key: [u8; 16] = head[17..33].try_into().unwrap();
+        let iv: [u8; 16] = head[1..17].try_into().unwrap();
+        let sess = Session {
+            sec, key, iv, resp_v: head[33], legacy: false,
+            resp_key: sha256(&[&key])[..16].try_into().unwrap(),
+            resp_iv: sha256(&[&iv])[..16].try_into().unwrap(),
+        };
+        let response = [sess.resp_v, 0, 0, 0];
+        let mut sealed = gcm_seal(
+            &kdf16(&sess.resp_key, &[b"AEAD Resp Header Len Key"]),
+            &kdf(&sess.resp_iv, &[b"AEAD Resp Header Len IV"]),
+            &(response.len() as u16).to_be_bytes(), b"",
+        );
+        sealed.extend(gcm_seal(
+            &kdf16(&sess.resp_key, &[b"AEAD Resp Header Key"]),
+            &kdf(&sess.resp_iv, &[b"AEAD Resp Header IV"]), &response, b"",
+        ));
+        wire.write_all(&sealed).await.unwrap();
+        sess
+    }
+
+    async fn mock_xudp_packet(wire: &mut BoxStream, state: &mut BodyState, pending: &mut Vec<u8>, first: bool) -> crate::udp::Packet {
+        // A datagram may span VMess chunks; chunk boundaries are not UDP boundaries.
+        let mut needed = 2;
+        while pending.len() < needed {
+            pending.extend(read_chunk(state, wire).await.unwrap().expect("UDP stream closed before reply"));
+        }
+        let meta_len = u16::from_be_bytes(pending[..2].try_into().unwrap()) as usize;
+        needed = 2 + meta_len + 2;
+        while pending.len() < needed {
+            pending.extend(read_chunk(state, wire).await.unwrap().unwrap());
+        }
+        assert_eq!(&pending[2..7], &[0, 0, if first { 1 } else { 2 }, 1, 2]);
+        let (addr, used) = crate::udp::parse_port_addr(&pending[7..2 + meta_len]).unwrap();
+        assert_eq!(meta_len, 5 + used + if first { 8 } else { 0 });
+        if first { assert_eq!(&pending[7 + used..2 + meta_len], &[0; 8]); }
+        let size = u16::from_be_bytes(pending[needed - 2..needed].try_into().unwrap()) as usize;
+        let start = needed;
+        needed += size;
+        while pending.len() < needed {
+            pending.extend(read_chunk(state, wire).await.unwrap().unwrap());
+        }
+        let data = pending[start..needed].to_vec();
+        pending.drain(..needed);
+        crate::udp::Packet { addr, data }
+    }
+
+    #[tokio::test]
+    async fn udp_roundtrip_keeps_one_vmess_connection() {
+        use crate::udp::Packet;
+        use tokio::sync::mpsc;
+
+        for method in ["aes-128-gcm", "chacha20-poly1305"] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (listener, mut incoming) = mpsc::unbounded_channel();
+                let transport = Transport::new("mock".into(), 1, false, None, false, None).unwrap().with_test_wire(listener);
+                let vmess = VmessServer::new(transport, "b831381d-6324-4d53-ad4f-8cda48b30811", method, 0).unwrap();
+                let targets = [Target::new("stun.example", 19302), Target::new("1.2.3.4", 3478), Target::new("2001:db8::1", 53)];
+                let payloads = [vec![1; 20], vec![2; MAX_PAYLOAD + 100], b"third request".to_vec()];
+                let source = Target::new("2001:db8::2", 19302);
+                let mut pipe = vmess.open_udp(&targets[0]);
+                let (cmd_key, sec) = (vmess.cmd_key, vmess.sec);
+                let server_targets = targets.clone();
+                let server_payloads = payloads.clone();
+                let server_source = source.clone();
+                let server = tokio::spawn(async move {
+                    let mut wire = incoming.recv().await.unwrap();
+                    let sess = mock_mux_session(&mut wire, &cmd_key, sec).await;
+                    let mut up = BodyState::new(sec, &sess.key, &sess.iv);
+                    let mut down = BodyState::new(sec, &sess.resp_key, &sess.resp_iv);
+                    let mut pending = Vec::new();
+                    for i in 0..3 {
+                        let packet = mock_xudp_packet(&mut wire, &mut up, &mut pending, i == 0).await;
+                        assert_eq!(packet.addr.to_string(), server_targets[i].to_string());
+                        assert_eq!(packet.data, server_payloads[i]);
+                        // Xray sends Keep frames, optionally with a source address.
+                        let mut meta = vec![0, 0, 2, 1];
+                        if i != 2 {
+                            meta.push(2);
+                            write_port_addr(&server_source, &mut meta).unwrap();
+                        }
+                        let mut reply = (meta.len() as u16).to_be_bytes().to_vec();
+                        reply.extend(meta);
+                        reply.extend_from_slice(&(packet.data.len() as u16).to_be_bytes());
+                        reply.extend_from_slice(&packet.data);
+                        // KeepAlive before a reply, and metadata split over body chunks.
+                        let mut frames = vec![0, 4, 0, 0, 4, 0];
+                        frames.extend(reply);
+                        for part in frames.chunks(7) {
+                            let mut encrypted = Vec::new();
+                            down.seal_chunk(part, &mut encrypted);
+                            wire.write_all(&encrypted).await.unwrap();
+                        }
+                        assert!(incoming.try_recv().is_err(), "one connection per association");
+                    }
+                    // Remote End closes the association after all replies.
+                    let mut end = Vec::new();
+                    down.seal_chunk(&[0, 4, 0, 0, 3, 0], &mut end);
+                    wire.write_all(&end).await.unwrap();
+                });
+                for i in 0..3 {
+                    pipe.tx.send(Packet { addr: targets[i].clone(), data: payloads[i].clone() }).await.unwrap();
+                    // Wait for each reply before sending again: a request must be flushed
+                    // and the connection must stay open while the peer is silent.
+                    let reply = pipe.rx.recv().await.expect("UDP association closed early");
+                    assert_eq!(reply.data, payloads[i]);
+                    assert_eq!(reply.addr.to_string(), if i == 2 { &targets[0] } else { &source }.to_string());
+                }
+                assert!(pipe.rx.recv().await.is_none());
+                server.await.unwrap();
+            }).await.expect("VMess UDP round trip timed out");
+        }
+    }
+
     #[tokio::test]
     async fn udp_chunk_is_flushed_before_next_request_or_eof() {
         let (mut app, input) = tokio::io::duplex(4096);
