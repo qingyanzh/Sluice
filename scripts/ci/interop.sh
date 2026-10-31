@@ -161,13 +161,13 @@ listeners:
       ci: anytls-ci
     certificate: $work/cert.pem
     private-key: $work/key.pem
-    padding-scheme:
-      - "stop=5"
-      - "0=24-24"
-      - "1=200-250"
-      - "2=400-500,c,600-700"
-      - "3=100-150"
-      - "4=80-100"
+    padding-scheme: |
+      stop=5
+      0=24-24
+      1=200-250
+      2=400-500,c,600-700
+      3=100-150
+      4=80-100
 rules:
   - MATCH,DIRECT
 EOF
