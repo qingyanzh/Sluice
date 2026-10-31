@@ -301,28 +301,34 @@ pub fn parse_link(line: &str) -> Result<(Option<String>, ProxyDef)> {
 }
 
 /// Provider notices sometimes masquerade as working proxies.
-pub fn is_metadata(name: &str, server: &str, port: u16) -> bool {
+pub fn is_metadata(name: &str, server: &str, port: u16, local_source: bool) -> bool {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(
         r"(?i)剩余流量|套餐到期|到期时间|流量重置|官网|重置|流量|有效期|到期|\b(?:traffic|expire|expiry|expiration|reset|website)\b|official\s*(?:site|website)|\d+(?:\.\d+)?\s*[KMGT]B\s*[|/丨]\s*\d+(?:\.\d+)?\s*[KMGT]B"
     ).unwrap());
     let server = server.trim_matches(['[', ']']).trim_end_matches('.');
-    port <= 1 || matches!(server, "127.0.0.1" | "0.0.0.0" | "1.1.1.1") || re.is_match(name)
+    port <= 1 || matches!(server, "0.0.0.0" | "1.1.1.1") || (!local_source && is_loopback(server)) || re.is_match(name)
 }
 
-fn node_is_metadata(name: &str, def: &ProxyDef) -> bool {
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn node_is_metadata(name: &str, def: &ProxyDef, local_source: bool) -> bool {
     let line = def.to_line("node");
     let parts: Vec<_> = line.split(',').map(str::trim).collect();
-    is_metadata(name, parts[1], parts[2].parse().unwrap_or(0))
+    is_metadata(name, parts[1], parts[2].parse().unwrap_or(0), local_source)
 }
 
 /// Parses a subscription body; returns named nodes and a list of skip reasons.
 pub fn parse(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>) {
-    let (nodes, skipped, _) = parse_with_metadata(text);
+    let (nodes, skipped, _) = parse_with_metadata(text, "");
     (nodes, skipped)
 }
 
-fn parse_with_metadata(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>, Vec<String>) {
+fn parse_with_metadata(text: &str, source: &str) -> (Vec<(String, ProxyDef)>, Vec<String>, Vec<String>) {
+    let local_source = url::Url::parse(source).is_ok_and(|url| url.scheme() == "file" || url.host_str().is_some_and(is_loopback));
     let decoded;
     let text = text.trim_start_matches('\u{feff}');
     let text = if text.contains("://") || text.contains(',') || crate::clash::looks_like(text) || text.trim_start().starts_with("#!MANAGED-CONFIG") || text.lines().any(|l| l.trim().eq_ignore_ascii_case("[Proxy]")) {
@@ -332,7 +338,7 @@ fn parse_with_metadata(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>, Vec
         &decoded
     };
     if crate::clash::looks_like(text) {
-        return crate::clash::parse_with_metadata(text).unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")], Vec::new()));
+        return crate::clash::parse_with_metadata(text, local_source).unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")], Vec::new()));
     }
     let profile = text.starts_with("#!MANAGED-CONFIG") || text.lines().any(|l| l.trim().eq_ignore_ascii_case("[Proxy]"));
     let mut in_proxy = !profile;
@@ -353,7 +359,7 @@ fn parse_with_metadata(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>, Vec
             parse_proxy(line)
         };
         match parsed {
-            Ok((name, def)) if node_is_metadata(&name, &def) => notices.push(name),
+            Ok((name, def)) if node_is_metadata(&name, &def, local_source) => notices.push(name),
             Ok(n) => nodes.push(n),
             Err(e) => {
                 warn!("subscription entry skipped: {e:#}");
@@ -388,7 +394,7 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
                     (String::new(), Default::default(), Some(format!("{e:#}")))
                 }
             };
-            let (nodes, skipped, notices) = parse_with_metadata(&text);
+            let (nodes, skipped, notices) = parse_with_metadata(&text, &source);
             note = summarize(&skipped);
             let mut names = Vec::new();
             for (name, def) in nodes {
@@ -471,12 +477,60 @@ mod tests {
         }
         for body in [surge, yaml, links, vmess] {
             for body in [body.clone(), STANDARD.encode(&body)] {
-                let (nodes, skipped, notices) = parse_with_metadata(&body);
+                let (nodes, skipped, notices) = parse_with_metadata(&body, "https://airport.example/sub");
                 assert!(skipped.is_empty(), "{skipped:?}");
                 assert_eq!(nodes.iter().map(|n| n.0.as_str()).collect::<Vec<_>>(), ["🇭🇰 Hong Kong丨01"]);
                 assert_eq!(notices, NOTICES);
             }
         }
+    }
+
+    #[test]
+    fn local_subscriptions_keep_loopback_nodes() {
+        let mut surge = String::from("[Proxy]\n");
+        let mut yaml = String::from("proxies:\n");
+        let mut links = String::new();
+        let real = ["AnyTLS-A", "AnyTLS-B", "IPv4", "IPv6", "Localhost"];
+        for (name, server, port) in pseudo_nodes().into_iter().filter(|(name, _, _)| *name != "Placeholder").chain([
+            (real[0], "127.0.0.1", 19460), (real[1], "127.0.0.1", 19461),
+            (real[2], "127.42.0.2", 19460), (real[3], "::1", 19460), (real[4], "localhost", 19460),
+        ]) {
+            surge.push_str(&format!("{name} = anytls, {server}, {port}, password=p\n"));
+            yaml.push_str(&format!("- {{name: '{name}', type: anytls, server: '{server}', port: {port}, password: p}}\n"));
+            let host = if server.contains(':') { format!("[{server}]") } else { server.into() };
+            links.push_str(&format!("anytls://p@{host}:{port}#{name}\n"));
+        }
+        let expected: Vec<_> = NOTICES.iter().copied().filter(|n| *n != "Placeholder").collect();
+        let lines = surge.strip_prefix("[Proxy]\n").unwrap().to_string();
+        for body in [yaml, links, surge, lines] {
+            for body in [body.clone(), STANDARD.encode(body)] {
+                for source in ["http://127.0.0.1:16580/clash", "http://127.42.0.2/sub", "http://[::1]/sub", "http://LOCALHOST./sub", "file:///tmp/nodes"] {
+                    let (nodes, skipped, notices) = parse_with_metadata(&body, source);
+                    assert!(skipped.is_empty(), "{source}: {skipped:?}");
+                    assert_eq!(nodes.iter().map(|n| n.0.as_str()).collect::<Vec<_>>(), real, "{source}");
+                    assert_eq!(notices, expected, "{source}");
+                }
+                for source in ["", "https://airport.example/sub", "http://localhost.example/sub", "http://192.168.1.1/sub"] {
+                    let (nodes, skipped, notices) = parse_with_metadata(&body, source);
+                    assert!(nodes.is_empty() && skipped.is_empty(), "{source}");
+                    assert_eq!(notices, [expected.clone(), real.to_vec()].concat(), "{source}");
+                }
+                assert!(parse(&body).0.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_subscription_expansion_counts_loopback_nodes() {
+        let path = std::env::temp_dir().join(format!("sluice-loopback-sub-{}", std::process::id()));
+        let source = url::Url::from_file_path(&path).unwrap();
+        std::fs::write(&path, "proxies:\n- {name: AnyTLS-A, type: anytls, server: 127.0.0.1, port: 19460, password: p}\n").unwrap();
+        let mut cfg = Config::parse(&format!("[Proxy Group]\nLocal = select, policy-path={source}\n")).unwrap();
+        expand(&mut cfg, Path::new("/unused"), true).await.unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(cfg.groups[0].options, ["AnyTLS-A"]);
+        assert_eq!(cfg.subscriptions[0].node_count, 1);
+        assert!(cfg.subscriptions[0].notices.is_empty());
     }
 
     #[tokio::test]
@@ -953,7 +1007,7 @@ mod tests {
     fn hy2_port_hopping() {
         for (link, spec) in [
             ("hy2://pw@h.example:20000-50000/?sni=h.example#A", "20000-50000"),
-            ("hysteria2://pw@[::1]:443,8443,20000-30000?obfs=salamander&obfs-password=o#B", "443,8443,20000-30000"),
+            ("hysteria2://pw@[2001:db8::1]:443,8443,20000-30000?obfs=salamander&obfs-password=o#B", "443,8443,20000-30000"),
             ("hy2://pw@h.example:443/?mport=1000-2000#C", "1000-2000"),
         ] {
             let (nodes, skipped) = parse(link);

@@ -177,17 +177,17 @@ pub type Nodes = Vec<(String, ProxyDef)>;
 /// Parses the `proxies:` list; returns nodes and per-node skip reasons.
 #[cfg(test)]
 pub fn parse(text: &str) -> Result<(Nodes, Vec<String>)> {
-    let (nodes, skipped, _) = parse_with_metadata(text)?;
+    let (nodes, skipped, _) = parse_with_metadata(text, false)?;
     Ok((nodes, skipped))
 }
 
-pub fn parse_with_metadata(text: &str) -> Result<(Nodes, Vec<String>, Vec<String>)> {
+pub fn parse_with_metadata(text: &str, local_source: bool) -> Result<(Nodes, Vec<String>, Vec<String>)> {
     let doc: Value = serde_yaml::from_str(text).map_err(|e| anyhow!("Clash YAML: {e}"))?;
     let list = doc.get("proxies").and_then(Value::as_sequence).ok_or_else(|| anyhow!("Clash YAML has no proxies list"))?;
     let (mut nodes, mut skipped, mut notices) = (Vec::new(), Vec::new(), Vec::new());
     for item in list {
         if let (Some(name), Some(server), Some(port)) = (s(item, "name"), s(item, "server"), s(item, "port").and_then(|p| p.parse().ok())) {
-            if crate::subscription::is_metadata(&name, &server, port) {
+            if crate::subscription::is_metadata(&name, &server, port, local_source) {
                 notices.push(name);
                 continue;
             }
@@ -281,8 +281,8 @@ mod tests {
     #[test]
     fn shadowsocks_and_hysteria2_roundtrip() {
         assert_parses_and_roundtrips(
-            "proxies:\n  - {name: Test, type: ss, server: '::1', port: 8388, cipher: aes-256-gcm, password: 'p@ss:word=1'}",
-            ProxyDef::Shadowsocks { server: "::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word=1".into(), plugin: None },
+            "proxies:\n  - {name: Test, type: ss, server: '2001:db8::1', port: 8388, cipher: aes-256-gcm, password: 'p@ss:word=1'}",
+            ProxyDef::Shadowsocks { server: "2001:db8::1".into(), port: 8388, method: "aes-256-gcm".into(), password: "p@ss:word=1".into(), plugin: None },
         );
         for (opts, obfs, ports, hop_interval) in [
             ("", None, None, None),
