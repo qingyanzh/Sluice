@@ -149,6 +149,8 @@ stop=4
 EOF
 anytls-server -l 127.0.0.1:19461 -p anytls-ci -padding-scheme "$work/anytls-padding.txt" > "$work/anytls-go.log" 2>&1 &
 mkdir -p "$work/mihomo"
+# Mihomo restricts certificate paths to its home directory (the -d argument).
+cp "$work/cert.pem" "$work/key.pem" "$work/mihomo/"
 cat > "$work/mihomo.yaml" <<EOF
 mode: rule
 log-level: debug
@@ -159,8 +161,8 @@ listeners:
     port: 19462
     users:
       ci: anytls-ci
-    certificate: $work/cert.pem
-    private-key: $work/key.pem
+    certificate: cert.pem
+    private-key: key.pem
     padding-scheme: |
       stop=5
       0=24-24
