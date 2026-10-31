@@ -223,7 +223,7 @@ final class Core: ObservableObject {
         .deletingLastPathComponent().appendingPathComponent("profiles", isDirectory: true)
 
     var activeProfileName: String? { profileStore?.activeName }
-    var canChangeProfile: Bool { state != .starting && !reloading && !restarting }
+    var canChangeProfile: Bool { state != .starting && !validatingStart && !reloading && !restarting }
 
     static let starterConfig = """
         # Sluice config created by the app. Edit it, then press Reload.
@@ -273,7 +273,8 @@ final class Core: ObservableObject {
         }
         refreshSummary()
         if attachment == nil {
-            state = .starting
+            // Discovery has its own flag and prevents launching until reconciliation
+            // finishes. It is not a start/apply operation: idle profiles remain editable.
             Task { await self.reconcileExistingCore() }
         } else { discovering = false }
         if let attachment {
