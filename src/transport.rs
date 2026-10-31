@@ -160,7 +160,7 @@ impl Transport {
     }
 
     /// AnyTLS always runs directly over TLS; ALPN is optional.
-    pub fn anytls(server: String, port: u16, sni: Option<String>, skip: bool, alpn: &[String], tfo: bool) -> Result<Self> {
+    pub fn anytls(server: String, port: u16, sni: Option<String>, skip: bool, alpn: &[String], tfo: bool, fingerprint: Option<&str>) -> Result<Self> {
         let protocols: Vec<&[u8]> = alpn.iter().map(|p| p.as_bytes()).collect();
         if protocols.iter().any(|p| p.is_empty() || p.len() > 255) {
             bail!("invalid AnyTLS ALPN protocol length");
@@ -170,7 +170,7 @@ impl Transport {
             NOTICE.call_once(|| log::info!("AnyTLS tfo is accepted for compatibility; outbound TCP uses a normal connect"));
         }
         let default_host = sni.clone().unwrap_or_else(|| server.clone());
-        let tls = Some(tls_client_config(&server, sni, skip, &protocols)?);
+        let tls = Some(anytls_tls_config(&server, sni, skip, &protocols, fingerprint)?);
         Ok(Transport { server, port, tls, reality: None, layer: None, default_host, #[cfg(test)] test_wire: None })
     }
 
@@ -206,6 +206,92 @@ impl Transport {
             None => Ok(stream),
         }
     }
+}
+
+/// AnyTLS's explicit insecure mode also accepts unverified handshake signatures.
+/// Keep this local: other protocols retain their existing verifier semantics.
+#[derive(Debug)]
+struct AnyTlsNoVerify;
+
+impl rustls::client::danger::ServerCertVerifier for AnyTlsNoVerify {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        let mut schemes = rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms.supported_schemes();
+        // Legacy TLS 1.2 servers may only sign ServerKeyExchange with SHA-1.
+        schemes.extend([rustls::SignatureScheme::RSA_PKCS1_SHA1, rustls::SignatureScheme::ECDSA_SHA1_Legacy]);
+        schemes
+    }
+}
+
+fn anytls_tls_config(
+    server: &str,
+    sni: Option<String>,
+    skip: bool,
+    alpn: &[&[u8]],
+    fingerprint: Option<&str>,
+) -> Result<(Arc<ClientConfig>, ServerName<'static>)> {
+    let mut provider = rustls::crypto::ring::default_provider();
+    if fingerprint.is_some_and(|fp| !fp.is_empty() && fp != "none") {
+        // Approximate Chrome's supported cipher/group order, retaining TLS 1.2.
+        // This is NOT uTLS: rustls controls extensions, GREASE and key shares. The
+        // REALITY ClientHello advertises features (e.g. compressed certificates)
+        // its special-purpose handshake cannot safely reuse for ordinary TLS.
+        // All requested fingerprints currently select this Chrome-like profile.
+        use rustls::crypto::ring::{cipher_suite::*, kx_group};
+        provider.cipher_suites = vec![
+            TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384,
+            TLS13_CHACHA20_POLY1305_SHA256,
+            TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        ];
+        provider.kx_groups = vec![kx_group::X25519, kx_group::SECP256R1, kx_group::SECP384R1];
+    }
+    let builder = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()?;
+    let mut config = if skip {
+        builder.dangerous().with_custom_certificate_verifier(Arc::new(AnyTlsNoVerify)).with_no_client_auth()
+    } else {
+        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
+    // No implicit ALPN: AnyTLS servers need not speak HTTP. Explicit ALPN keeps
+    // the user's preference order, including h2 before http/1.1 for Chrome.
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    let name = sni.filter(|s| !s.is_empty()).unwrap_or_else(|| server.to_string());
+    // ServerName::IpAddress suppresses the SNI extension, including explicit IP SNI.
+    let name = name.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(&name);
+    let name = ServerName::try_from(name.to_string()).map_err(|_| anyhow::anyhow!("invalid AnyTLS sni {name:?}"))?;
+    Ok((Arc::new(config), name))
 }
 
 impl Transport {
@@ -692,6 +778,107 @@ fn frame_stream(stream: BoxStream, leftover: Vec<u8>) -> BoxStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anytls_client_hello_profile_sni_and_alpn() {
+        for (server, sni, expected) in [
+            ("proxy.example", None, Some("proxy.example")),
+            ("proxy.example", Some(""), Some("proxy.example")),
+            ("127.0.0.1", Some("tls.example"), Some("tls.example")),
+            ("127.0.0.1", None, None),
+            ("proxy.example", Some("::1"), None),
+            ("[::1]", None, None),
+        ] {
+            for alpn in [vec![], vec![&b"h2"[..], &b"http/1.1"[..]]] {
+                let (config, name) = anytls_tls_config(server, sni.map(str::to_string), true, &alpn, Some("chrome")).unwrap();
+                let mut client = rustls::ClientConnection::new(config, name).unwrap();
+                let mut wire = Vec::new();
+                client.write_tls(&mut wire).unwrap();
+                let mut acceptor = rustls::server::Acceptor::default();
+                acceptor.read_tls(&mut &wire[..]).unwrap();
+                let accepted = acceptor.accept().unwrap().unwrap();
+                let hello = accepted.client_hello();
+                assert_eq!(hello.server_name(), expected);
+                assert_eq!(hello.alpn().map(|p| p.collect::<Vec<_>>()).unwrap_or_default(), alpn);
+                assert_eq!(&hello.cipher_suites()[..3], &[
+                    rustls::CipherSuite::TLS13_AES_128_GCM_SHA256,
+                    rustls::CipherSuite::TLS13_AES_256_GCM_SHA384,
+                    rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+                ]);
+                assert_eq!(hello.named_groups().unwrap(), &[
+                    rustls::NamedGroup::X25519, rustls::NamedGroup::secp256r1, rustls::NamedGroup::secp384r1,
+                ]);
+                assert!(hello.signature_schemes().contains(&rustls::SignatureScheme::RSA_PKCS1_SHA1));
+                assert!(hello.signature_schemes().contains(&rustls::SignatureScheme::ECDSA_SHA1_Legacy));
+            }
+        }
+        assert!(anytls_tls_config("proxy.example", Some("bad name".into()), true, &[], None).is_err());
+        assert!(Transport::anytls("h".into(), 443, None, true, &["".into()], false, None).is_err());
+    }
+
+    // The server deliberately signs with invalid bytes, optionally using a legacy
+    // SHA-1 scheme. This reaches both verifier callbacks through real TLS handshakes.
+    #[derive(Debug)]
+    struct InvalidSignatureKey(Option<rustls::SignatureScheme>);
+
+    impl rustls::sign::SigningKey for InvalidSignatureKey {
+        fn choose_scheme(&self, offered: &[rustls::SignatureScheme]) -> Option<Box<dyn rustls::sign::Signer>> {
+            Some(Box::new(InvalidSignature(self.0.unwrap_or_else(|| *offered.iter().find(|s| matches!(s,
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256)).unwrap()))))
+        }
+        fn algorithm(&self) -> rustls::SignatureAlgorithm {
+            if self.0 == Some(rustls::SignatureScheme::RSA_PKCS1_SHA1) { rustls::SignatureAlgorithm::RSA }
+            else { rustls::SignatureAlgorithm::ECDSA }
+        }
+    }
+
+    #[derive(Debug)]
+    struct InvalidSignature(rustls::SignatureScheme);
+
+    impl rustls::sign::Signer for InvalidSignature {
+        fn sign(&self, _: &[u8]) -> Result<Vec<u8>, rustls::Error> { Ok(vec![0; 64]) }
+        fn scheme(&self) -> rustls::SignatureScheme { self.0 }
+    }
+
+    #[tokio::test]
+    async fn anytls_skip_accepts_bad_handshake_signatures_and_tls12_fallback() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+                let schemes = if version == &rustls::version::TLS12 {
+                    vec![None, Some(rustls::SignatureScheme::RSA_PKCS1_SHA1), Some(rustls::SignatureScheme::ECDSA_SHA1_Legacy)]
+                } else { vec![None] };
+                for scheme in schemes {
+                    let cert = rcgen::generate_simple_self_signed(vec!["wrong-name.example".into()]).unwrap();
+                    let certified = rustls::sign::CertifiedKey::new(vec![cert.cert.der().clone()], Arc::new(InvalidSignatureKey(scheme)));
+                    let server = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                        .with_protocol_versions(&[version]).unwrap().with_no_client_auth()
+                        .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified)));
+                    for skip in [true, false] {
+                        let (client, name) = anytls_tls_config("127.0.0.1", None, skip, &[], Some("chrome")).unwrap();
+                        let (local, remote) = tokio::io::duplex(65536);
+                        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server.clone()));
+                        let serve = async {
+                            let mut tls = acceptor.accept(remote).await?;
+                            assert_eq!(tls.get_ref().1.protocol_version(), Some(version.version));
+                            assert!(tls.get_ref().1.server_name().is_none());
+                            tls.write_all(b"ok").await?;
+                            tls.flush().await
+                        };
+                        let connect = async {
+                            let mut tls = TlsConnector::from(client).connect(name, local).await?;
+                            let mut reply = [0; 2];
+                            tls.read_exact(&mut reply).await?;
+                            assert_eq!(&reply, b"ok");
+                            Ok::<_, std::io::Error>(())
+                        };
+                        let (a, b) = tokio::join!(serve, connect);
+                        if skip { a.unwrap(); b.unwrap(); }
+                        else { assert!(a.is_err()); assert!(b.is_err()); }
+                    }
+                }
+            }
+        }).await.unwrap();
+    }
 
     #[test]
     fn rfc6455_accept_key() {

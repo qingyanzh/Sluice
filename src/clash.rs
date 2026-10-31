@@ -134,10 +134,6 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
             }
         }
         "anytls" => {
-            if v.get("client-fingerprint").is_some() {
-                static NOTICE: std::sync::Once = std::sync::Once::new();
-                NOTICE.call_once(|| log::info!("AnyTLS client-fingerprint is ignored; TLS uses rustls"));
-            }
             let alpn = match v.get("alpn") {
                 None => Vec::new(),
                 Some(Value::Sequence(items)) => items.iter().map(|v| {
@@ -149,6 +145,7 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
             ProxyDef::AnyTls {
                 server, port, password: need(v, "password")?, sni, skip_cert_verify: skip,
                 tfo: flag(v, "tfo"), alpn,
+                client_fingerprint: s(v, "client-fingerprint"),
                 udp: v.get("udp").is_none() || flag(v, "udp"),
             }
         }
@@ -215,11 +212,13 @@ mod tests {
             assert_parses_and_roundtrips(&format!("proxies:\n- {{name: Test, type: anytls, server: h, port: {port}, password: secret, sni: tls.example, skip-cert-verify: true, udp: false, tfo: true, alpn: [h2, http/1.1], client-fingerprint: chrome}}"), ProxyDef::AnyTls {
                 server: "h".into(), port: 443, password: "secret".into(), sni: Some("tls.example".into()),
                 skip_cert_verify: true, tfo: true, udp: false, alpn: vec!["h2".into(), "http/1.1".into()],
+                client_fingerprint: Some("chrome".into()),
             });
         }
         assert_parses_and_roundtrips("proxies:\n- {name: Test, type: anytls, server: h, port: 443, password: secret}", ProxyDef::AnyTls {
             server: "h".into(), port: 443, password: "secret".into(), sni: None,
             skip_cert_verify: false, tfo: false, udp: true, alpn: vec![],
+            client_fingerprint: None,
         });
     }
 

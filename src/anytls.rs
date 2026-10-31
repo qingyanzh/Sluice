@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context as _, Result};
 use bytes::Bytes;
 use md5::Md5;
 use rand::Rng;
@@ -130,6 +130,14 @@ impl PaddingScheme {
         self.sizes(0).first().copied().flatten().unwrap_or(0)
     }
 
+    fn authentication(&self, hash: &[u8; 32]) -> Vec<u8> {
+        let padding = self.padding0();
+        let mut auth = hash.to_vec();
+        auth.extend_from_slice(&(padding as u16).to_be_bytes());
+        auth.resize(auth.len() + padding, 0);
+        auth
+    }
+
     /// Each vector is one TLS plaintext write. Frames may span these writes.
     fn apply(&self, packet: u32, mut payload: &[u8]) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
@@ -220,16 +228,20 @@ impl AnyTlsServer {
                 // before publishing the session, so another caller cannot claim it idle.
                 drop(opening);
                 let scheme = self.client.scheme.read().unwrap().clone();
-                let mut wire = tokio::time::timeout(IO_TIMEOUT, self.transport.connect()).await??;
-                let padding = scheme.padding0();
-                let mut auth = self.hash.to_vec();
-                auth.extend_from_slice(&(padding as u16).to_be_bytes());
-                auth.resize(auth.len() + padding, 0);
+                let mut wire = tokio::time::timeout(IO_TIMEOUT, self.transport.connect())
+                    .await
+                    .context("AnyTLS TLS connect timeout")?
+                    .context("AnyTLS TLS connect")?;
+                // Authentication is packet 0, with its own u16 padding length (not
+                // a Waste frame). The reference writes it separately from packet 1.
+                let auth = scheme.authentication(&self.hash);
                 tokio::time::timeout(IO_TIMEOUT, async {
                     wire.write_all(&auth).await?;
                     wire.flush().await
                 })
-                .await??;
+                .await
+                .context("AnyTLS authentication write timeout")?
+                .context("AnyTLS authentication write")?;
                 let session = Session::start(wire, scheme, Arc::downgrade(&self.client));
                 let opened = session.open(&address)?;
                 self.client.sessions.lock().unwrap().push(session);
@@ -238,7 +250,8 @@ impl AnyTlsServer {
         };
         written
             .await
-            .map_err(|_| anyhow!("AnyTLS session closed"))??;
+            .map_err(|_| anyhow!("AnyTLS session closed"))?
+            .context("AnyTLS opening stream write")?;
         Ok(Box::new(stream))
     }
 
@@ -414,12 +427,18 @@ impl Session {
                     packet = packet.saturating_add(1);
                     let failed = result.is_err();
                     if let Some(done) = write.done {
-                        let _ = done.send(result);
+                        let _ = done.send(
+                            result
+                                .as_ref()
+                                .copied()
+                                .map_err(|e| io::Error::new(e.kind(), e.to_string())),
+                        );
                     }
                     if failed {
-                        break;
+                        return result;
                     }
                 }
+                Ok::<_, io::Error>(())
             };
             let reader = async {
                 loop {
@@ -434,7 +453,7 @@ impl Session {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let state = s.state.lock().unwrap();
                     if state.streams.is_empty() && state.idle_since.elapsed() >= IDLE_TIMEOUT {
-                        break;
+                        return "AnyTLS idle session expired";
                     }
                     if state.version >= 2
                         && state
@@ -442,17 +461,18 @@ impl Session {
                             .values()
                             .any(|e| !e.acknowledged && e.opened.elapsed() >= IO_TIMEOUT)
                     {
-                        break;
+                        return "AnyTLS SYNACK timeout";
                     }
                 }
             };
-            tokio::select! {
-                _ = writer => {},
-                r = reader => if let Err(e) = r { log::debug!("AnyTLS session: {e}"); },
-                _ = stopped.changed() => {},
-                _ = maintenance => {},
-            }
-            s.close("AnyTLS session closed");
+            let reason = tokio::select! {
+                r = writer => r.err().map_or_else(|| "AnyTLS writer closed".to_string(), |e| format!("AnyTLS write: {e}")),
+                r = reader => r.err().map_or_else(|| "AnyTLS peer closed".to_string(), |e| format!("AnyTLS read: {e}")),
+                _ = stopped.changed() => "AnyTLS session closed".to_string(),
+                reason = maintenance => reason.to_string(),
+            };
+            log::debug!("{reason}");
+            s.close(&reason);
         });
         session
     }
@@ -592,7 +612,7 @@ impl Session {
                 }
             }
             FIN => self.finish(sid, false, None),
-            SYNACK => {
+            SYNACK if self.state.lock().unwrap().version >= 2 => {
                 if !data.is_empty() {
                     self.finish(
                         sid,
@@ -612,7 +632,11 @@ impl Session {
             UPDATE_PADDING => match PaddingScheme::parse(&data) {
                 Ok(scheme) => {
                     if let Some(client) = self.client.upgrade() {
-                        *client.scheme.write().unwrap() = scheme;
+                        let mut current = client.scheme.write().unwrap();
+                        if current.md5 != scheme.md5 {
+                            log::info!("AnyTLS padding scheme updated: {}", scheme.md5);
+                            *current = scheme;
+                        }
                     }
                 }
                 Err(e) => log::warn!("AnyTLS invalid padding update: {e:#}"),
@@ -632,7 +656,7 @@ impl Session {
                     }
                 }
             }
-            WASTE | HEART_RESPONSE => {}
+            WASTE | HEART_RESPONSE | SYNACK => {}
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -822,6 +846,11 @@ mod tests {
         let scheme = PaddingScheme::parse(DEFAULT_PADDING.as_bytes()).unwrap();
         assert_eq!(scheme.md5, "75cff2ad89aadf5e257059ee571ebe11");
         assert_eq!(scheme.padding0(), 30);
+        let hash: [u8; 32] = Sha256::digest(b"secret").into();
+        let auth = scheme.authentication(&hash);
+        assert_eq!(&auth[..32], &hash);
+        assert_eq!(&auth[32..34], &[0, 30]);
+        assert_eq!(&auth[34..], &[0; 30]);
         assert_eq!(
             hex::encode(Md5::digest(b"")),
             "d41d8cd98f00b204e9800998ecf8427e"
@@ -851,6 +880,91 @@ mod tests {
                 .unwrap()
                 .md5
         );
+    }
+
+    #[tokio::test]
+    async fn first_packet_groups_settings_syn_and_address_and_updates_only_future_sessions() {
+        let (wire, mut remote) = tokio::io::duplex(4096);
+        let original = PaddingScheme::parse(b"stop=2\n0=30-30\n1=300-300").unwrap();
+        let client = Arc::new(Client {
+            scheme: RwLock::new(original.clone()),
+            sessions: Mutex::new(Vec::new()),
+            opening: tokio::sync::Mutex::new(()),
+        });
+        let session = Session::start(Box::new(wire), original.clone(), Arc::downgrade(&client));
+        let address = [1, 127, 0, 0, 1, 0, 80];
+        let (_stream, written) = session.open(&address).unwrap();
+        written.await.unwrap().unwrap();
+        let expected = [
+            session.settings.clone(),
+            frame(SYN, 1, &[]),
+            frame(PSH, 1, &address),
+        ]
+        .concat();
+        let mut packet1 = vec![0; 300];
+        remote.read_exact(&mut packet1).await.unwrap();
+        assert_eq!(packet1, original.apply(1, &expected).concat());
+        let mut frames = &packet1[..];
+        let (_, _, settings) = read_frame(&mut frames).await.unwrap();
+        assert_eq!(
+            String::from_utf8(settings).unwrap(),
+            format!(
+                "v=2\nclient=sluice/{}\npadding-md5={}",
+                env!("CARGO_PKG_VERSION"),
+                original.md5
+            )
+        );
+        assert_eq!(read_frame(&mut frames).await.unwrap(), (SYN, 1, vec![]));
+        assert_eq!(
+            read_frame(&mut frames).await.unwrap(),
+            (PSH, 1, address.to_vec())
+        );
+        assert_eq!(read_frame(&mut frames).await.unwrap().0, WASTE);
+        session
+            .receive(SYNACK, 1, b"ignored for v1".to_vec())
+            .await
+            .unwrap();
+        assert!(session.state.lock().unwrap().streams.contains_key(&1));
+        session
+            .receive(SERVER_SETTINGS, 0, b"v=2\nextra=ignored".to_vec())
+            .await
+            .unwrap();
+        session.receive(SYNACK, 1, vec![]).await.unwrap();
+        assert!(session.state.lock().unwrap().streams[&1].acknowledged);
+        let update = b"stop=2\n0=12-12\n1=100-100";
+        session
+            .receive(UPDATE_PADDING, 0, update.to_vec())
+            .await
+            .unwrap();
+        let md5 = client.scheme.read().unwrap().md5.clone();
+        session
+            .receive(UPDATE_PADDING, 0, update.to_vec())
+            .await
+            .unwrap();
+        assert_eq!(client.scheme.read().unwrap().md5, md5);
+        // This existing writer is on packet 2 of the old scheme: no padding.
+        session.receive(HEART_REQUEST, 99, vec![]).await.unwrap();
+        assert_eq!(
+            read_frame(&mut remote).await.unwrap(),
+            (HEART_RESPONSE, 99, vec![])
+        );
+        assert_eq!(client.scheme.read().unwrap().padding0(), 12);
+        session.close("test finished");
+    }
+
+    #[tokio::test]
+    async fn session_read_errors_reach_streams() {
+        let (wire, remote) = tokio::io::duplex(4096);
+        let session = Session::start(
+            Box::new(wire),
+            PaddingScheme::parse(b"stop=0").unwrap(),
+            Weak::new(),
+        );
+        let (mut stream, written) = session.open(&[1, 127, 0, 0, 1, 0, 80]).unwrap();
+        written.await.unwrap().unwrap();
+        drop(remote);
+        let error = stream.read_u8().await.unwrap_err();
+        assert!(error.to_string().contains("AnyTLS read:"), "{error}");
     }
 
     #[tokio::test]
@@ -948,6 +1062,7 @@ mod tests {
             true,
             &["anytls-test".into()],
             false,
+            Some("chrome"),
         )
         .unwrap();
         if listener.is_none() {

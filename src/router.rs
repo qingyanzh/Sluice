@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use log::{debug, info};
+use log::{info, warn};
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -38,8 +38,8 @@ pub struct Router {
     outbounds: HashMap<String, Outbound>,
     groups: Vec<GroupDef>,
     selected: RwLock<HashMap<String, String>>,
-    /// Last health-check result per option name: `Some(ms)` healthy, `None` failed.
-    latency: RwLock<HashMap<String, Option<u64>>>,
+    /// Last health-check result and full error chain per option name.
+    latency: RwLock<HashMap<String, HealthCheck>>,
     geoip: Option<maxminddb::Reader<Vec<u8>>>,
     asn: Option<maxminddb::Reader<Vec<u8>>>,
     mode: RwLock<Mode>,
@@ -77,10 +77,30 @@ impl Mode {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn short_health_error(error: &str) -> String {
+    error.chars().map(|c| if c.is_control() { ' ' } else { c }).take(160).collect()
+}
+
+#[derive(Clone, Debug)]
+pub struct HealthCheck {
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl HealthCheck {
+    fn from_result(result: Result<u64>) -> Self {
+        match result {
+            Ok(ms) => Self { latency_ms: Some(ms), error: None },
+            Err(e) => Self { latency_ms: None, error: Some(format!("{e:#}")) },
+        }
+    }
+}
+
 pub struct OptionStatus {
     pub name: String,
     /// Not yet tested: `None`; tested: `Some(latency or failure)`.
     pub latency: Option<Option<u64>>,
+    pub error: Option<String>,
 }
 
 /// Result of [`Router::test_node`].
@@ -132,8 +152,8 @@ impl Router {
                 ProxyDef::Shadowsocks { server, port, method, password, plugin } => {
                     Outbound::Shadowsocks(SsServer::new(server, port, &method, &password, plugin)?)
                 }
-                ProxyDef::AnyTls { server, port, password, sni, skip_cert_verify, tfo, alpn, udp } => {
-                    let transport = Transport::anytls(server, port, sni, skip_cert_verify, &alpn, tfo)?;
+                ProxyDef::AnyTls { server, port, password, sni, skip_cert_verify, tfo, alpn, udp, client_fingerprint } => {
+                    let transport = Transport::anytls(server, port, sni, skip_cert_verify, &alpn, tfo, client_fingerprint.as_deref())?;
                     Outbound::AnyTls(crate::anytls::AnyTlsServer::new(transport, &password, udp))
                 }
                 ProxyDef::Trojan { server, port, password, sni, skip_cert_verify, layer } => {
@@ -351,7 +371,7 @@ impl Router {
             cur = if g.kind == GroupKind::LoadBalance {
                 // Untested options count as healthy; if all failed, try any.
                 let healthy: Vec<&String> =
-                    g.options.iter().filter(|o| latency.get(*o).is_none_or(|l| l.is_some())).collect();
+                    g.options.iter().filter(|o| latency.get(*o).is_none_or(|l| l.latency_ms.is_some())).collect();
                 let pool: Vec<&String> = if healthy.is_empty() { g.options.iter().collect() } else { healthy };
                 pool[rand::thread_rng().gen_range(0..pool.len())].clone()
             } else {
@@ -531,7 +551,7 @@ impl Router {
                 kind: kind_name(&g.kind),
                 // Load-balance picks per connection, so there is no single selection.
                 selected: if g.kind == GroupKind::LoadBalance { "*".to_string() } else { selected[&g.name].clone() },
-                options: g.options.iter().map(|o| OptionStatus { name: o.clone(), latency: latency.get(o).copied() }).collect(),
+                options: g.options.iter().map(|o| OptionStatus { name: o.clone(), latency: latency.get(o).map(|r| r.latency_ms), error: latency.get(o).and_then(|r| r.error.clone()) }).collect(),
             })
             .collect()
     }
@@ -580,12 +600,14 @@ impl Router {
             Ok(r) => r,
             Err(_) => Err(anyhow!("timed out after {}ms", timeout.as_millis())),
         };
-        self.latency.write().unwrap().insert(name.to_string(), r.as_ref().ok().map(|t| t.latency_ms));
+        let health = HealthCheck::from_result(r.as_ref().map(|t| t.latency_ms).map_err(|e| anyhow!("{e:#}")));
+        if let Some(error) = &health.error { warn!("health check {name}: {error}"); }
+        self.latency.write().unwrap().insert(name.to_string(), health);
         r
     }
 
-    /// Time until the test URL's status line arrives through `option`, or `None` on failure.
-    async fn probe(&self, option: &str, url: &str) -> Option<u64> {
+    /// Time until the test URL's status line arrives, retaining the full failure chain.
+    async fn probe(&self, option: &str, url: &str) -> HealthCheck {
         let start = Instant::now();
         let attempt = async {
             let (target, path) = parse_test_url(url)?;
@@ -600,54 +622,57 @@ impl Router {
             }
             Ok(())
         };
-        match tokio::time::timeout(PROBE_TIMEOUT, attempt).await {
-            Ok(Ok(())) => Some(start.elapsed().as_millis() as u64),
-            Ok(Err(e)) => {
-                debug!("health check {option}: {e:#}");
-                None
-            }
-            Err(_) => None,
-        }
+        let result = match tokio::time::timeout(PROBE_TIMEOUT, attempt).await {
+            Ok(r) => r.map(|()| start.elapsed().as_millis() as u64),
+            Err(_) => Err(anyhow!("timed out after {}ms", PROBE_TIMEOUT.as_millis())),
+        };
+        HealthCheck::from_result(result)
     }
 
     /// Probes every option of a group, updates an automatic group's selection, and
-    /// returns each option's latency (`None`: failed), or `None` for no such group.
-    pub async fn check_group(self: &Arc<Self>, name: &str) -> Option<Vec<(String, Option<u64>)>> {
+    /// returns each option's latency and error, or `None` for no such group.
+    pub async fn check_group(self: &Arc<Self>, name: &str) -> Option<Vec<(String, HealthCheck)>> {
         let g = self.group(name).cloned()?;
         let mut set = tokio::task::JoinSet::new();
         for (i, o) in g.options.iter().enumerate() {
             let (me, o, url) = (self.clone(), o.clone(), g.url.clone());
             set.spawn(async move { (i, me.probe(&o, &url).await) });
         }
-        let mut results = vec![None; g.options.len()];
-        while let Some(Ok((i, r))) = set.join_next().await {
-            results[i] = r;
+        let mut results = vec![HealthCheck::from_result(Err(anyhow!("health check task did not complete"))); g.options.len()];
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((i, r)) => results[i] = r,
+                Err(e) => warn!("health check {name}: task failed: {e}"),
+            }
+        }
+        for (option, r) in g.options.iter().zip(&results) {
+            if let Some(error) = &r.error { warn!("health check {name}: {option}: {error}"); }
         }
         {
             let mut latency = self.latency.write().unwrap();
             for (o, r) in g.options.iter().zip(&results) {
-                latency.insert(o.clone(), *r);
+                latency.insert(o.clone(), r.clone());
             }
         }
         let current = self.selected.read().unwrap()[name].clone();
         let pick = match g.kind {
             GroupKind::UrlTest { tolerance_ms } => {
-                let best = g.options.iter().zip(&results).filter_map(|(o, r)| r.map(|ms| (o, ms))).min_by_key(|(_, ms)| *ms);
-                let cur_ms = g.options.iter().position(|o| *o == current).and_then(|i| results[i]);
+                let best = g.options.iter().zip(&results).filter_map(|(o, r)| r.latency_ms.map(|ms| (o, ms))).min_by_key(|(_, ms)| *ms);
+                let cur_ms = g.options.iter().position(|o| *o == current).and_then(|i| results[i].latency_ms);
                 match (best, cur_ms) {
                     (Some((o, ms)), Some(cur)) if ms + tolerance_ms < cur => Some(o.clone()),
                     (Some((o, _)), None) => Some(o.clone()),
                     _ => None,
                 }
             }
-            GroupKind::Fallback => g.options.iter().zip(&results).find(|(_, r)| r.is_some()).map(|(o, _)| o.clone()),
+            GroupKind::Fallback => g.options.iter().zip(&results).find(|(_, r)| r.latency_ms.is_some()).map(|(o, _)| o.clone()),
             _ => None,
         };
         let summary: Vec<String> = g
             .options
             .iter()
             .zip(&results)
-            .map(|(o, r)| format!("{o}={}", r.map_or("fail".to_string(), |ms| format!("{ms}ms"))))
+            .map(|(o, r)| format!("{o}={}", r.latency_ms.map_or_else(|| format!("fail({})", short_health_error(r.error.as_deref().unwrap_or("unknown error"))), |ms| format!("{ms}ms"))))
             .collect();
         info!("health check {name}: {}", summary.join(", "));
         if let Some(p) = pick.filter(|p| *p != current) {
@@ -696,7 +721,7 @@ impl Router {
         for g in &self.groups {
             for o in &g.options {
                 if let Some(l) = old_latency.get(o) {
-                    latency.insert(o.clone(), *l);
+                    latency.insert(o.clone(), l.clone());
                 }
             }
         }
@@ -710,6 +735,34 @@ mod tests {
 
     fn router(text: &str) -> Router {
         Router::new(&Config::parse(text).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_errors_are_stored_exposed_and_inherited() {
+        let conf = "[Proxy Group]\nG = select, REJECT, url=http://test.invalid/\n[Rule]\nFINAL,G\n";
+        let r = Arc::new(router(conf));
+        let result = r.check_group("G").await.unwrap();
+        assert_eq!(result[0].0, "REJECT");
+        assert_eq!(result[0].1.latency_ms, None);
+        assert_eq!(result[0].1.error.as_deref(), Some("rejected"));
+        let group = r.groups().pop().unwrap();
+        assert_eq!(group.options[0].latency, Some(None));
+        assert_eq!(group.options[0].error.as_deref(), Some("rejected"));
+        let new = router(conf);
+        new.inherit_state(&r);
+        assert_eq!(new.groups()[0].options[0].error.as_deref(), Some("rejected"));
+        let error = r.test_node("REJECT", "http://test.invalid/", Duration::from_secs(1)).await.err().unwrap();
+        assert!(error.to_string().contains("rejected by REJECT"));
+        assert_eq!(r.groups()[0].options[0].error.as_deref(), Some("rejected by REJECT"));
+        assert!(r.check_group("missing").await.is_none());
+        let chained = HealthCheck::from_result(Err(anyhow!("bad signature").context("TLS handshake")));
+        assert_eq!(chained.error.as_deref(), Some("TLS handshake: bad signature"));
+        r.latency.write().unwrap().insert("REJECT".into(), HealthCheck::from_result(Ok(12)));
+        let status = &r.groups()[0].options[0];
+        assert_eq!(status.latency, Some(Some(12)));
+        assert!(status.error.is_none());
+        assert_eq!(short_health_error("TLS\nerror\r\n雪"), "TLS error  雪");
+        assert_eq!(short_health_error(&"雪".repeat(200)).chars().count(), 160);
     }
 
     const CONF: &str = "
