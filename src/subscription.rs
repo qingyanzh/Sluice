@@ -237,6 +237,7 @@ fn parse_anytls(body: &str) -> Result<(Option<String>, ProxyDef)> {
     let q = &l.query;
     let def = ProxyDef::AnyTls {
         server: l.host, port: l.port,
+        client_fingerprint: None,
         password: l.user.ok_or_else(|| anyhow!("anytls link without password"))?,
         sni: q.get("sni").cloned().filter(|s| !s.is_empty()),
         skip_cert_verify: truthy(q.get("insecure")) || truthy(q.get("allowinsecure")),
@@ -590,10 +591,12 @@ mod tests {
     #[test]
     fn anytls_share_links_roundtrip() {
         assert_link_roundtrip("anytls://p%40ss%3Aword%25@[::1]:443?sni=tls%2Eexample&insecure=1&alpn=h2%2Chttp%2F1.1&udp=0&tfo=1#Test%20node", ProxyDef::AnyTls {
+            client_fingerprint: None,
             server: "::1".into(), port: 443, password: "p@ss:word%".into(), sni: Some("tls.example".into()),
             skip_cert_verify: true, tfo: true, alpn: vec!["h2".into(), "http/1.1".into()], udp: false,
         });
         assert_link_roundtrip("anytls://secret@h:8443#Test%20node", ProxyDef::AnyTls {
+            client_fingerprint: None,
             server: "h".into(), port: 8443, password: "secret".into(), sni: None,
             skip_cert_verify: false, tfo: false, alpn: vec![], udp: true,
         });

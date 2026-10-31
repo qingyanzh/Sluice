@@ -34,8 +34,10 @@
 //! history one sample per second (bytes/s, oldest first, at most 600), with only the policies
 //! that moved data in that second.
 //!
-//! `/v1/policies/<group>/test` answers `{"tested","selected","results":[{name,latency_ms}]}`,
-//! `latency_ms` null for a failed option. `/v1/nodes/<name>/test` takes `url=` (http://,
+//! `/v1/policies/<group>/test` answers `{"tested","selected","results":[{name,latency_ms,error}]}`,
+//! `latency_ms` is null and `error` contains the full error chain for a failed option;
+//! `error` is null on success. Policy options also expose the last `error`.
+//! `/v1/nodes/<name>/test` takes `url=` (http://,
 //! default the group default test URL) and `timeout=` (ms, default 5000) and answers
 //! `{"node","outbound","ok","connect_ms","latency_ms","status","error"}`: `connect_ms` is
 //! the time to open a stream through the node (TCP connect plus its handshake), `latency_ms`
@@ -127,6 +129,10 @@ fn totals_json(kind: crate::stats::Kind) -> String {
     format!("[{}]", items.join(","))
 }
 
+fn health_result_json(name: &str, result: &crate::router::HealthCheck) -> String {
+    format!("{{\"name\":{},\"latency_ms\":{},\"error\":{}}}", json_str(name), latency_json(result.latency_ms), json_opt(result.error.as_deref()))
+}
+
 fn latency_json(l: Option<u64>) -> String {
     l.map_or("null".to_string(), |ms| ms.to_string())
 }
@@ -202,7 +208,7 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                                 Some(None) => "-1".to_string(),
                                 Some(Some(ms)) => ms.to_string(),
                             };
-                            format!("{{\"name\":{},\"latency_ms\":{latency}}}", json_str(&o.name))
+                            format!("{{\"name\":{},\"latency_ms\":{latency},\"error\":{}}}", json_str(&o.name), json_opt(o.error.as_deref()))
                         })
                         .collect();
                     format!(
@@ -222,7 +228,7 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                 Some(results) => {
                     let items: Vec<String> = results
                         .iter()
-                        .map(|(n, l)| format!("{{\"name\":{},\"latency_ms\":{}}}", json_str(n), latency_json(*l)))
+                        .map(|(n, r)| health_result_json(n, r))
                         .collect();
                     let selected = router.groups().into_iter().find(|g| g.name == group).map(|g| g.selected).unwrap_or_default();
                     (
@@ -466,6 +472,21 @@ mod tests {
         drop(stream);
         assert!(!crate::live::active().iter().any(|c| c.id == live.id));
         check_recent();
+    }
+
+    #[tokio::test]
+    async fn policy_test_results_include_errors() {
+        let cfg = crate::config::Config::parse("[Proxy Group]\nG = select, REJECT\n[Rule]\nFINAL,G\n").unwrap();
+        let router = Arc::new(crate::router::Router::new(&cfg).unwrap());
+        let results = router.check_group("G").await.unwrap();
+        let body: serde_json::Value = serde_json::from_str(&health_result_json(&results[0].0, &results[0].1)).unwrap();
+        assert_eq!(body, serde_json::json!({"name":"REJECT", "latency_ms":null, "error":"rejected"}));
+        let success = crate::router::HealthCheck { latency_ms: Some(3), error: None };
+        let body: serde_json::Value = serde_json::from_str(&health_result_json("healthy", &success)).unwrap();
+        assert_eq!(body, serde_json::json!({"name":"healthy", "latency_ms":3, "error":null}));
+        let failure = crate::router::HealthCheck { latency_ms: None, error: Some("TLS: \"bad signature\"\n雪".into()) };
+        let body: serde_json::Value = serde_json::from_str(&health_result_json("failed", &failure)).unwrap();
+        assert_eq!(body["error"], "TLS: \"bad signature\"\n雪");
     }
 
     #[tokio::test]

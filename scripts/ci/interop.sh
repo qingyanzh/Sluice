@@ -129,6 +129,92 @@ path.write_text("\n".join(lines) + "\n")
 PY
 sing-box run -c "$work/anytls.json" > "$work/anytls.log" 2>&1 &
 
+# Reference and mihomo deliberately publish different non-default schemes. Each
+# Sluice node must receive UpdatePaddingScheme before its second traffic round.
+anytls_logs() {
+    local file
+    for file in anytls anytls-go anytls-mihomo anytls-origin sluice; do
+        echo "== $file log"
+        tail -100 "$work/$file.log" 2>/dev/null || true
+    done
+    mkdir -p ci-logs
+    cp "$work"/*.log ci-logs/ 2>/dev/null || true
+}
+cat > "$work/anytls-padding.txt" <<'EOF'
+stop=4
+0=12-12
+1=180-220
+2=300-400,c,500-600
+3=80-120
+EOF
+anytls-server -l 127.0.0.1:19461 -p anytls-ci -padding-scheme "$work/anytls-padding.txt" > "$work/anytls-go.log" 2>&1 &
+mkdir -p "$work/mihomo"
+# Mihomo restricts certificate paths to its home directory (the -d argument).
+cp "$work/cert.pem" "$work/key.pem" "$work/mihomo/"
+cat > "$work/mihomo.yaml" <<EOF
+mode: rule
+log-level: debug
+listeners:
+  - name: anytls-ci
+    type: anytls
+    listen: 127.0.0.1
+    port: 19462
+    users:
+      ci: anytls-ci
+    certificate: cert.pem
+    private-key: key.pem
+    padding-scheme: |
+      stop=5
+      0=24-24
+      1=200-250
+      2=400-500,c,600-700
+      3=100-150
+      4=80-100
+rules:
+  - MATCH,DIRECT
+EOF
+if ! mihomo -t -d "$work/mihomo" -f "$work/mihomo.yaml" > "$work/anytls-mihomo.log" 2>&1; then
+    anytls_logs
+    exit 1
+fi
+mihomo -d "$work/mihomo" -f "$work/mihomo.yaml" >> "$work/anytls-mihomo.log" 2>&1 &
+python3 -u scripts/ci/anytls_origin.py > "$work/anytls-origin.log" 2>&1 &
+python3 - "$work/sluice.conf" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+nodes = []
+for server, port in [("SingBox", 19460), ("Go", 19461), ("Mihomo", 19462)]:
+    for fingerprint in ["", ", client-fingerprint=chrome"]:
+        name = f"AnyTLS-{server}" + ("-Chrome" if fingerprint else "")
+        nodes.append((name, f"{name} = anytls, 127.0.0.1, {port}, password=anytls-ci, sni=test.local, skip-cert-verify=true, udp=true{fingerprint}"))
+text = path.read_text().replace("[Proxy Group]\n", "\n".join(line for _, line in nodes) + "\n[Proxy Group]\n", 1)
+lines = text.splitlines()
+for i, line in enumerate(lines):
+    if line.startswith("P = select,"):
+        lines[i] += ", " + ", ".join(name for name, _ in nodes)
+path.write_text("\n".join(lines) + "\n")
+PY
+if ! python3 - <<'PY'
+import socket
+import time
+
+for port in (19460, 19461, 19462, 19463):
+    for attempt in range(60):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.25)
+    else:
+        raise SystemExit(f"AnyTLS interop listener {port} did not start")
+PY
+then
+    anytls_logs
+    exit 1
+fi
+
 ssserver -s 127.0.0.1:18388 -m aes-256-gcm -k ss -U > "$work/ss1.log" 2>&1 &
 ssserver -s 127.0.0.1:18389 -m chacha20-ietf-poly1305 -k ss -U > "$work/ss2.log" 2>&1 &
 # Plugin nodes: the plugin server takes TCP, a UDP-only ssserver the same port (as ss-server does).
@@ -217,6 +303,46 @@ for node in AnyTLS; do
     [[ "$cone" == "full-cone ok"* ]] || ok=no
     [ $ok = yes ] || fails=$((fails + 1))
     printf '%-20s %-6s %-12s %s / %s %s\n' "$node" "$https" "$size" "$udp" "$cone" "$([ $ok = yes ] && echo PASS || echo FAIL)"
+done
+
+# Every implementation/profile runs twice. The local origin's reusable eight-party
+# barrier fails the requests unless all eight proxy streams are live together.
+for node in AnyTLS-SingBox AnyTLS-SingBox-Chrome AnyTLS-Go AnyTLS-Go-Chrome AnyTLS-Mihomo AnyTLS-Mihomo-Chrome; do
+    curl -fsS -X POST "http://127.0.0.1:16170/v1/policies/P?select=$node" > /dev/null || { anytls_logs; exit 1; }
+    updates_before=$(grep -c 'AnyTLS padding scheme updated:' "$work/sluice.log" || true)
+    for round in 1 2; do
+        ok=yes
+        fetch=$(curl -fsS -m 15 --noproxy '' --socks5-hostname 127.0.0.1:16153 http://127.0.0.1:19463/fetch) || ok=no
+        [ "$fetch" = 'AnyTLS interop ok' ] || ok=no
+        size=$(curl -fsS -m 60 -o /dev/null -w '%{size_download}' --noproxy '' \
+            --socks5-hostname 127.0.0.1:16153 http://127.0.0.1:19463/download) || ok=no
+        [ "$size" = 10000000 ] || ok=no
+        pids=()
+        for stream in $(seq 8); do
+            curl -fsS -m 45 --noproxy '' --socks5-hostname 127.0.0.1:16153 \
+                http://127.0.0.1:19463/parallel > "$work/anytls-parallel-$stream.txt" 2>> "$work/anytls-origin.log" &
+            pids+=("$!")
+        done
+        for pid in "${pids[@]}"; do wait "$pid" || ok=no; done
+        for stream in $(seq 8); do
+            [ "$(cat "$work/anytls-parallel-$stream.txt")" = 'eight concurrent streams ok' ] || ok=no
+        done
+        # Exercise UoT v2 UDP against both public DNS destinations.
+        udp=$(python3 -I scripts/ci/udp_dns_check.py 16153 8.8.8.8,1.1.1.1 2>&1 | tail -1)
+        [[ "$udp" == 'replies 23/23'* ]] || ok=no
+        if [[ "$node" == AnyTLS-Go* || "$node" == AnyTLS-Mihomo* ]]; then
+            updates_after=$(grep -c 'AnyTLS padding scheme updated:' "$work/sluice.log" || true)
+            if [ "$updates_after" -le "$updates_before" ]; then
+                echo "$node: no UpdatePaddingScheme received before round $round"
+                ok=no
+            fi
+        fi
+        printf '%-26s round=%s download=%s concurrent=8 %s %s\n' "$node" "$round" "$size" "$udp" "$([ "$ok" = yes ] && echo PASS || echo FAIL)"
+        if [ "$ok" != yes ]; then
+            fails=$((fails + 1))
+            anytls_logs
+        fi
+    done
 done
 
 # A wrong REALITY key must not connect: the client has to refuse the real site's certificate.

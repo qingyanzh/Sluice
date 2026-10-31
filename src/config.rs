@@ -35,6 +35,7 @@ pub enum ProxyDef {
     AnyTls {
         server: String, port: u16, password: String, sni: Option<String>,
         skip_cert_verify: bool, tfo: bool, alpn: Vec<String>, udp: bool,
+        client_fingerprint: Option<String>,
     },
     Vless {
         server: String,
@@ -137,9 +138,10 @@ impl ProxyDef {
                 tls_bits(&mut parts, sni, *skip_cert_verify);
                 layer_bits(&mut parts, layer);
             }
-            ProxyDef::AnyTls { server, port, password, sni, skip_cert_verify, tfo, alpn, udp } => {
+            ProxyDef::AnyTls { server, port, password, sni, skip_cert_verify, tfo, alpn, udp, client_fingerprint } => {
                 parts.extend(["anytls".into(), server.clone(), port.to_string(), format!("password={password}")]);
                 tls_bits(&mut parts, sni, *skip_cert_verify);
+                if let Some(fp) = client_fingerprint { parts.push(format!("client-fingerprint={fp}")); }
                 if *tfo { parts.push("tfo=true".into()); }
                 if !alpn.is_empty() { parts.push(format!("alpn={}", alpn.join("|"))); }
                 parts.push(format!("udp={udp}"));
@@ -345,6 +347,7 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
         "anytls" => ProxyDef::AnyTls {
             server, port,
             password: take("password").ok_or_else(|| anyhow!("anytls needs password"))?,
+            client_fingerprint: take("client-fingerprint").filter(|s| !s.is_empty()),
             sni: take("sni"),
             skip_cert_verify: matches!(take("skip-cert-verify").as_deref(), Some("true" | "1")),
             tfo: matches!(take("tfo").as_deref(), Some("true" | "1")),
@@ -520,7 +523,7 @@ mod tests {
 
     #[test]
     fn anytls_roundtrip_and_defaults() {
-        for options in ["", ", sni=tls.example, skip-cert-verify=true, tfo=true, alpn=h2|http/1.1, udp=false"] {
+        for options in ["", ", sni=tls.example, skip-cert-verify=true, tfo=true, alpn=h2|http/1.1, udp=false, client-fingerprint=chrome"] {
             let (name, def) = parse_proxy(&format!("Test = anytls, ::1, 443, password=p@ss:word{options}")).unwrap();
             let (_, back) = parse_proxy(&def.to_line(&name)).unwrap();
             assert_proxy_eq(&def, &back);
