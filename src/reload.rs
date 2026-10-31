@@ -295,14 +295,7 @@ impl Reloader {
         }
         let (cfg, router) = build(cfg, path, false).await?;
         let router = Arc::new(router);
-        let current = self.path();
-        let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
-        if canonical(&current) == canonical(path) {
-            router.inherit_state(&self.handle.current());
-        } else {
-            // A profile owns its choices, even when group/node names overlap.
-            restore_selections(&router, path);
-        }
+        self.carry_choices(&router, path);
         save_selections(&router, path)?;
         activate(&router, &cfg);
         *self.handle.0.write().unwrap() = router;
@@ -312,6 +305,18 @@ impl Reloader {
         let summary = format!("{} proxies, {} groups, {} rules", cfg.proxies.len(), cfg.groups.len(), cfg.rules.len());
         info!("config reloaded ({reason}): {summary}");
         Ok(summary)
+    }
+
+    /// Reloading the same profile keeps the live choices and health state; switching
+    /// to another profile restores that profile's own saved choices instead, even
+    /// when group or node names overlap.
+    fn carry_choices(&self, router: &Router, path: &str) {
+        let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+        if canonical(&self.path()) == canonical(path) {
+            router.inherit_state(&self.handle.current());
+        } else {
+            restore_selections(router, path);
+        }
     }
 
     async fn try_reload(&self, reason: &str) {

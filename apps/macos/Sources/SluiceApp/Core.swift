@@ -1465,6 +1465,10 @@ final class Core: ObservableObject {
         refreshProfiles()
     }
 
+    /// Makes `name` the active profile. A stopped core only changes the active file.
+    /// A running core either restarts (listen/TUN settings changed) or hot-switches
+    /// through the API; in both cases the new profile is validated first, so a bad
+    /// profile leaves the old one active.
     func switchProfile(to name: String) async throws {
         try requireProfileChange()
         let store = try profiles()
@@ -1473,30 +1477,42 @@ final class Core: ObservableObject {
         guard try store.names().contains(name) else { throw ProfileStore.StoreError.missingProfile }
         let path = store.url(for: name).path
         let next = ConfigSummary(text: try String(contentsOfFile: path, encoding: .utf8))
-        let needsRestart = next.requiresRestart(comparedTo: runningSummary ?? summary)
-        let wasRunning = state == .running
+
         reloading = true
         defer { reloading = false }
-        if wasRunning && needsRestart {
+        enum Route { case stopped, restart, hotSwitch }
+        let route: Route = state != .running ? .stopped
+            : next.requiresRestart(comparedTo: runningSummary ?? summary) ? .restart : .hotSwitch
+        switch route {
+        case .restart:
             if let error = await validate(try store.read(name)) { throw APIError(message: error) }
-            stop()
-            let deadline = ContinuousClock.now + .seconds(20)
-            while isActive, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
-            guard !isActive else { throw APIError(message: "旧内核停止超时，当前配置未切换。") }
-        } else if wasRunning {
+            try await stopAndWait()
+            try activate(name, in: store)
+            start()
+        case .hotSwitch:
             guard let api else { throw APIError(message: "未配置控制 API") }
-            // The core validates/builds first; a 400 leaves both selections unchanged.
+            // The core expands, validates and builds first; a 400 leaves both sides unchanged.
             try await api.switchProfile(path: path)
+            try activate(name, in: store)
+            runningSummary = next
+            _ = await refreshPolicies(api)
+        case .stopped:
+            try activate(name, in: store)
         }
+    }
+
+    private func activate(_ name: String, in store: ProfileStore) throws {
         try store.activate(name)
         applyProfilePath(store)
         nodeTests = [:]
         nodeLatencies = [:]
-        if wasRunning && needsRestart { start() }
-        else if wasRunning {
-            runningSummary = next
-            if let api { _ = await refreshPolicies(api) }
-        }
+    }
+
+    private func stopAndWait() async throws {
+        stop()
+        let deadline = ContinuousClock.now + .seconds(20)
+        while isActive, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
+        guard !isActive else { throw APIError(message: "旧内核停止超时，当前配置未切换。") }
     }
 
     private func requireProfileChange() throws {
