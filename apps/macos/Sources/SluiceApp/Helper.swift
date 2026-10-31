@@ -214,7 +214,7 @@ enum HelperClient {
         let c = liveConnection()
         let proxy = c.remoteObjectProxyWithErrorHandler { _ in done.signal() } as! SluiceHelperProtocol
         proxy.stop { _ in done.signal() }
-        _ = done.wait(timeout: .now() + 12)
+        _ = done.wait(timeout: .now() + 15)
     }
 
     static func hello() async throws -> (String, Int32) {

@@ -61,7 +61,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use log::{debug, info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 use crate::reload::Reloader;
 use crate::rule::{ConnInfo, Proto};
@@ -400,7 +400,9 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
 }
 
 pub async fn serve(addr: String, reloader: Arc<Reloader>) -> Result<()> {
-    let listener = TcpListener::bind(&addr).await.map_err(|e| crate::util::listen_error("api", &addr, e))?;
+    let listener = crate::util::listen_tcp(&addr, std::time::Duration::from_secs(2))
+        .await
+        .map_err(|e| crate::util::listen_error("api", &addr, e))?;
     info!("control API listening on http://{addr}");
     crate::stats::spawn_sampler();
     loop {
@@ -442,6 +444,7 @@ fn recent_connections_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
 
     #[tokio::test]
     async fn recent_and_active_connections_share_byte_counts() {

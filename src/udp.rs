@@ -238,6 +238,14 @@ pub fn xudp_frame(first: bool, addr: &Target, data: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl Framing {
+    fn label(&self) -> String {
+        match self {
+            Self::Trojan => "Trojan".into(),
+            Self::Uot => "UoT".into(),
+            Self::Xudp(t) => format!("XUDP {t}"),
+        }
+    }
+
     fn encode(&self, first: bool, p: &Packet) -> Result<Vec<u8>> {
         if p.data.len() > u16::MAX as usize {
             bail!("UDP packet too large");
@@ -327,38 +335,54 @@ impl Framing {
 /// `first_frame_sent`, the opening frame went out with the protocol header already.
 pub fn over_stream(stream: BoxStream, framing: Framing, mut rx: mpsc::Receiver<Packet>, tx: mpsc::Sender<Packet>, first_frame_sent: bool) {
     let (mut rd, mut wr) = tokio::io::split(stream);
+    let label = framing.label();
     let framing = Arc::new(framing);
     let f = framing.clone();
+    let upstream = label.clone();
     tokio::spawn(async move {
         let mut first = !first_frame_sent;
+        let mut sent = u64::from(first_frame_sent);
         while let Some(p) = rx.recv().await {
-            let Ok(frame) = f.encode(first, &p) else {
-                continue;
+            let frame = match f.encode(first, &p) {
+                Ok(frame) => frame,
+                Err(e) => {
+                    debug!("UDP {upstream}: encode packet to {} ({} bytes): {e:#}", p.addr, p.data.len());
+                    continue;
+                }
             };
             first = false;
-            if async {
+            if let Err(e) = async {
                 wr.write_all(&frame).await?;
                 wr.flush().await
             }
             .await
-            .is_err()
             {
+                debug!("UDP {upstream}: write packet to {} ({} bytes) after {sent} sent: {e}", p.addr, p.data.len());
                 return;
             }
+            if sent == 0 { debug!("UDP {upstream}: first packet sent to {} ({} bytes)", p.addr, p.data.len()); }
+            sent += 1;
         }
         let _ = wr.shutdown().await;
+        debug!("UDP {upstream}: upstream closed, {sent} packets sent");
     });
     tokio::spawn(async move {
+        let mut received = 0u64;
         loop {
             tokio::select! {
                 _ = tx.closed() => break,
                 r = framing.decode(&mut rd) => match r {
-                    Ok(Some(p)) => if tx.send(p).await.is_err() { break },
+                    Ok(Some(p)) => {
+                        if received == 0 { debug!("UDP {label}: first reply from {} ({} bytes)", p.addr, p.data.len()); }
+                        received += 1;
+                        if tx.send(p).await.is_err() { break }
+                    }
                     Ok(None) => break,
-                    Err(e) => { debug!("UDP over stream: {e}"); break }
+                    Err(e) => { debug!("UDP {label}: read reply after {received} received: {e}"); break }
                 },
             }
         }
+        debug!("UDP {label}: downstream closed, {received} packets received");
     });
 }
 
@@ -379,8 +403,12 @@ where
             Ok(f) => f,
             Err(e) => return debug!("xudp: {e}"),
         };
+        debug!("UDP XUDP {fallback}: opening stream, first packet to {} ({} payload bytes, {} framed bytes)", p.addr, p.data.len(), frame.len());
         match connect(frame).await {
-            Ok(stream) => over_stream(stream, Framing::Xudp(fallback), rx, tx, true),
+            Ok(stream) => {
+                debug!("UDP XUDP {fallback}: stream open, first packet queued");
+                over_stream(stream, Framing::Xudp(fallback), rx, tx, true)
+            }
             Err(e) => log::warn!("UDP {fallback}: {e:#}"),
         }
     });

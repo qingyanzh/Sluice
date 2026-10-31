@@ -115,25 +115,39 @@ async fn handle_udp(mut udp: IpStackUdpStream, router: Arc<Router>, fake: Arc<Fa
         return Ok(());
     };
     debug!("TUN UDP {} -> {target}: flow open", udp.local_addr());
+    let (mut sent, mut received) = (0u64, 0u64);
     // ipstack ends the stream after its UDP idle timeout, which closes the pipe. Each
     // ipstack stream is one 5-tuple, so replies from other sources are answered as if
     // from `dst` (the app sees a restricted cone, as before).
-    loop {
-        tokio::select! {
-            r = udp.read(&mut buf) => {
-                let n = r?;
-                if n == 0 || pipe.tx.send(Packet { addr: target.clone(), data: buf[..n].to_vec() }).await.is_err() { return Ok(()); }
-                crate::stats::add_up(n);
-            }
-            p = pipe.rx.recv() => match p {
-                Some(p) => {
-                    crate::stats::add_down(p.data.len());
-                    write_reply(&mut udp, &p, mtu).await?
+    let result = async {
+        loop {
+            tokio::select! {
+                r = udp.read(&mut buf) => {
+                    let n = r?;
+                    if n == 0 { break Ok(()); }
+                    if pipe.tx.send(Packet { addr: target.clone(), data: buf[..n].to_vec() }).await.is_err() {
+                        debug!("TUN UDP {target}: outbound stopped accepting packets");
+                        break Ok(());
+                    }
+                    if sent == 0 { debug!("TUN UDP {target}: first packet queued ({n} bytes)"); }
+                    sent += 1;
+                    crate::stats::add_up(n);
                 }
-                None => return Ok(()),
-            },
+                p = pipe.rx.recv() => match p {
+                    Some(p) => {
+                        write_reply(&mut udp, &p, mtu).await?;
+                        if received == 0 { debug!("TUN UDP {target}: first reply from {} written to TUN ({} bytes)", p.addr, p.data.len()); }
+                        received += 1;
+                        crate::stats::add_down(p.data.len());
+                    }
+                    None => break Ok(()),
+                },
+            }
         }
     }
+    .await;
+    debug!("TUN UDP {} -> {target}: flow closed, {sent} packets sent, {received} received", udp.local_addr());
+    result
 }
 
 pub async fn serve(dev: tun::AsyncDevice, mtu: u16, handle: Arc<RouterHandle>, fake: Arc<FakeDns>) -> Result<()> {

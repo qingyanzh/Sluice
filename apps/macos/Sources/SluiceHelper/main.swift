@@ -50,6 +50,7 @@ final class CoreRunner: NSObject, SluiceHelperProtocol {
     private var process: Process?
     private var appWatch: ProcessWatch?
     private var owner: UUID?
+    private var stopReplies: [(String?) -> Void] = []
 
     func hello(reply: @escaping (String, Int32) -> Void) {
         reply(SluiceHelperInfo.version, Int32(bitPattern: getuid()))
@@ -65,6 +66,7 @@ final class CoreRunner: NSObject, SluiceHelperProtocol {
 
     func startOwned(config: String, appPID: Int32, owner: UUID?, reply: @escaping (Int32, String, String?) -> Void) {
         queue.async {
+            guard self.stopReplies.isEmpty else { return reply(0, "", "the core is still stopping") }
             if let p = self.process, p.isRunning {
                 return reply(p.processIdentifier, coreLog, "the core is already running")
             }
@@ -142,13 +144,25 @@ final class CoreRunner: NSObject, SluiceHelperProtocol {
         appWatch?.cancel()
         appWatch = nil
         owner = nil
-        guard let p = process, p.isRunning else { process = nil; return reply(nil) }
+        if !stopReplies.isEmpty { stopReplies.append(reply); return }
+        guard let p = process else { return reply(nil) }
+        guard p.isRunning else { p.waitUntilExit(); process = nil; return reply(nil) }
+        stopReplies.append(reply)
         p.terminate()
         DispatchQueue.global().async {
-            let deadline = Date().addingTimeInterval(10)
-            while p.isRunning && Date() < deadline { usleep(50_000) }
-            if p.isRunning { kill(p.processIdentifier, SIGKILL); p.waitUntilExit() }
-            reply(nil)
+            let deadline = ContinuousClock.now + .seconds(10)
+            while p.isRunning && ContinuousClock.now < deadline { usleep(50_000) }
+            if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            let killDeadline = ContinuousClock.now + .seconds(2)
+            while p.isRunning && ContinuousClock.now < killDeadline { usleep(50_000) }
+            let error = p.isRunning ? "core \(p.processIdentifier) did not exit after SIGKILL" : nil
+            if error == nil { p.waitUntilExit() }
+            self.queue.async {
+                if error == nil, self.process === p { self.process = nil }
+                let replies = self.stopReplies
+                self.stopReplies = []
+                for reply in replies { reply(error) }
+            }
         }
     }
 }
