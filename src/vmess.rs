@@ -304,6 +304,8 @@ where
         out.clear();
         st.seal_chunk(&buf[..n], &mut out); // an empty chunk marks end of stream
         dst.write_all(&out).await?;
+        // Flush a lone UDP request before waiting for the next request or EOF.
+        dst.flush().await?;
         if n == 0 {
             break;
         }
@@ -476,6 +478,21 @@ mod tests {
     fn fnv() {
         assert_eq!(fnv1a32(b""), 0x811c9dc5);
         assert_eq!(fnv1a32(b"a"), 0xe40c292c);
+    }
+
+    #[tokio::test]
+    async fn udp_chunk_is_flushed_before_next_request_or_eof() {
+        let (mut app, input) = tokio::io::duplex(4096);
+        let (wire, mut server) = tokio::io::duplex(4096);
+        let key = [7; 16];
+        let iv = [9; 16];
+        let task = tokio::spawn(encrypt_loop(Security::Aes128Gcm, key, iv, Vec::new(), input, tokio::io::BufWriter::new(wire)));
+        let frame = crate::udp::xudp_frame(true, &Target::new("stun.example", 19302), b"stun request").unwrap();
+        app.write_all(&frame).await.unwrap();
+        let mut state = BodyState::new(Security::Aes128Gcm, &key, &iv);
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), read_chunk(&mut state, &mut server)).await.unwrap().unwrap().unwrap();
+        assert_eq!(got, frame);
+        task.abort();
     }
 
     #[tokio::test]

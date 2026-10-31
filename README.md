@@ -99,7 +99,6 @@ first launch.
 
 Sluice reloads the config, without dropping connections, in these cases:
 - the config file changes (checked every 2 s)
-- it receives `SIGHUP`
 - `POST /v1/reload` is called
 - a subscription's `update-interval` elapses
 
@@ -107,6 +106,11 @@ New connections use the new config, and existing ones finish on the old one. A c
 errors is rejected and the running one is kept. Manual choices in groups, and health-check
 results, carry over wherever the group and option still exist. Listen addresses and
 enhanced-mode settings only apply after a restart.
+Enhanced mode changes made in the app restart the core through the helper, waiting for
+network cleanup before starting in the new mode. Manual select-group choices are saved
+in `<config>.selections.json` and shared by user/root cores. Listen/TUN changes are
+rejected by hot reload and require a restart. `SIGINT`, `SIGTERM`, and `SIGHUP` shut down
+the core and restore routes/DNS; shutdown is bounded to eight seconds.
 
 ## Enhanced mode (M2, macOS)
 

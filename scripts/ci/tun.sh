@@ -17,6 +17,35 @@ fails=0
 WATCHDOG=${WATCHDOG:-150}
 out=ci-logs/tun-output.txt
 exec 3>&1 > "$out" 2>&1
+watchdog=0
+ss_pid=0
+cleanup() {
+    if (( watchdog > 0 )); then kill "$watchdog" 2>/dev/null || true; fi
+    if (( ss_pid > 0 )); then kill "$ss_pid" 2>/dev/null || true; fi
+    if pgrep -x sluice > /dev/null; then
+        sudo pkill -TERM -x sluice || true
+        for _ in $(seq 100); do
+            pgrep -x sluice > /dev/null || break
+            sleep 0.1
+        done
+        sudo pkill -KILL -x sluice 2>/dev/null || true
+    fi
+    exec 1>&3 2>&1
+    cat "$out"
+}
+trap cleanup EXIT
+
+stop_core() {
+    sudo pkill -INT -x sluice || true
+    for _ in $(seq 20); do
+        pgrep -x sluice > /dev/null || return 0
+        sleep 0.5
+    done
+    echo 'FAIL Sluice is still running after shutdown'
+    sudo pgrep -lx sluice || true
+    sudo lsof -nP -iTCP:6170 -sTCP:LISTEN || true
+    exit 1
+}
 
 # Snapshot the network so a broken cleanup can be diagnosed and repaired.
 gw=$(route -n get default | awk '/gateway:/{print $2}')
@@ -87,9 +116,9 @@ run_case() {
     for _ in $(seq 30); do curl -s -m 2 -o /dev/null http://127.0.0.1:6170/v1/policies && break; sleep 0.5; done
     sleep 1
     scripts/tun-check.sh || fails=$((fails + 1))
-    sudo pkill -INT -x sluice
-    for _ in $(seq 20); do pgrep -x sluice > /dev/null || break; sleep 0.5; done
+    stop_core
     kill "$watchdog" 2>/dev/null
+    watchdog=0
     echo "-- after"
     scripts/tun-check.sh after || fails=$((fails + 1))
     repair_if_offline
@@ -111,7 +140,8 @@ sleep 1
 sed 's/^loglevel = .*/loglevel = debug/' examples/tun-test.conf > "$work/tun-direct.conf"
 run_case direct "$work/tun-direct.conf"
 run_case proxy "$work/tun-proxy.conf"
-kill $ss_pid 2>/dev/null
+kill "$ss_pid" 2>/dev/null
+ss_pid=0
 
 # HTTPS decryption on TUN flows: curl (no proxy settings) trusts only Sluice's CA.
 echo "=================== mitm"
@@ -142,13 +172,11 @@ hdr=$(curl -s -m 20 --cacert "$cadir/ca.crt" -D - -o /dev/null https://example.c
 redir=$(curl -s -m 20 --cacert "$cadir/ca.crt" -o /dev/null -w '%{http_code} %{redirect_url}' https://example.com/old)
 if echo "$hdr" | grep -qi '^x-sluice-rewrite: tun'; then echo "PASS TUN MITM header rewrite"; else echo "FAIL TUN MITM header rewrite"; echo "$hdr"; fails=$((fails + 1)); fi
 if [ "$redir" = "302 https://example.com/new" ]; then echo "PASS TUN MITM URL rewrite"; else echo "FAIL TUN MITM URL rewrite ($redir)"; fails=$((fails + 1)); fi
-sudo pkill -INT -x sluice
-for _ in $(seq 20); do pgrep -x sluice > /dev/null || break; sleep 0.5; done
+stop_core
 kill "$watchdog" 2>/dev/null
+watchdog=0
 repair_if_offline
 grep -v DEBUG ci-logs/tun-mitm.log | tail -10
 
 echo; [ $fails = 0 ] && echo "All TUN checks passed." || echo "$fails TUN check run(s) failed."
-exec 1>&3 2>&1
-cat "$out"
 exit $fails

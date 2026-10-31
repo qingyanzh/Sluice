@@ -71,6 +71,7 @@ struct ConfigSummary {
     var httpListen: String?
     var socksListen: String?
     var enhancedMode = false
+    private var tunSettings: [String: String] = [:]
     /// Nodes in [Proxy] and subscription groups (policy-path) in [Proxy Group].
     var proxyCount = 0
     var subscriptionCount = 0
@@ -95,6 +96,7 @@ struct ConfigSummary {
             case "http-listen": httpListen = value
             case "socks5-listen": socksListen = value
             case "enhanced-mode": enhancedMode = value == "true" || value == "1"
+            case "tun-mtu", "fake-ip-range", "dns-server": tunSettings[key] = value
             default: break
             }
         }
@@ -102,7 +104,7 @@ struct ConfigSummary {
 
     func requiresRestart(comparedTo running: ConfigSummary) -> Bool {
         apiListen != running.apiListen || httpListen != running.httpListen
-            || socksListen != running.socksListen || enhancedMode != running.enhancedMode
+            || socksListen != running.socksListen || enhancedMode != running.enhancedMode || tunSettings != running.tunSettings
     }
 }
 
@@ -270,6 +272,10 @@ final class Core: ObservableObject {
             lastActionError = "无法载入配置列表：\(error.localizedDescription)"
         }
         refreshSummary()
+        if attachment == nil {
+            state = .starting
+            Task { await self.reconcileExistingCore() }
+        } else { discovering = false }
         if let attachment {
             requestedPane = attachment.pane
             runningSummary = summary
@@ -286,6 +292,97 @@ final class Core: ObservableObject {
             // the shared monitor reconnects this stream and consumes its log events.
             pollTask = Task { await self.poll() }
         }
+    }
+
+    /// Reconcile an orphan before reporting stopped or launching another process.
+    private func reconcileExistingCore() async {
+        defer { discovering = false; startIfAutoStart() }
+        let helperPID = (try? await HelperClient.status()) ?? 0
+        if helperPID > 0 {
+            rootPID = helperPID
+            rootViaHelper = true
+            privileged = true
+            do { try await HelperClient.stop() }
+            catch {
+                state = .failed("无法停止现有内核：\(error.localizedDescription)")
+                runningSummary = summary
+                pollTask = Task { await self.poll() }
+                return
+            }
+            rootPID = nil
+            privileged = false
+        }
+        if let port = summary.apiPort {
+            let client = APIClient(port: port)
+            if let status = try? await client.status() {
+                runningSummary = ConfigSummary(text: (try? String(contentsOfFile: status.config, encoding: .utf8)) ?? "")
+                runningSummary?.enhancedMode = status.enhancedMode
+                rootPID = status.pid
+                privileged = status.uid == 0
+                rootViaHelper = false
+                do {
+                    try await client.shutdown()
+                    let deadline = Date().addingTimeInterval(10)
+                    while Core.alive(status.pid) && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
+                    guard !Core.alive(status.pid) else { throw APIError(message: "内核停止超时") }
+                    rootPID = nil
+                    privileged = false
+                    runningSummary = nil
+                } catch {
+                    state = .running
+                    lastActionError = error.localizedDescription
+                    pollTask = Task { await self.poll() }
+                    return
+                }
+            } else if (try? await client.policies()) != nil {
+                // Older cores lack /v1/status. Identify the actual listener rather
+                // than treating a 404 as proof that no core is running.
+                let owners = ListenConflict.parseOwners(await ListenConflict.output(port: port))
+                if let owner = owners.first(where: { $0.process == "sluice" }), let pid = Int32(exactly: owner.pid) {
+                    rootPID = pid
+                    privileged = true
+                    rootViaHelper = false
+                    do {
+                        try await Core.stopRoot(pid: pid, viaHelper: false)
+                        let deadline = Date().addingTimeInterval(10)
+                        while Core.alive(pid) && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
+                        guard !Core.alive(pid) else { throw APIError(message: "现有内核停止超时") }
+                        rootPID = nil
+                        privileged = false
+                    } catch {
+                        state = .failed(error.localizedDescription)
+                        pollTask = Task { await self.poll() }
+                        return
+                    }
+                } else {
+                    state = .failed("检测到运行中的内核，但无法确定其 PID。请停止现有内核后重试。")
+                    return
+                }
+            }
+        }
+        let pidFile = Core.logDir.appendingPathComponent("core.pid")
+        if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+           let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0, Core.alive(pid) {
+            let (_, command) = await runTool("/bin/ps", ["-p", String(pid), "-o", "comm="])
+            if URL(fileURLWithPath: command.trimmingCharacters(in: .whitespacesAndNewlines)).lastPathComponent == "sluice" {
+                rootPID = pid
+                rootViaHelper = false
+                privileged = true
+                do {
+                    try await Core.stopRoot(pid: pid, viaHelper: false)
+                    let deadline = Date().addingTimeInterval(10)
+                    while Core.alive(pid) && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
+                    guard !Core.alive(pid) else { throw APIError(message: "现有内核停止超时") }
+                    rootPID = nil
+                    privileged = false
+                } catch {
+                    state = .failed(error.localizedDescription)
+                    pollTask = Task { await self.poll() }
+                    return
+                }
+            }
+        }
+        state = .stopped
     }
 
     var api: APIClient? {
@@ -319,10 +416,11 @@ final class Core: ObservableObject {
     // MARK: lifecycle
 
     private var autoStarted = false
+    @Published private(set) var discovering = true
 
     /// Starts the core once per launch if the user asked for that.
     func startIfAutoStart() {
-        guard autoStart, !autoStarted, !isActive else { return }
+        guard !discovering, autoStart, !autoStarted, !isActive else { return }
         autoStarted = true
         start()
     }
@@ -332,7 +430,7 @@ final class Core: ObservableObject {
     static let logDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Sluice")
 
     func start() {
-        guard !isActive else { return }
+        guard !discovering, !isActive else { return }
         refreshSummary()
         guard FileManager.default.fileExists(atPath: configPath) else {
             state = .failed("Config file not found: \(configPath)")
@@ -479,7 +577,11 @@ final class Core: ObservableObject {
             stopping = true
             Task {
                 do {
-                    try await Core.stopRoot(pid: pid, viaHelper: rootViaHelper)
+                    if !rootViaHelper, let api, (try? await api.status())?.pid == pid {
+                        try await api.shutdown()
+                    } else {
+                        try await Core.stopRoot(pid: pid, viaHelper: rootViaHelper)
+                    }
                 } catch {
                     stopping = false
                     lastActionError = "停止失败：\(error.localizedDescription)"
@@ -508,6 +610,7 @@ final class Core: ObservableObject {
             let deadline = Date().addingTimeInterval(15)
             while isActive && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
             if !isActive { start() }
+            else { lastActionError = "内核停止超时，未能应用新配置。" }
         }
     }
 
@@ -522,7 +625,10 @@ final class Core: ObservableObject {
             return
         }
         if let pid = rootPID {
-            // The helper also stops it once the app exits; the admin prompt path needs one more prompt.
+            if rootViaHelper {
+                HelperClient.stopSynchronously()
+                return
+            }
             let sema = DispatchSemaphore(value: 0)
             let viaHelper = rootViaHelper
             Task.detached {
@@ -1063,6 +1169,11 @@ final class Core: ObservableObject {
         guard let api else { throw APIError(message: "未配置控制 API") }
         reloading = true
         defer { reloading = false }
+        refreshSummary()
+        if summary.requiresRestart(comparedTo: runningSummary ?? summary) {
+            restart()
+            return
+        }
         try await api.reload()
         nodeLatencies = [:]
         nodeTests = [:]
@@ -1265,9 +1376,9 @@ final class Core: ObservableObject {
 
     /// Turns enhanced mode on or off in the config and restarts the core so it takes effect.
     func setEnhancedMode(_ on: Bool) async -> String? {
+        guard !discovering, state != .starting, !restarting else { return "内核正在启动或应用配置，请稍后再试。" }
         let text = ConfigText.setGeneral("enhanced-mode", on ? "true" : "false", in: readConfig())
         if let err = await saveConfig(text) { return err }
-        if isActive { restart() }
         return nil
     }
 

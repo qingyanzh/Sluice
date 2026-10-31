@@ -130,10 +130,45 @@ async fn start_tun(
     Ok(guard)
 }
 
-#[tokio::main]
-async fn main() {
+/// Block lifecycle signals before creating runtime workers. A dedicated sigwait thread
+/// remains responsive even when an async task or a subprocess is busy. Detached/admin
+/// launches may inherit SIGINT ignored, so reset the dispositions first.
+fn main() {
     diag::install_panic_hook();
-    if let Err(e) = run().await {
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    unsafe {
+        let mut signals: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut signals);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::signal(signal, libc::SIG_DFL);
+            libc::sigaddset(&mut signals, signal);
+        }
+        assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut()), 0);
+        std::thread::spawn(move || {
+            let mut signal = 0;
+            if libc::sigwait(&signals, &mut signal) == 0 {
+                // Do not log before notifying: a full stdout pipe can block logging.
+                std::thread::spawn(|| {
+                    // Last resort for stuck tasks/cleanup; process exit also closes utun.
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    std::process::exit(1);
+                });
+                sysnet::request_shutdown();
+                let _ = stop_tx.send(());
+            }
+        });
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
+    let result = runtime.block_on(async {
+        tokio::select! {
+            biased;
+            _ = stop_rx => Ok(()),
+            result = run() => result,
+        }
+        // Dropping run first drops SystemGuard, restoring routes/DNS before runtime shutdown.
+    });
+    runtime.shutdown_timeout(std::time::Duration::from_millis(500));
+    if let Err(e) = result {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
@@ -209,15 +244,11 @@ async fn run() -> Result<()> {
             } else {
                 None
             };
+            reloader.mark_ready();
             if tasks.is_empty() {
                 bail!("nothing to listen on: set http-listen, socks5-listen or enhanced-mode in [General]");
             }
-            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            tokio::select! {
-                Some(res) = tasks.join_next() => res??,
-                _ = tokio::signal::ctrl_c() => log::info!("shutting down"),
-                _ = term.recv() => log::info!("shutting down"),
-            }
+            if let Some(res) = tasks.join_next().await { res??; }
         }
         _ => {
             println!("{USAGE}");

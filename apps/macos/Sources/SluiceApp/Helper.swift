@@ -159,20 +159,62 @@ enum HelperClient {
         }
     }
 
-    /// One XPC round trip; the connection is dropped afterwards (the helper watches the app's PID,
-    /// not the connection, to know when to stop the core).
-    private static func call<T>(_ body: @escaping (SluiceHelperProtocol, @escaping (T) -> Void) -> Void) async throws -> T {
+    // Keep the ownership connection alive for the app's lifetime. Its invalidation
+    // is a second stop trigger alongside the helper's process-exit watch.
+    // NSXPCConnection supports calls/invalidation from arbitrary queues. Keep that
+    // thread-safety assertion local instead of adding a global Sendable conformance.
+    private final class ConnectionLease: @unchecked Sendable {
+        let value: NSXPCConnection
+        init(_ value: NSXPCConnection) { self.value = value }
+    }
+
+    private static let connectionLock = NSLock()
+    private static var connection: NSXPCConnection?
+
+    private static func liveConnection() -> NSXPCConnection {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        if let connection { return connection }
         let c = NSXPCConnection(machServiceName: SluiceHelperInfo.machService, options: .privileged)
         c.remoteObjectInterface = SluiceHelperInfo.interface()
+        c.invalidationHandler = { [weak c] in
+            connectionLock.lock()
+            defer { connectionLock.unlock() }
+            if connection === c { connection = nil }
+        }
         c.resume()
-        defer { c.invalidate() }
+        connection = c
+        return c
+    }
+
+    private static func call<T>(timeout: TimeInterval = 15, _ body: @escaping (SluiceHelperProtocol, @escaping (T) -> Void) -> Void) async throws -> T {
+        let c = liveConnection()
+        let lease = ConnectionLease(c)
         return try await withCheckedThrowingContinuation { cont in
             let once = Once()
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                once.run {
+                    cont.resume(throwing: APIError(message: "helper: timed out"))
+                    DispatchQueue.global().async { lease.value.invalidate() }
+                }
+            }
             let proxy = c.remoteObjectProxyWithErrorHandler { error in
                 once.run { cont.resume(throwing: APIError(message: "helper: \(error.localizedDescription)")) }
             } as! SluiceHelperProtocol
             body(proxy) { value in once.run { cont.resume(returning: value) } }
         }
+    }
+
+    static func status() async throws -> Int32 { try await call(timeout: 2) { p, done in p.status(reply: done) } }
+
+    /// XPC replies arrive on its own queue, so applicationWillTerminate can wait
+    /// synchronously without needing the main actor to resume an async Task.
+    static func stopSynchronously() {
+        let done = DispatchSemaphore(value: 0)
+        let c = liveConnection()
+        let proxy = c.remoteObjectProxyWithErrorHandler { _ in done.signal() } as! SluiceHelperProtocol
+        proxy.stop { _ in done.signal() }
+        _ = done.wait(timeout: .now() + 12)
     }
 
     static func hello() async throws -> (String, Int32) {

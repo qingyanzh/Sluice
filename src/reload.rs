@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use log::{info, warn};
 
 use crate::config::{Config, General};
@@ -123,6 +123,57 @@ pub async fn build(mut cfg: Config, path: &str, strict: bool) -> Result<(Config,
     Ok((cfg, router))
 }
 
+/// A sibling file is shared by user and helper cores, independent of HOME/uid.
+fn selection_path(path: &str) -> std::path::PathBuf {
+    let mut name = std::path::PathBuf::from(path).into_os_string();
+    name.push(".selections.json");
+    name.into()
+}
+
+fn selections(router: &Router) -> std::collections::BTreeMap<String, String> {
+    router.groups().into_iter().filter(|g| g.kind == "select").map(|g| (g.name, g.selected)).collect()
+}
+
+fn restore_selections(router: &Router, path: &str) {
+    let path = selection_path(path);
+    match std::fs::read(&path) {
+        Ok(data) => {
+            match serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&data) {
+                Ok(saved) => router.restore_selections(&saved),
+                Err(e) => warn!("invalid selections {}: {e}", path.display()),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("read selections {}: {e}", path.display()),
+    }
+}
+
+fn save_selections(router: &Router, config: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let path = selection_path(config);
+    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), rand::random::<u64>()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&tmp)?;
+        // A root-created file must remain writable by the config's user as well.
+        if crate::sysnet::is_root() {
+            use std::os::fd::AsRawFd;
+            let owner = std::fs::metadata(config)?;
+            if unsafe { libc::fchown(file.as_raw_fd(), owner.uid(), owner.gid()) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        file.write_all(&serde_json::to_vec(&selections(router))?)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result.with_context(|| format!("persist selections {}", path.display()))
+}
+
 /// Settings only read at startup; changing them needs a restart.
 #[derive(PartialEq)]
 struct Fixed {
@@ -154,7 +205,9 @@ pub fn validate_profile(path: &str) -> Result<Config> {
 
 /// Other config files next to `path` (`.conf`), sorted, for a profile picker.
 pub fn sibling_profiles(path: &str) -> Vec<String> {
-    let Ok(dir) = std::fs::read_dir(config_dir(path)) else { return Vec::new() };
+    let Ok(dir) = std::fs::read_dir(config_dir(path)) else {
+        return Vec::new();
+    };
     let mut out: Vec<String> = dir
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "conf") && p.is_file())
@@ -170,6 +223,7 @@ pub struct Reloader {
     /// The active config file; `switch_profile` changes it.
     path: Mutex<String>,
     fixed: Fixed,
+    ready: std::sync::atomic::AtomicBool,
     lock: tokio::sync::Mutex<()>,
     last: Mutex<Instant>,
     subscription_every: Mutex<Option<Duration>>,
@@ -184,6 +238,7 @@ fn activate(router: &Arc<Router>, cfg: &Config) {
 impl Reloader {
     pub fn start(router: Router, cfg: &Config, path: &str) -> Arc<Self> {
         let router = Arc::new(router);
+        restore_selections(&router, path);
         activate(&router, cfg);
         let handle = Arc::new(RouterHandle(RwLock::new(router)));
         crate::dns::set_router(handle.clone());
@@ -192,10 +247,24 @@ impl Reloader {
             subscriptions: RwLock::new(cfg.subscriptions.clone()),
             path: Mutex::new(path.to_string()),
             fixed: Fixed::of(&cfg.general),
+            ready: std::sync::atomic::AtomicBool::new(false),
             lock: tokio::sync::Mutex::new(()),
             last: Mutex::new(Instant::now()),
             subscription_every: Mutex::new(subscription_interval(cfg)),
         })
+    }
+
+    /// Serialize selection changes with reloads so the acknowledged state is durable.
+    pub async fn select(&self, group: &str, option: &str) -> Result<()> {
+        let _one_at_a_time = self.lock.lock().await;
+        let router = self.handle.current();
+        let previous = selections(&router);
+        router.select(group, option)?;
+        if let Err(e) = save_selections(&router, &self.path()) {
+            router.restore_selections(&previous);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Rebuilds from the config file and swaps the new router in; on error the
@@ -204,6 +273,14 @@ impl Reloader {
         let _one_at_a_time = self.lock.lock().await;
         let path = self.path();
         self.reload_from(&path, reason).await
+    }
+
+    pub fn mark_ready(&self) { self.ready.store(true, std::sync::atomic::Ordering::Release); }
+
+    pub fn ready(&self) -> bool { self.ready.load(std::sync::atomic::Ordering::Acquire) }
+
+    pub fn enhanced_mode(&self) -> bool {
+        self.fixed.tun.0
     }
 
     /// The config file this reloader reads (it changes with `switch_profile`).
@@ -225,11 +302,12 @@ impl Reloader {
     async fn reload_from(&self, path: &str, reason: &str) -> Result<String> {
         let cfg = read_config(path)?;
         if Fixed::of(&cfg.general) != self.fixed {
-            warn!("listen or enhanced-mode settings changed; restart Sluice to apply them");
+            bail!("listen or enhanced-mode settings changed; restart required");
         }
         let (cfg, router) = build(cfg, path, false).await?;
         let router = Arc::new(router);
         router.inherit_state(&self.handle.current());
+        save_selections(&router, path)?;
         activate(&router, &cfg);
         *self.handle.0.write().unwrap() = router;
         *self.subscriptions.write().unwrap() = cfg.subscriptions.clone();
@@ -246,10 +324,10 @@ impl Reloader {
         }
     }
 
-    /// Reloads on SIGHUP, when the config file changes, and when subscriptions are due.
+    /// Reloads when the config file changes and when subscriptions are due.
+    /// SIGHUP, like SIGTERM/SIGINT, is handled by the lifecycle supervisor.
     pub fn spawn_triggers(self: &Arc<Self>) -> Result<()> {
         let me = self.clone();
-        let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
         let mtime = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         tokio::spawn(async move {
             let mut watched = me.path();
@@ -257,7 +335,6 @@ impl Reloader {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             loop {
                 tokio::select! {
-                    _ = hup.recv() => me.try_reload("SIGHUP").await,
                     _ = tick.tick() => {
                         if me.path() != watched {
                             // Switched profiles; the switch already loaded the new file.
@@ -340,6 +417,42 @@ mod tests {
         assert_eq!(d.rule, "FINAL");
         assert_eq!(d.policy, "Proxy");
         assert!(text.contains("# RULE-SET,"));
+    }
+
+    #[test]
+    fn restores_saved_selection_graph_atomically() {
+        let cfg = Config::parse("[Proxy Group]\nA = select, DIRECT, B\nB = select, A, DIRECT\n[Rule]\nFINAL,A\n").unwrap();
+        let router = Router::new(&cfg).unwrap();
+        let saved = [("A".into(), "B".into()), ("B".into(), "DIRECT".into())].into_iter().collect();
+        router.restore_selections(&saved);
+        assert_eq!(selections(&router), saved);
+        let cycle = [("A".into(), "B".into()), ("B".into(), "A".into())].into_iter().collect();
+        router.restore_selections(&cycle);
+        assert_eq!(selections(&router), saved);
+    }
+
+    #[tokio::test]
+    async fn selections_survive_new_cores_and_ignore_stale_entries() {
+        let dir = std::env::temp_dir().join(format!("sluice-selection-test-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write(&dir, "a.conf", "[Proxy Group]\nProxy = select, DIRECT, REJECT\n[Rule]\nFINAL,Proxy\n");
+        let cfg = read_config(&path).unwrap();
+        let first = Reloader::start(Router::new(&cfg).unwrap(), &cfg, &path);
+        first.select("Proxy", "REJECT").await.unwrap();
+        let second = Reloader::start(Router::new(&cfg).unwrap(), &cfg, &path);
+        assert_eq!(second.handle.current().groups()[0].selected, "REJECT");
+        // A root/user mode switch uses exactly the same sibling state file.
+        let mut enabled = read_config(&path).unwrap();
+        enabled.general.enhanced_mode = true;
+        let third = Reloader::start(Router::new(&enabled).unwrap(), &enabled, &path);
+        assert_eq!(third.handle.current().groups()[0].selected, "REJECT");
+        std::fs::write(selection_path(&path), br#"{"Proxy":"removed", "OldGroup":"DIRECT"}"#).unwrap();
+        let stale = Reloader::start(Router::new(&cfg).unwrap(), &cfg, &path);
+        assert_eq!(stale.handle.current().groups()[0].selected, "DIRECT");
+        std::fs::write(&path, "[General]\nenhanced-mode = true\n[Rule]\nFINAL,DIRECT\n").unwrap();
+        assert!(first.reload("test").await.unwrap_err().to_string().contains("restart required"));
+        assert!(!first.enhanced_mode());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

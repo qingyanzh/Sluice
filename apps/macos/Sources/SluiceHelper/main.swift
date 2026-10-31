@@ -48,17 +48,22 @@ func executablePath(of pid: pid_t) -> String? {
 final class CoreRunner: NSObject, SluiceHelperProtocol {
     private let queue = DispatchQueue(label: "core")
     private var process: Process?
-    private var appWatch: DispatchSourceProcess?
+    private var appWatch: ProcessWatch?
+    private var owner: UUID?
 
     func hello(reply: @escaping (String, Int32) -> Void) {
         reply(SluiceHelperInfo.version, Int32(bitPattern: getuid()))
     }
 
     func status(reply: @escaping (Int32) -> Void) {
-        queue.async { reply(self.process?.processIdentifier ?? 0) }
+        queue.async { reply(self.process.flatMap { $0.isRunning ? $0.processIdentifier : nil } ?? 0) }
     }
 
     func start(config: String, appPID: Int32, reply: @escaping (Int32, String, String?) -> Void) {
+        startOwned(config: config, appPID: appPID, owner: nil, reply: reply)
+    }
+
+    func startOwned(config: String, appPID: Int32, owner: UUID?, reply: @escaping (Int32, String, String?) -> Void) {
         queue.async {
             if let p = self.process, p.isRunning {
                 return reply(p.processIdentifier, coreLog, "the core is already running")
@@ -100,6 +105,7 @@ final class CoreRunner: NSObject, SluiceHelperProtocol {
             do { try p.run() } catch { return reply(0, "", "couldn't launch the core: \(error.localizedDescription)") }
             launched = true
             self.process = p
+            self.owner = owner
             self.watch(appPID)
             log("started core \(p.processIdentifier) for app \(appPID) with \(config)")
             reply(p.processIdentifier, coreLog, nil)
@@ -110,35 +116,56 @@ final class CoreRunner: NSObject, SluiceHelperProtocol {
     private func watch(_ pid: Int32) {
         appWatch?.cancel()
         appWatch = nil
-        guard pid > 0 else { return }
-        let src = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: queue)
-        src.setEventHandler { [weak self] in
+        guard let watchedCore = process else { return }
+        appWatch = ProcessWatch(pid: pid, queue: queue) { [weak self, weak watchedCore] in
+            guard let self, let watchedCore, self.process === watchedCore else { return }
             log("app \(pid) exited; stopping the core")
-            self?.stopLocked { _ in }
+            self.stopLocked { _ in }
         }
-        src.resume()
-        appWatch = src
-        // The app may already be gone before the source was armed.
-        if kill(pid, 0) != 0 && errno == ESRCH { stopLocked { _ in } }
+    }
+
+    func connectionEnded(_ id: UUID) {
+        queue.async {
+            guard self.owner == id else { return }
+            log("owner connection invalidated; stopping the core")
+            self.stopLocked { _ in }
+        }
     }
 
     func stop(reply: @escaping (String?) -> Void) {
         queue.async { self.stopLocked(reply) }
     }
 
-    /// SIGINT lets the core restore routes and DNS; SIGKILL only if it hangs for 10 s
+    /// SIGTERM lets the core restore routes and DNS; SIGKILL only if it hangs for 10 s
     /// (the utun closes with the process and the next start restores the DNS backup).
     private func stopLocked(_ reply: @escaping (String?) -> Void) {
         appWatch?.cancel()
         appWatch = nil
+        owner = nil
         guard let p = process, p.isRunning else { process = nil; return reply(nil) }
-        p.interrupt()
+        p.terminate()
         DispatchQueue.global().async {
             let deadline = Date().addingTimeInterval(10)
             while p.isRunning && Date() < deadline { usleep(50_000) }
             if p.isRunning { kill(p.processIdentifier, SIGKILL); p.waitUntilExit() }
             reply(nil)
         }
+    }
+}
+
+/// Only the connection that started this core owns its lifetime. Short-lived status,
+/// stop and CLI connections must never stop somebody else's core on invalidation.
+final class ClientSession: NSObject, SluiceHelperProtocol {
+    let runner: CoreRunner
+    let id = UUID()
+    let pid: Int32
+    init(runner: CoreRunner, pid: Int32) { self.runner = runner; self.pid = pid }
+    func hello(reply: @escaping (String, Int32) -> Void) { runner.hello(reply: reply) }
+    func status(reply: @escaping (Int32) -> Void) { runner.status(reply: reply) }
+    func stop(reply: @escaping (String?) -> Void) { runner.stop(reply: reply) }
+    func start(config: String, appPID: Int32, reply: @escaping (Int32, String, String?) -> Void) {
+        // CLI can explicitly watch a separate test process; normal apps own the XPC lease.
+        runner.startOwned(config: config, appPID: appPID, owner: appPID == pid ? id : nil, reply: reply)
     }
 }
 
@@ -161,7 +188,10 @@ final class Listener: NSObject, NSXPCListenerDelegate {
             }
         }
         c.exportedInterface = SluiceHelperInfo.interface()
-        c.exportedObject = runner
+        let session = ClientSession(runner: runner, pid: c.processIdentifier)
+        c.exportedObject = session
+        c.invalidationHandler = { [runner] in runner.connectionEnded(session.id) }
+        c.interruptionHandler = { [runner] in runner.connectionEnded(session.id) }
         c.resume()
         return true
     }
