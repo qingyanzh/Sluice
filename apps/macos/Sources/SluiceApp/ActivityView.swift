@@ -244,7 +244,6 @@ struct ActivityView: View {
         return DashboardCard(title: "请求排行", icon: "list.number", note: "前 3 项") {
             HStack(spacing: 0) {
                 rankTab("域名", value: 0)
-                Text("/").foregroundStyle(DS.ink3).padding(.horizontal, 10)
                 rankTab("策略", value: 1)
                 Spacer()
                 Button { pane = .requests } label: {
@@ -286,12 +285,11 @@ struct ActivityView: View {
 
     private func rankTab(_ title: String, value: Int) -> some View {
         Button { topBy = value } label: {
-            Text(title).font(DS.small.weight(topBy == value ? .medium : .regular))
-                .foregroundStyle(topBy == value ? Color.primary : DS.ink3)
-                .padding(.vertical, 2)
-                .overlay(alignment: .bottom) {
-                    if topBy == value { Capsule().fill(DS.accent).frame(height: 2).offset(y: 4) }
-                }
+            Text(title).font(DS.small.weight(topBy == value ? .semibold : .regular))
+                .foregroundStyle(topBy == value ? DS.accent : DS.ink3)
+                .padding(.horizontal, 8).frame(height: 22)
+                .background(topBy == value ? DS.accent.opacity(0.10) : .clear,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(topBy == value ? .isSelected : [])

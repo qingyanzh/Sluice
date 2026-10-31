@@ -289,9 +289,17 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             add(to: menu, "启动内核", symbol: "play.fill", enabled: state.state != .starting) { [core] in core.requestStart() }
         }
 
+        let modeTag = modeBadge(state.mode)
+        let qualityTag = latencyBadge(networkLatency(state))
+        let processes = busiestProcesses()
+        var rows: [(String, CGFloat)] = [("出站模式", modeTag.size.width), ("网络质量", qualityTag.size.width)]
+        if running { rows += state.groups.map { ($0.group, width($0.selected)) } }
+        rows += processes.map { ($0.0, width(menuBarSpeed($0.1))) }
+        let tab = tabStop(rows)
+
         menu.addItem(.separator())
         let modes = submenu(in: menu, title: "出站模式", enabled: running)
-        menu.items.last?.attributedTitle = trailing("出站模式", image: modeBadge(state.mode))
+        menu.items.last?.attributedTitle = trailing("出站模式", image: modeTag, tab: tab)
         for option in OutboundMode.allCases {
             let rawValue = option.rawValue
             add(to: modes, option.title, symbol: option.icon, checked: option == state.mode) { [core, rawValue] in core.setMode(rawValue) }
@@ -302,13 +310,14 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             for group in state.groups {
                 let groupName = group.group
                 let options = submenu(in: menu, title: groupName)
-                menu.items.last?.attributedTitle = trailing(groupName, detail: group.selected)
+                menu.items.last?.attributedTitle = trailing(groupName, detail: group.selected, tab: tab)
+                let optionTab = tabStop(group.options.map { ($0.name, width(latencyText($0.latencyMs))) })
                 for option in group.options {
                     let optionName = option.name
                     let item = add(to: options, optionName, checked: group.selected == optionName) { [core, groupName, optionName] in
                         core.select(group: groupName, option: optionName)
                     }
-                    item.attributedTitle = trailing(optionName, detail: latencyText(option.latencyMs))
+                    item.attributedTitle = trailing(optionName, detail: latencyText(option.latencyMs), tab: optionTab)
                     item.image = latencyIcon(option.latencyMs)
                 }
                 options.addItem(.separator())
@@ -321,18 +330,17 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         let quality = add(to: menu, "网络质量", enabled: running && state.testingGroups.isEmpty) { [core] in core.testAll() }
-        quality.attributedTitle = trailing("网络质量", image: latencyBadge(networkLatency(state)), dimmed: true)
+        quality.attributedTitle = trailing("网络质量", image: qualityTag, dimmed: true, tab: tab)
         quality.toolTip = "当前节点的延迟，点击重新测试全部策略组"
 
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: "进程与客户端"))
-        let processes = busiestProcesses()
         if processes.isEmpty {
             menu.addItem(info(running ? "暂无活动连接" : "—"))
         } else {
             for (name, rate) in processes {
                 let item = add(to: menu, name) { [showWindow] in showWindow(.requests) }
-                item.attributedTitle = trailing(name, detail: menuBarSpeed(rate))
+                item.attributedTitle = trailing(name, detail: menuBarSpeed(rate), tab: tab)
                 item.image = processIcon(name)
             }
         }
@@ -478,10 +486,24 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         return item
     }
 
+    /// Right column position for one menu: just past the longest name plus the widest
+    /// detail, so the menu is only as wide as its content.
+    private func tabStop(_ rows: [(String, CGFloat)]) -> CGFloat {
+        let font = NSFont.menuFont(ofSize: 0)
+        let name = rows.map { ($0.0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        let detail = rows.map(\.1).max() ?? 0
+        return ceil(max(120, name + detail + 28))
+    }
+
+    private func width(_ text: String) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width
+    }
+
     /// "Name ············ detail": the detail (text or a small tag) sits in a right-aligned column.
-    private func trailing(_ name: String, detail: String? = nil, image: NSImage? = nil, dimmed: Bool = false) -> NSAttributedString {
+    private func trailing(_ name: String, detail: String? = nil, image: NSImage? = nil, dimmed: Bool = false,
+                          tab: CGFloat) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: 250)]
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: tab)]
         let font = NSFont.menuFont(ofSize: 0)
         let title = NSMutableAttributedString(string: name, attributes: [
             .font: font, .paragraphStyle: paragraph,

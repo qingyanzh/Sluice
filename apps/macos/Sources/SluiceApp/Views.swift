@@ -571,9 +571,9 @@ enum DS {
     static let controlRadius: CGFloat = 8
     /// Control heights: fields, segmented tabs and buttons share one height per size,
     /// so controls standing in a row line up and none reads as squashed.
-    static let controlHeight: CGFloat = 32
-    static let compactControlHeight: CGFloat = 28
-    static let largeControlHeight: CGFloat = 36
+    static let controlHeight: CGFloat = 28
+    static let compactControlHeight: CGFloat = 24
+    static let largeControlHeight: CGFloat = 32
     /// Content height of a settings card, so cards side by side end on one line.
     static let settingsCardHeight: CGFloat = 132
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.82)
@@ -719,26 +719,23 @@ struct GlassSegmented<T: Hashable>: View {
                         if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)) }
                         Text(title)
                     }
-                    .font(DS.label.weight(on ? .medium : .regular))
-                    .foregroundStyle(on ? Color.primary : DS.ink2)
-                    .frame(maxWidth: .infinity).padding(.vertical, 7)
+                    .font(DS.small.weight(on ? .semibold : .regular))
+                    .foregroundStyle(on ? DS.accent : DS.ink2)
+                    .frame(maxWidth: .infinity).frame(height: DS.controlHeight - 4)
                     .background {
                         if on {
                             RoundedRectangle(cornerRadius: DS.controlRadius - 2, style: .continuous).fill(DS.surface)
-                                .shadow(color: .black.opacity(0.06), radius: 2, y: 1)
+                                .shadow(color: .black.opacity(0.08), radius: 1.5, y: 0.5)
                                 .matchedGeometryEffect(id: "thumb", in: ns)
                         }
-                    }
-                    .overlay(alignment: .bottom) {
-                        if on { FlowMark(vertical: false).padding(.bottom, 2).matchedGeometryEffect(id: "mark", in: ns) }
                     }
                     .contentShape(RoundedRectangle(cornerRadius: DS.controlRadius - 2, style: .continuous))
                 }
                 .buttonStyle(PressableStyle())
             }
         }
-        .padding(3)
-        .liquidGlass(in: RoundedRectangle(cornerRadius: DS.controlRadius + 1, style: .continuous))
+        .padding(2)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
     }
 }
 
@@ -787,15 +784,6 @@ extension View {
     }
 }
 
-/// The signature of the design language: a short accent capsule, the "flow mark",
-/// marks whatever is active (selected sidebar item, selected segment).
-struct FlowMark: View {
-    var vertical = true
-    var body: some View {
-        Capsule().fill(DS.accent.gradient)
-            .frame(width: vertical ? 3 : 16, height: vertical ? 14 : 3)
-    }
-}
 
 /// A 26pt round icon button: accent when it starts something, quiet grey otherwise.
 struct RoundIconStyle: ButtonStyle {
@@ -1957,7 +1945,7 @@ struct RuleView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 11)
         .background(hit ? DS.accent.opacity(0.08) : .clear)
-        .overlay(alignment: .leading) { if hit { FlowMark().padding(.leading, 3) } }
+
         .animation(DS.spring, value: hit)
     }
 
