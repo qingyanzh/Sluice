@@ -1,8 +1,12 @@
-//! Import supported source topology and rules as an independent local profile.
+//! Import a whole Surge/Clash profile as a local profile the user owns.
+//!
+//! Nodes stay live: the source becomes a nodes-only `[Subscription]`. Policy groups
+//! and rules are copied once as ordinary local groups and rules, so the result
+//! behaves exactly like a profile the user wrote and can be edited freely.
 use std::collections::HashSet;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
-use crate::config::Config;
+use crate::config::{Config, GroupDef, GroupKind};
 use crate::rule::Rule;
 use crate::subscription::{group_reference, node_reference};
 
@@ -44,8 +48,11 @@ pub fn convert(body: &str, source: &str, local: &str) -> Result<String> {
         kind: String::new(), server: String::new(), port: 0, aliases: Vec::new(),
     }).collect(), ..Config::default() };
     crate::subscription::import_groups(&mut topology, source_name, &body)?;
-    let group_ids: HashSet<_> = topology.groups.iter().map(|g| g.name.clone()).collect();
-    if nodes.is_empty() && group_ids.is_empty() { bail!("source has no supported nodes or policy groups"); }
+    if nodes.is_empty() && topology.groups.is_empty() { bail!("source has no supported nodes or policy groups"); }
+    // Imported groups become local groups under their upstream names.
+    let owned = owned_names(&topology.groups, source_name);
+    let group_ids: HashSet<_> = owned.values().cloned().collect();
+    let own = |reference: &str| owned.get(reference).cloned().unwrap_or_else(|| reference.to_string());
     let yaml: Option<serde_yaml::Value> = if crate::clash::looks_like(&body) { Some(serde_yaml::from_str(&body)?) } else { None };
     let rules: Vec<String> = if let Some(yaml) = &yaml {
         yaml.get("rules").and_then(serde_yaml::Value::as_sequence).map(|items| items.iter().map(|v| {
@@ -61,7 +68,7 @@ pub fn convert(body: &str, source: &str, local: &str) -> Result<String> {
         let index = if fields[0].eq_ignore_ascii_case("FINAL") { has_final = true; 1 } else { 2 };
         fields[index] = match parsed.policy.as_str() {
             "DIRECT" | "REJECT" => parsed.policy.clone(),
-            name if group_ids.contains(&group_reference(source_name, name)) => group_reference(source_name, name),
+            name if group_ids.contains(&own(&group_reference(source_name, name))) => own(&group_reference(source_name, name)),
             name if node_names.contains(name) => node_reference(source_name, name),
             name => bail!("rule refers to unavailable policy {name:?}"),
         };
@@ -79,16 +86,63 @@ pub fn convert(body: &str, source: &str, local: &str) -> Result<String> {
     let general = if general.is_empty() {
         "http-listen = 127.0.0.1:6252\nsocks5-listen = 127.0.0.1:6253\napi-listen = 127.0.0.1:6170".into()
     } else { general.join("\n") };
-    let mut output = format!("# Imported profile: local device settings retained; upstream rules copied as a snapshot.\n[General]\n{general}\n\n[Subscription]\n{source_name} = policy-path=\"{source}\", import-groups=true\n");
+    let mut output = format!("# Imported profile: local device settings retained; groups and rules copied as editable local entries.\n[General]\n{general}\n\n[Subscription]\n{source_name} = policy-path=\"{source}\"\n");
+    let mut groups: Vec<String> = topology.groups.iter().map(|g| group_line(g, &own)).collect();
     if !has_final {
-        let member = topology.groups.first().map(|g| g.name.clone());
-        let group = member.map_or_else(|| format!("默认出口 = select, use={source_name}"), |m| format!("默认出口 = select, {m}"));
-        output.push_str(&format!("\n[Proxy Group]\n{group}\n"));
+        let group = topology.groups.first().map_or_else(|| format!("默认出口 = select, use={source_name}"), |g| format!("默认出口 = select, {}", own(&g.name)));
+        groups.push(group);
         converted.push("FINAL,默认出口".into());
     }
+    if !groups.is_empty() { output.push_str(&format!("\n[Proxy Group]\n{}\n", groups.join("\n"))); }
     output.push_str(&format!("\n[Rule]\n{}\n", converted.join("\n")));
     Config::parse(&output)?;
     Ok(output)
+}
+
+/// `@Source/group/Name` → `Name`, made unique against built-ins and each other.
+fn owned_names(groups: &[GroupDef], source: &str) -> std::collections::HashMap<String, String> {
+    let prefix = group_reference(source, "");
+    let mut taken: HashSet<String> = ["DIRECT", "REJECT", "默认出口"].into_iter().map(String::from).collect();
+    groups.iter().map(|g| {
+        let base = g.name.strip_prefix(&prefix).map(unescape)
+            .unwrap_or_else(|| g.name.clone()).replace([',', '=', '"', '\r', '\n'], " ");
+        let mut name = base.trim().to_string();
+        if name.is_empty() || name.starts_with('@') { name = format!("策略组 {}", taken.len()); }
+        let mut unique = name.clone();
+        let mut i = 2;
+        while !taken.insert(unique.clone()) { unique = format!("{name} {i}"); i += 1; }
+        (g.name.clone(), unique)
+    }).collect()
+}
+
+/// Undoes the `%XX` escaping of reference components.
+fn unescape(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&value[i + 1..i + 3], 16) { out.push(b); i += 3; continue; }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A local `[Proxy Group]` line; members that are imported groups use their local names.
+fn group_line(group: &GroupDef, local: &dyn Fn(&str) -> String) -> String {
+    let mut parts = vec![match group.kind {
+        GroupKind::Select => "select", GroupKind::UrlTest { .. } => "url-test",
+        GroupKind::Fallback => "fallback", GroupKind::LoadBalance => "load-balance",
+    }.to_string()];
+    parts.extend(group.options.iter().map(|o| local(o)));
+    if !matches!(group.kind, GroupKind::Select) {
+        parts.push(format!("url=\"{}\"", group.url));
+        parts.push(format!("interval={}", group.interval_secs));
+    }
+    if let GroupKind::UrlTest { tolerance_ms } = group.kind { parts.push(format!("tolerance={tolerance_ms}")); }
+    format!("{} = {}", local(&group.name), parts.join(", "))
 }
 
 #[cfg(test)]
@@ -104,8 +158,12 @@ mod tests {
         assert_eq!(cfg.providers.len(), 1);
         assert_eq!(cfg.general.api_listen.as_deref(), Some("127.0.0.1:6170"));
         assert!(!cfg.general.enhanced_mode);
-        assert_eq!(cfg.rules[0].policy, "@导入来源/group/Main");
-        assert_eq!(cfg.rules[2].policy, "@导入来源/group/Main");
+        assert_eq!(cfg.rules[0].policy, "Main");
+        assert_eq!(cfg.rules[2].policy, "Main");
+        assert_eq!(cfg.groups[0].name, "Main");
+        assert_eq!(cfg.groups[0].options, ["@导入来源/HK", "DIRECT"]);
+        assert!(!cfg.providers[0].import_groups);
+        assert!(!imported.contains("@导入来源/group/"));
         assert!(imported.contains("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"));
         assert!(!imported.contains("FINAL,DIRECT"));
         assert!(BASE.contains("FINAL,DIRECT"));
@@ -133,6 +191,6 @@ mod tests {
     fn maps_domain_rule_providers_and_resolves_relative_sources() {
         let yaml = SOURCE.replace("  - MATCH,Main", "  - RULE-SET,Office,Main\n  - MATCH,Main\nrule-providers:\n  Office: {type: http, behavior: domain, url: ./office.list}");
         let imported = convert(&yaml, "https://example.test/profiles/config", BASE).unwrap();
-        assert!(imported.contains("DOMAIN-SET,https://example.test/profiles/office.list,@导入来源/group/Main"));
+        assert!(imported.contains("DOMAIN-SET,https://example.test/profiles/office.list,Main"));
     }
 }

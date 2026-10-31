@@ -19,27 +19,36 @@ struct IndependentProfileImportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SheetHeader(icon: "doc.badge.plus", title: "导入独立配置", detail: "创建一套单独的订阅、策略组和规则，当前运行方案保持不变")
+            SheetHeader(icon: "doc.badge.plus", title: "导入配置", detail: "导入节点、策略组和规则，生成一份新配置，当前配置保持不变")
             SheetField(label: "配置名称", prompt: "例如 工作、旅行", text: $name)
             HStack(alignment: .bottom) {
                 SheetField(label: "订阅或配置地址", prompt: "https://… 或 file://…", text: $source)
                 Button("选择文件…", action: chooseFile).glassButton()
             }
-            Text("Surge/Clash 导入节点、支持的策略组及规则，本机监听设置沿用当前配置。原生 Sluice 配置保留自己的设置。导入后需在策略页切换并启用。")
-                .font(DS.small).foregroundStyle(DS.ink2)
+            VStack(alignment: .leading, spacing: 6) {
+                importPoint("link", "节点作为订阅导入，随来源自动更新")
+                importPoint("square.stack.3d.up", "策略组和规则复制为你自己的，可以随意编辑")
+                importPoint("gearshape", "监听端口等本机设置沿用当前配置")
+            }
             if let prepared {
                 HStack(spacing: 20) {
                     Text("\(prepared.nodes) 个节点")
                     Text("\(prepared.groups) 个策略组")
                     Text("\(prepared.rules) 条规则")
                 }.font(DS.label).foregroundStyle(DS.accent)
-                Text("校验通过。订阅节点和组随来源更新，规则保存为可编辑快照。").font(DS.small).foregroundStyle(DS.ink2)
+                Text("检查通过，创建后可在配置列表中切换使用").font(DS.small).foregroundStyle(DS.ink2)
             }
             SheetFooter(error: error, primary: busy ? "处理中…" : prepared == nil ? "读取并检查" : "创建配置", enabled: !busy && !source.isEmpty && !name.isEmpty,
                         cancel: { dismiss() }, action: submit)
         }
         .padding(28).frame(width: 600).disabled(busy).interactiveDismissDisabled(busy)
         .onChange(of: source) { prepared = nil; error = nil }
+    }
+
+    private func importPoint(_ icon: String, _ text: String) -> some View {
+        Label { Text(text).font(DS.small).foregroundStyle(DS.ink2) } icon: {
+            Image(systemName: icon).foregroundStyle(DS.accent).frame(width: 16)
+        }
     }
 
     private func chooseFile() {

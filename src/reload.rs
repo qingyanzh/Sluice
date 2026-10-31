@@ -505,9 +505,9 @@ mod tests {
         core.switch_profile(&b).await.unwrap();
         assert_eq!(core.path(), b);
         let router = core.handle.current();
-        assert_eq!(router.resolve("@导入来源/group/节点选择").unwrap(), "@导入来源/HK");
+        assert_eq!(router.resolve("节点选择").unwrap(), "@导入来源/HK");
         let decision = router.decide(&crate::util::Target::parse_authority("mojie.example:443", 443).unwrap()).await.unwrap();
-        assert_eq!(decision.policy, "@导入来源/group/自动选择");
+        assert_eq!(decision.policy, "自动选择");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), imported);
         for (name, group) in [("dynamic", "Own = select, use=Airport"), ("pinned", "Own = select, @Airport/HK")] {
             let text = format!("[Subscription]\nAirport = policy-path=\"{source_url}\", import-groups=false\n[Proxy Group]\n{group}\n[Rule]\nFINAL,Own\n");
@@ -515,7 +515,7 @@ mod tests {
             core.switch_profile(&path).await.unwrap();
             assert_eq!(core.handle.current().resolve("Own").unwrap(), "@Airport/HK");
         }
-        let invalid = write(&dir, "invalid.conf", &imported.replace("@导入来源/group/自动选择", "@导入来源/group/Missing"));
+        let invalid = write(&dir, "invalid.conf", &imported.replace("mojie,自动选择", "mojie,Missing"));
         let previous_path = core.path();
         let previous = core.handle.current();
         assert!(core.switch_profile(&invalid).await.is_err());

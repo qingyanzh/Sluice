@@ -2260,6 +2260,8 @@ struct ConfigView: View {
         VStack(spacing: 0) {
             let name = URL(fileURLWithPath: core.configPath).lastPathComponent
             PaneHeader(title: "配置", subtitle: draft.text == draft.saved ? "\(name) · 已保存" : "\(name) · 有未保存的修改") {
+                Button("导入配置…") { importingProfile = true }.glassButton().disabled(draft.busy)
+                    .help("导入完整的 Surge 或 Clash 配置：节点、策略组和规则")
                 Button("新建配置…") { profileEdit = .create }.glassButton().disabled(draft.busy)
                     .help("复制当前配置为一份新配置，便于分场景切换")
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
