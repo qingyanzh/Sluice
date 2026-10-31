@@ -532,7 +532,7 @@ impl Config {
                     if name.is_empty() || name.contains(['|', ',', '=', '\r', '\n']) {
                         bail!("{}: invalid subscription name", ctx());
                     }
-                    let group = parse_group(&format!("{name} = select, import-groups=true, {params}")).with_context(ctx)?;
+                    let group = parse_group(&format!("{name} = select, {params}")).with_context(ctx)?;
                     let path = group.policy_path.ok_or_else(|| anyhow!("{}: subscription needs policy-path", ctx()))?;
                     if path.is_empty() || !group.options.is_empty() || !group.sources.is_empty() {
                         bail!("{}: subscription only accepts source parameters", ctx());

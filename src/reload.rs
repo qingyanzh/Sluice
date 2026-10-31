@@ -263,6 +263,14 @@ impl Reloader {
         self.reload_from(&path, reason).await
     }
 
+    /// Downloads every subscription now, ignoring cache age, and reloads.
+    pub async fn update_subscriptions(&self) -> Result<String> {
+        let _one_at_a_time = self.lock.lock().await;
+        let path = self.path();
+        subscription::REFRESH_NOW.store(true, std::sync::atomic::Ordering::Release);
+        self.reload_from(&path, "subscription update requested").await
+    }
+
     pub fn mark_ready(&self) { self.ready.store(true, std::sync::atomic::Ordering::Release); }
 
     pub fn ready(&self) -> bool { self.ready.load(std::sync::atomic::Ordering::Acquire) }
@@ -299,7 +307,9 @@ impl Reloader {
         save_selections(&router, path)?;
         activate(&router, &cfg);
         *self.handle.0.write().unwrap() = router;
-        *self.subscriptions.write().unwrap() = cfg.subscriptions.clone();
+        let mut subscriptions = cfg.subscriptions.clone();
+        subscription::mark_changes(&self.subscriptions.read().unwrap(), &mut subscriptions);
+        *self.subscriptions.write().unwrap() = subscriptions;
         *self.last.lock().unwrap() = Instant::now();
         *self.subscription_every.lock().unwrap() = subscription_interval(&cfg);
         let summary = format!("{} proxies, {} groups, {} rules", cfg.proxies.len(), cfg.groups.len(), cfg.rules.len());

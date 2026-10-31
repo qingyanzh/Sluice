@@ -14,7 +14,7 @@ struct NodeRecord: Identifiable {
     let section: String
     let reference: String
     let importsGroups: Bool
-    var displayName: String { subscriptionNodeLabel(reference) }
+    var displayName: String { subscriptionShortLabel(reference) }
     var canDelete: Bool { section != "Imported" }
 
     var copyableEndpoint: String? { isSubscription ? nil : endpoint }
@@ -65,7 +65,7 @@ struct NodeRecord: Identifiable {
     }
 
     func matches(_ query: String) -> Bool {
-        query.isEmpty || [name, displayName, kind, endpoint, transport].contains { $0.localizedCaseInsensitiveContains(query) }
+        query.isEmpty || [name, displayName, subscriptionNodeLabel(reference), kind, endpoint, transport].contains { $0.localizedCaseInsensitiveContains(query) }
     }
 }
 
@@ -83,19 +83,18 @@ struct NodesView: View {
 
     var body: some View {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let allRecords = records + core.catalogNodes.map(NodeRecord.init(subscription:))
-        let visible = allRecords.filter { $0.matches(query) && (category == 0 || $0.isSubscription == (category == 2)) }
+        let allRecords = records.filter { !$0.isSubscription } + core.catalogNodes.map(NodeRecord.init(subscription:))
+        let visible = allRecords.filter { $0.matches(query) && (category == 0 || (category == 1) == $0.canDelete) }
         VStack(spacing: 0) {
-            PaneHeader(title: "节点", subtitle: "\(allRecords.filter { !$0.isSubscription }.count) 个节点 · \(records.filter(\.isSubscription).count) 个订阅") {
+            PaneHeader(title: "节点", subtitle: "\(allRecords.count) 个节点") {
                 Button { refresh() } label: { Label("刷新列表", systemImage: "arrow.clockwise") }.labelStyle(.iconOnly)
-                Button { core.testNodes(allRecords.filter { !$0.isSubscription }.map(\.reference)) } label: {
+                Button { core.testNodes(allRecords.map(\.reference)) } label: {
                     Label(core.testingNodes.isEmpty ? "测试全部" : "测试中…", systemImage: "speedometer")
-                }.disabled(!core.canTestNodes || allRecords.allSatisfy(\.isSubscription) || !core.testingNodes.isEmpty || !core.testingGroups.isEmpty)
-                Button { showAddNode = true } label: { Label("添加节点", systemImage: "plus") }
-                Button { showAddSub = true } label: { Label("添加订阅", systemImage: "link.badge.plus") }.glassButton(prominent: true)
+                }.disabled(!core.canTestNodes || allRecords.isEmpty || !core.testingNodes.isEmpty || !core.testingGroups.isEmpty)
+                Button { showAddNode = true } label: { Label("添加节点", systemImage: "plus") }.glassButton(prominent: true)
             }
             HStack(spacing: 12) {
-                GlassSegmented(options: [(0, "全部", nil), (1, "节点", nil), (2, "订阅", nil)], selection: $category)
+                GlassSegmented(options: [(0, "全部", nil), (1, "手动添加", nil), (2, "来自订阅", nil)], selection: $category)
                     .frame(width: 220)
                 Spacer(minLength: 8)
                 Text("\(visible.count) 项").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink2)
@@ -137,16 +136,14 @@ struct NodesView: View {
             .overlay {
                 if !loaded && loadError == nil {
                     ProgressView("正在加载节点…").font(DS.small)
-                } else if loaded && records.isEmpty {
-                    EmptyState(icon: "globe.asia.australia", title: "尚未添加代理节点", detail: "添加订阅批量导入节点，或粘贴单个分享链接。",
+                } else if loaded && allRecords.isEmpty {
+                    EmptyState(icon: "globe.asia.australia", title: "尚未添加代理节点", detail: "添加订阅批量导入节点，或粘贴单个分享链接",
                                action: ("添加订阅", { showAddSub = true }), secondary: ("添加节点", { showAddNode = true }))
                 } else if visible.isEmpty {
-                    EmptyState(icon: "magnifyingglass", title: "没有匹配的节点", detail: "试试其他名称、协议或服务器地址。",
+                    EmptyState(icon: "magnifyingglass", title: "没有匹配的节点", detail: "试试其他名称、协议或服务器地址",
                                action: ("清除筛选", { search = ""; category = 0 }))
                 }
             }
-            Text("无需启动代理即可查看和测试节点 · 订阅节点随来源更新")
-                .font(DS.caption).foregroundStyle(DS.ink3).padding(12)
         }
         .sheet(isPresented: $showAddNode, onDismiss: refresh) { AddNodeSheet() }
         .sheet(isPresented: $showAddSub, onDismiss: refresh) { AddSubscriptionSheet() }
@@ -202,7 +199,7 @@ struct NodeBrowserRow: View {
             IconTile(symbol: node.isSubscription ? "link" : "server.rack", size: 28)
             VStack(alignment: .leading, spacing: 3) {
                 Text(node.displayName).font(DS.label.weight(.medium)).foregroundStyle(Color.primary).lineLimit(1)
-                Text(node.endpoint).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
+                Text(node.canDelete ? node.endpoint : "\(node.transport) · \(node.endpoint)").font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 8)
             // Protocol and latency sit in fixed columns so badges line up down the list.
@@ -230,7 +227,6 @@ struct NodeDetailSheet: View {
     @State private var confirmDelete = false
     @State private var working = false
     @State private var error: String?
-    @State private var requestedImportGroups: Bool?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -242,15 +238,6 @@ struct NodeDetailSheet: View {
                 if node.isSubscription {
                     row("名称过滤", node.filter)
                     row("更新间隔", node.interval)
-                    Toggle("导入订阅自带的策略组", isOn: Binding(get: { requestedImportGroups ?? node.importsGroups }, set: { on in
-                        requestedImportGroups = on; working = true
-                        Task {
-                            let text = core.readConfig()
-                            error = await core.saveConfig(ConfigText.setImportGroups(on, source: node.name, section: node.section, in: text), expected: text)
-                            working = false
-                            if error == nil { changed() } else { requestedImportGroups = nil }
-                        }
-                    })).disabled(working)
                 } else {
                     row(node.canDelete ? "传输方式" : "来源", node.transport)
                     HStack {
@@ -270,7 +257,7 @@ struct NodeDetailSheet: View {
                 }
             }
             .padding(DS.cardPadding).glass()
-            Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : node.canDelete ? "连接参数可在配置页编辑，节点切换请前往策略页。" : "此节点由订阅管理，参数随订阅更新。无需启动代理服务即可测速。")
+            Text(node.canDelete ? "连接参数可在配置页编辑，切换节点请前往策略页" : "此节点由订阅「\(node.transport)」管理，随订阅自动更新")
                 .font(DS.small).foregroundStyle(DS.ink2)
             if let error { Text(error).font(DS.small).foregroundStyle(DS.fail).textSelection(.enabled) }
             HStack {
@@ -309,7 +296,7 @@ struct NodeDetailSheet: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("会同时从所有策略组中移除它，并立即保存配置。")
+            Text("会同时从所有策略组中移除它，并立即保存配置")
         }
     }
 

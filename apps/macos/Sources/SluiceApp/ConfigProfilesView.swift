@@ -120,7 +120,7 @@ struct ProfileNameSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SheetHeader(icon: "doc.text", title: action.title,
-                        detail: "配置保存在本地 profiles 文件夹中，文件扩展名 .conf 会自动添加。")
+                        detail: "配置保存在本地 profiles 文件夹中，文件扩展名 .conf 会自动添加")
             SheetField(label: "配置名称", prompt: "例如 工作、家庭", text: $name)
                 .focused($focused).disabled(busy)
                 .onSubmit(save)

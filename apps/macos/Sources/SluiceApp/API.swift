@@ -15,6 +15,42 @@ struct SubscriptionCatalog: Decodable {
     let nodes: [SubscriptionNode]
     let groups: [PolicyGroup]
     var warnings: [String]? = nil
+    var subscriptions: [SubscriptionStatus]? = nil
+}
+
+/// One subscription source as the core last fetched it. Times are Unix seconds.
+struct SubscriptionStatus: Decodable, Identifiable, Hashable {
+    struct Change: Decodable, Hashable {
+        let at: UInt64
+        let added: [String]
+        let removed: [String]
+    }
+    let group: String
+    let url: String
+    var upload: UInt64? = nil
+    var download: UInt64? = nil
+    var total: UInt64? = nil
+    var expire: UInt64? = nil
+    var lastFetch: UInt64? = nil
+    var lastError: String? = nil
+    var nodeCount: Int = 0
+    var change: Change? = nil
+
+    var id: String { group }
+    var used: UInt64? { upload.map { $0 + (download ?? 0) } ?? download }
+    /// 0…1 of the plan used, when the provider reports a total.
+    var usedFraction: Double? {
+        guard let total, total > 0, let used else { return nil }
+        return min(1, Double(used) / Double(total))
+    }
+    var expiryDate: Date? { expire.flatMap { $0 > 0 ? Date(timeIntervalSince1970: TimeInterval($0)) : nil } }
+    var lastFetchDate: Date? { lastFetch.map { Date(timeIntervalSince1970: TimeInterval($0)) } }
+    var host: String { URL(string: url)?.host ?? "本地文件" }
+
+    enum CodingKeys: String, CodingKey {
+        case group, url, upload, download, total, expire, change
+        case lastFetch = "last_fetch", lastError = "last_error", nodeCount = "node_count"
+    }
 }
 
 func subscriptionNodeLabel(_ reference: String) -> String {
@@ -25,6 +61,15 @@ func subscriptionNodeLabel(_ reference: String) -> String {
     let name = (isGroup ? String(suffix.dropFirst(6)) : suffix).removingPercentEncoding
     guard let source, let name else { return reference }
     return "\(source) / \(name)\(isGroup ? " · 策略组" : "")"
+}
+
+/// The name alone, without its source: "香港 01" for "@Airport/香港 01".
+/// The full label belongs in help text and source badges.
+func subscriptionShortLabel(_ reference: String) -> String {
+    guard reference.hasPrefix("@"), let slash = reference.firstIndex(of: "/") else { return reference }
+    let suffix = String(reference[reference.index(after: slash)...])
+    let name = suffix.hasPrefix("group/") ? String(suffix.dropFirst(6)) : suffix
+    return name.removingPercentEncoding ?? name
 }
 
 func subscriptionNodeReference(source: String, name: String) -> String {
@@ -252,6 +297,14 @@ struct APIClient {
 
     func reload() async throws {
         _ = try await request("POST", "/v1/reload")
+    }
+
+    func subscriptions() async throws -> [SubscriptionStatus] {
+        try JSONDecoder().decode([SubscriptionStatus].self, from: await request("GET", "/v1/subscriptions"))
+    }
+
+    func updateSubscriptions() async throws {
+        _ = try await request("POST", "/v1/subscriptions/update", timeout: 120)
     }
 
     func exportDiagnostics(to output: URL) async throws -> URL {

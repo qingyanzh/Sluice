@@ -230,7 +230,8 @@ async fn run() -> Result<()> {
             let result = ruleset::fetch(source, parent, std::time::Duration::ZERO, None).await?;
             print!("{}", profile_import::convert(&result.text, source, &base_text)?);
         }
-        ["catalog", path] => {
+        ["catalog", path, rest @ ..] if rest.is_empty() || rest == ["--refresh"] => {
+            if rest == ["--refresh"] { subscription::REFRESH_NOW.store(true, std::sync::atomic::Ordering::Release); }
             let mut cfg = config::Config::parse(&std::fs::read_to_string(path)?)?;
             let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
             subscription::expand(&mut cfg, base, false).await?;
@@ -242,7 +243,7 @@ async fn run() -> Result<()> {
             })).collect();
             let warnings: Vec<_> = cfg.subscriptions.iter().filter_map(|s| s.last_error.as_ref()
                 .map(|error| diag::redact(&format!("{}: {error}", s.group)))).collect();
-            println!("{}", serde_json::json!({"nodes":cfg.subscription_nodes, "groups":groups,"warnings":warnings}));
+            println!("{}", serde_json::json!({"nodes":cfg.subscription_nodes, "groups":groups,"warnings":warnings,"subscriptions":cfg.subscriptions}));
         }
         ["probe-group", path, group] => {
             let (_, router) = build(read_config(path)?, path, false).await?;

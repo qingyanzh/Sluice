@@ -21,7 +21,7 @@ final class SubscriptionGroupsTests: XCTestCase {
         let item = try JSONDecoder().decode(SubscriptionNode.self, from: Data(json.utf8))
         let node = NodeRecord(subscription: item)
         XCTAssertEqual(node.reference, "@A/HK%2001")
-        XCTAssertEqual(node.displayName, "A / HK 01")
+        XCTAssertEqual(node.displayName, "HK 01")
         XCTAssertEqual(node.endpoint, "[::1]:443")
         XCTAssertEqual(node.kind, "TROJAN")
         XCTAssertFalse(node.canDelete)

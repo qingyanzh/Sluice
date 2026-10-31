@@ -19,7 +19,7 @@ struct IndependentProfileImportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SheetHeader(icon: "doc.badge.plus", title: "导入独立配置", detail: "创建一套单独的订阅、策略组和规则，当前运行方案保持不变。")
+            SheetHeader(icon: "doc.badge.plus", title: "导入独立配置", detail: "创建一套单独的订阅、策略组和规则，当前运行方案保持不变")
             SheetField(label: "配置名称", prompt: "例如 工作、旅行", text: $name)
             HStack(alignment: .bottom) {
                 SheetField(label: "订阅或配置地址", prompt: "https://… 或 file://…", text: $source)

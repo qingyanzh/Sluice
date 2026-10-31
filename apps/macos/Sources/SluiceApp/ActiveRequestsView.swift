@@ -53,7 +53,7 @@ struct ActiveRequestsView: View {
                             if rows.isEmpty {
                                 if core.state != .running {
                                     EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                               detail: "启动后可查看活动 TCP 连接。", action: ("启动 Sluice", { core.requestStart() }))
+                                               detail: "启动后可查看活动 TCP 连接", action: ("启动 Sluice", { core.requestStart() }))
                                 } else if !core.activeConnectionsLoaded {
                                     if let error = core.activeConnectionsError {
                                         EmptyState(icon: "exclamationmark.triangle", title: "无法读取活动连接", detail: error)
@@ -61,10 +61,10 @@ struct ActiveRequestsView: View {
                                         ProgressView("正在加载活动连接…").font(DS.small)
                                     }
                                 } else if !filter.isEmpty || kind != .all {
-                                    EmptyState(icon: "magnifyingglass", title: "没有匹配的活动连接", detail: "清除筛选查看全部连接。",
+                                    EmptyState(icon: "magnifyingglass", title: "没有匹配的活动连接", detail: "清除筛选查看全部连接",
                                                action: ("清除筛选", { filter = ""; kind = .all }))
                                 } else {
-                                    EmptyState(icon: "arrow.up.arrow.down", title: "没有活动连接", detail: "连接建立后会显示在这里；UDP 不在此列表中。")
+                                    EmptyState(icon: "arrow.up.arrow.down", title: "没有活动连接", detail: "连接建立后会显示在这里；UDP 不在此列表中")
                                 }
                             }
                         }
@@ -87,7 +87,7 @@ struct ActiveRequestsView: View {
             Button("全部断开", role: .destructive) { core.closeAllConnections() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("所有当前打开的 TCP 连接都会断开，正在传输的请求可能中断。")
+            Text("所有当前打开的 TCP 连接都会断开，正在传输的请求可能中断")
         }
         .onAppear { core.observeActiveConnections(true) }
         .onDisappear { core.observeActiveConnections(false) }

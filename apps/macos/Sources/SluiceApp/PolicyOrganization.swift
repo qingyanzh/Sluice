@@ -36,12 +36,12 @@ struct PolicyOrganization {
     /// - `@Source/Name`: imported from an independent `[Subscription]` source;
     /// - a group with `policy-path`: a legacy group that is its own source.
     func source(of name: String) -> String? {
-        if let imported = importedSource(of: name) { return imported }
+        if let imported = Self.importedSource(of: name) { return imported }
         let legacy = document.groups.first { $0.value.name == name && $0.value.parameter("policy-path") != nil }
         return legacy?.value.name
     }
 
-    private func importedSource(of name: String) -> String? {
+    static func importedSource(of name: String) -> String? {
         guard name.hasPrefix("@"), let slash = name.firstIndex(of: "/") else { return nil }
         return String(name[name.index(after: name.startIndex)..<slash]).removingPercentEncoding
     }

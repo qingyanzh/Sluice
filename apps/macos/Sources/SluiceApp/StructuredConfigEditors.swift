@@ -30,7 +30,7 @@ struct StructuredConfigEditors: View {
                 Button { move(1) } label: { Image(systemName: "arrow.down") }
                     .help("下移").disabled(selectedIndex == nil || selectedIndex == ids.count - 1)
             }.glassButton()
-            Text("修改会同步到文本草稿；完成后点击下方的保存按钮。")
+            Text("修改会同步到文本草稿；完成后点击下方的保存按钮")
                 .font(DS.small).foregroundStyle(DS.ink2)
             if document.unparsedCount(in: section) > 0 {
                 Label("部分行无法显示为表格，已保留原文。请在文本中编辑。", systemImage: "info.circle")
@@ -69,7 +69,7 @@ struct StructuredConfigEditors: View {
     private var ruleTable: some View {
         editorTable(headers: ["类型", "值", "策略", "选项"], weights: [0.30, 0.32, 0.20, 0.18],
                     rows: document.rules.map { ($0.id, [$0.value.type, $0.value.value, $0.value.policy, $0.value.options]) })
-            .overlay { if document.rules.isEmpty { empty("还没有规则", detail: "添加规则后，流量将按从上到下的顺序匹配。") } }
+            .overlay { if document.rules.isEmpty { empty("还没有规则", detail: "添加规则后，流量将按从上到下的顺序匹配") } }
     }
 
     private var groupTable: some View {
@@ -89,7 +89,7 @@ struct StructuredConfigEditors: View {
                         if !group.interval.isEmpty { detail += "\n每 " + group.interval + " 秒测试" }
                         return (item.id, [group.name, group.type, detail])
                     })
-            .overlay { if document.groups.isEmpty { empty("还没有策略组", detail: "添加策略组，将节点组合为手动或自动策略。") } }
+            .overlay { if document.groups.isEmpty { empty("还没有策略组", detail: "添加策略组，将节点组合为手动或自动策略") } }
     }
 
     /// Proportional columns and variable-height rows keep all fields readable in
@@ -225,179 +225,6 @@ struct RuleConfigSheet: View {
     }
 }
 
-struct GroupConfigSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @State var group: StructuredConfig.Group
-    let isNew: Bool
-    let policies: [String]
-    var sourceNames: [String] = []
-    var loadCatalog: (() async throws -> SubscriptionCatalog)? = nil
-    var usage: Binding<PolicyGroupUse>? = nil
-    var submitTitle: String? = nil
-    var save: ((StructuredConfig.Group) async -> String?)? = nil
-    let apply: (StructuredConfig.Group) -> String?
-    @State private var error: String?
-    @State private var nodes: [SubscriptionNode] = []
-    @State private var importedGroups: [PolicyGroup] = []
-    @State private var loadingNodes = false
-    @State private var catalogLoaded = false
-    @State private var nodesError: String?
-    @State private var saving = false
-    var title: String { isNew ? "添加策略组" : "编辑策略组" }
-    private var candidates: [String] { (policies + importedGroups.map(\.group)).filter { $0 != group.name && !group.members.contains($0) } }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text(title).font(DS.title)
-            Form {
-                TextField("名称", text: $group.name)
-                Picker("类型", selection: $group.type) {
-                    ForEach(choices(StructuredConfig.Group.types, including: group.type), id: \.self) { Text($0).tag($0) }
-                }
-                if group.isAutomatic {
-                    TextField("测试 URL", text: $group.url, prompt: Text("http://www.gstatic.com/generate_204").foregroundStyle(DS.ink3))
-                    TextField("间隔（秒）", text: $group.interval, prompt: Text("600").foregroundStyle(DS.ink3))
-                }
-            }.textFieldStyle(.roundedBorder)
-            if let usage {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("保存后用途", selection: usage.mode) {
-                        ForEach(PolicyGroupUse.Mode.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    if usage.wrappedValue.mode == .rule {
-                        HStack {
-                            Picker("规则类型", selection: usage.ruleType) {
-                                Text("域名及子域名").tag("DOMAIN-SUFFIX")
-                                Text("精确域名").tag("DOMAIN")
-                                Text("进程名称").tag("PROCESS-NAME")
-                            }
-                            TextField(usage.wrappedValue.ruleType == "PROCESS-NAME" ? "例如 Safari" : "例如 example.com", text: usage.value)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                    }
-                }
-            }
-            if !sourceNames.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("订阅来源").font(DS.heading)
-                    Text("勾选后动态包含该订阅的全部节点；多个订阅会合并，自动组逐个测试节点。")
-                        .font(DS.small).foregroundStyle(DS.ink2)
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(sourceNames, id: \.self) { source in
-                                Toggle(source, isOn: Binding(get: { group.sources.contains(source) }, set: { included in
-                                    if included { group.sources.append(source) } else { group.sources.removeAll { $0 == source } }
-                                }))
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }.frame(maxHeight: 88)
-                    HStack(spacing: 10) {
-                        Text("名称过滤").font(DS.small).foregroundStyle(DS.ink2)
-                        TextField("正则表达式，可选", text: $group.nodeFilter)
-                            .textFieldStyle(.roundedBorder).disabled(group.sources.isEmpty)
-                    }
-                }
-            }
-            HStack {
-                Text("指定成员（按优先顺序）").font(DS.heading)
-                Spacer()
-                Menu("添加成员") {
-                    ForEach(candidates, id: \.self) { member in Button(subscriptionNodeLabel(member)) { group.members.append(member) } }
-                    if !sourceNames.isEmpty { Divider() }
-                    ForEach(sourceNames, id: \.self) { source in
-                        Menu("\(source) 的节点") {
-                            let available = nodes.filter { $0.source == source }
-                            if available.isEmpty { Text(loadingNodes ? "正在加载…" : "没有可用节点") }
-                            ForEach(available) { node in
-                                Button(node.name) { group.members.append(node.id) }.disabled(group.members.contains(node.id))
-                            }
-                        }
-                    }
-                }.disabled(candidates.isEmpty && sourceNames.isEmpty)
-            }
-            if loadingNodes { ProgressView("正在读取订阅节点…").font(DS.small) }
-            if let nodesError {
-                HStack {
-                    Text(nodesError).font(DS.small).foregroundStyle(DS.warn).lineLimit(3)
-                    Button("重试") { Task { await refreshNodes() } }
-                }
-            }
-            ScrollView {
-                VStack(spacing: 8) {
-                    if group.members.isEmpty {
-                        Text("可勾选上方订阅动态导入，或从「添加成员」挑选单个节点。")
-                            .font(DS.small).foregroundStyle(DS.ink2).padding(.vertical, 12)
-                    }
-                    ForEach(Array(group.members.enumerated()), id: \.offset) { index, member in
-                        HStack {
-                            Text(subscriptionNodeLabel(member)).lineLimit(1).truncationMode(.middle).help(subscriptionNodeLabel(member))
-                            Spacer()
-                            if catalogLoaded && member.hasPrefix("@") && !nodes.contains(where: { $0.id == member }) && !importedGroups.contains(where: { $0.group == member }) {
-                                Text("节点不可用").font(DS.caption).foregroundStyle(DS.warn)
-                                    .help("订阅更新后已找不到这个节点，运行时会跳过此成员。")
-                            }
-                            Button { group.members.swapAt(index, index - 1) } label: { Image(systemName: "arrow.up") }
-                                .disabled(index == 0).help("上移成员")
-                            Button { group.members.swapAt(index, index + 1) } label: { Image(systemName: "arrow.down") }
-                                .disabled(index + 1 == group.members.count).help("下移成员")
-                            Button { group.members.remove(at: index) } label: { Image(systemName: "minus") }.help("移除成员")
-                        }.padding(.vertical, 4)
-                    }
-                }
-            }.frame(height: min(160, max(76, CGFloat(group.members.count) * 44)))
-            if let error { Text(error).font(DS.small).foregroundStyle(DS.fail) }
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(saving ? "正在保存…" : submitTitle ?? "更新草稿") { submit() }.keyboardShortcut(.defaultAction).glassButton(prominent: true)
-            }
-        }
-        .font(DS.label).glassButton().padding(28).frame(width: 580)
-        .disabled(saving).interactiveDismissDisabled(saving)
-        .onChange(of: group) { error = nil }
-        .task { await refreshNodes() }
-    }
-
-    private func refreshNodes() async {
-        guard let loadCatalog, !sourceNames.isEmpty, !loadingNodes else { return }
-        loadingNodes = true
-        defer { loadingNodes = false }
-        do {
-            let catalog = try await loadCatalog()
-            nodes = catalog.nodes; importedGroups = catalog.groups.filter { $0.group.hasPrefix("@") }
-            catalogLoaded = true
-            nodesError = catalog.warnings.flatMap { $0.isEmpty ? nil : $0.joined(separator: "\n") }
-        }
-        catch { nodesError = error.localizedDescription }
-    }
-
-    private func submit() {
-        var group = group
-        group.name = StructuredConfig.trim(group.name)
-        guard !group.name.isEmpty, !group.name.contains(where: { ",=\r\n".contains($0) }),
-              !["#", ";", "//", "["].contains(where: group.name.hasPrefix),
-              !group.serialised.contains("\r"), !group.serialised.contains("\n"),
-              !group.url.contains(","), !group.members.contains(group.name),
-              StructuredConfig.Group(line: group.serialised) == group,
-              !group.members.isEmpty || !group.sources.isEmpty || group.parameter("policy-path") != nil
-        else { error = "请填写有效名称，并添加至少一个成员或保留订阅参数。"; return }
-        if !group.interval.isEmpty, UInt64(group.interval) == nil {
-            error = "间隔需要填写非负整数秒。"; return
-        }
-        if !group.nodeFilter.isEmpty, (try? NSRegularExpression(pattern: group.nodeFilter)) == nil {
-            error = "节点名称过滤不是有效的正则表达式。"; return
-        }
-        if let save {
-            saving = true
-            Task {
-                let failure = await save(group)
-                saving = false
-                if let failure { error = failure } else { dismiss() }
-            }
-        } else if let failure = apply(group) { error = failure } else { dismiss() }
-    }
-}
-
 private func choices(_ values: [String], including value: String) -> [String] {
     values.contains(value) ? values : [value] + values
 }
@@ -432,9 +259,9 @@ struct SubscriptionsEditor: View {
                 Spacer()
                 Text("添加订阅请在节点页操作").font(DS.small).foregroundStyle(DS.ink3)
             }
-            Text("删除会同步到文本草稿；完成后点击下方的保存按钮。").font(DS.small).foregroundStyle(DS.ink2)
+            Text("删除会同步到文本草稿；完成后点击下方的保存按钮").font(DS.small).foregroundStyle(DS.ink2)
             if subscriptions.isEmpty {
-                EmptyState(icon: "link", title: "还没有订阅", detail: "在节点页添加订阅，再到策略组中勾选需要的来源。")
+                EmptyState(icon: "link", title: "还没有订阅", detail: "在节点页添加订阅，再到策略组中勾选需要的来源")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -455,7 +282,7 @@ struct SubscriptionsEditor: View {
             }
             Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("订阅及其节点引用会从草稿中移除；没有剩余成员的策略组会拒绝连接。")
+            Text("订阅及其节点引用会从草稿中移除；没有剩余成员的策略组会拒绝连接")
         }
     }
 

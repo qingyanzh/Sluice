@@ -1,6 +1,7 @@
 //! Minimal control API.
 //!
-//!   GET  /v1/subscriptions                  subscription usage, expiry and fetch status
+//!   GET  /v1/subscriptions                  subscription usage, expiry, fetch status and last node change
+//!   POST /v1/subscriptions/update           download every subscription now and reload
 //!   GET  /v1/policies                       groups, current selection and options
 //!   POST /v1/policies/<group>?select=<opt>  switch a select group
 //!   POST /v1/policies/<group>/test          run an automatic group's health check now
@@ -191,6 +192,10 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
             })
             .to_string(),
         ),
+        ("POST", "/v1/subscriptions/update") => match reloader.update_subscriptions().await {
+            Ok(summary) => ("200 OK", serde_json::json!({ "ok": true, "summary": summary }).to_string()),
+            Err(e) => ("400 Bad Request", serde_json::json!({ "error": format!("{e:#}") }).to_string()),
+        },
         ("GET", "/v1/subscriptions") => {
             ("200 OK", serde_json::to_string(&*reloader.subscriptions.read().unwrap())?)
         }
@@ -499,7 +504,7 @@ mod tests {
             subscriptions: vec![crate::subscription::SubscriptionInfo {
                 group: "Airport".into(), url: "http://127.0.0.1/sub".into(),
                 metadata: crate::ruleset::FetchMetadata { upload: Some(10), download: Some(20), total: Some(100), expire: Some(1800000000), update_interval_hours: Some(6), last_fetch: Some(1700000000) },
-                last_error: Some("HTTP 403: 禁止访问".into()), node_count: 2, notices: vec![],
+                last_error: Some("HTTP 403: 禁止访问".into()), node_count: 2, notices: vec![], nodes: vec![], change: None,
             }], ..crate::config::Config::parse("[Rule]\nFINAL,DIRECT\n").unwrap()
         };
         let reloader = Reloader::start(crate::router::Router::new(&cfg).unwrap(), &cfg, "unused.conf");
@@ -519,7 +524,7 @@ mod tests {
             assert!(raw.starts_with("HTTP/1.1 200 OK"));
             let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
             if path == "/v1/subscriptions" {
-                assert_eq!(body, serde_json::json!([{"group":"Airport", "url":"http://127.0.0.1/sub", "upload":10, "download":20, "total":100, "expire":1800000000, "update_interval_hours":6, "last_fetch":1700000000, "last_error":"HTTP 403: 禁止访问", "node_count":2, "notices":[]}]));
+                assert_eq!(body, serde_json::json!([{"group":"Airport", "url":"http://127.0.0.1/sub", "upload":10, "download":20, "total":100, "expire":1800000000, "update_interval_hours":6, "last_fetch":1700000000, "last_error":"HTTP 403: 禁止访问", "node_count":2, "notices":[], "change":null}]));
             } else { assert_eq!(body, serde_json::json!([])); }
         }
     }

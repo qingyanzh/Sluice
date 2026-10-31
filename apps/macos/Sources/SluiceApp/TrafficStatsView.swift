@@ -53,19 +53,19 @@ struct TrafficStatsView: View {
                 }
                 if core.state != .running {
                     EmptyState(icon: "chart.xyaxis.line", title: core.state == .starting ? "Sluice 启动中" : "Sluice 未运行",
-                               detail: "内核运行后可查看策略速率和累计流量。",
+                               detail: "内核运行后可查看策略速率和累计流量",
                                action: core.isActive ? nil : ("启动 Sluice", { core.requestStart() }))
                         .frame(height: 180)
                 } else {
                     if core.statsFallback {
-                        Text("当前内核不支持策略统计，仅显示应用运行期间采集的总体流量；历史只保存在内存中。")
+                        Text("当前内核不支持策略统计，仅显示应用运行期间采集的总体流量；历史只保存在内存中")
                             .font(DS.small).foregroundStyle(DS.ink2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let error = core.statsError {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(error).foregroundStyle(DS.fail)
-                            Text("每 5 秒自动重试；已有数据保留至下次刷新成功。")
+                            Text("每 5 秒自动重试；已有数据保留至下次刷新成功")
                                 .foregroundStyle(DS.ink2)
                         }.font(DS.small)
                     }

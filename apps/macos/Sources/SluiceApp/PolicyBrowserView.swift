@@ -23,163 +23,132 @@ struct PolicyView: View {
     @ObservedObject var draft: ConfigDraft
     @State private var filter = ""
     @State private var text = ""
-    @State private var expanded: [String: Bool] = [:]
+    @State private var showUnused = false
     @State private var editing: PolicyEditRequest?
     @State private var reference: PolicyReferenceRequest?
-    @State private var pendingSwitch: String?
-    @State private var switching = false
-    @State private var importing = false
 
     private var organization: PolicyOrganization {
         PolicyOrganization(document: StructuredConfig(text), groups: core.policyGroups, nodes: core.catalogNodes)
     }
     private var activeName: String { core.activeProfileName ?? URL(fileURLWithPath: core.configPath).deletingPathExtension().lastPathComponent }
-    private var profileNames: [String] { [activeName] + core.profileNames.filter { $0 != activeName } }
 
     var body: some View {
+        let organization = organization
+        let groups = visibleGroups(organization)
+        let used = groups.filter { organization.usage(of: $0.group) != "未引用" }
+        let unused = groups.filter { organization.usage(of: $0.group) == "未引用" }
         ScrollView {
             VStack(alignment: .leading, spacing: DS.gap) {
-                modeControls
-                executionCard
-                if let error = core.catalogError { Text(error).font(DS.small).foregroundStyle(DS.warn) }
-                HStack {
-                    Text("配置与策略组").font(DS.heading)
-                    Spacer()
-                    Button("导入独立配置", systemImage: "square.and.arrow.down") { importing = true }.glassButton().disabled(!core.canChangeProfile)
-                    Button("新建组", systemImage: "plus") { edit(nil) }.glassButton()
-                        .disabled(!core.canChangeProfile || switching)
-                    TestAllLatencyButton().controlSize(.small).help("测试当前配置的所有策略组，不含其他配置")
-                }
-                ForEach(profileNames, id: \.self) { name in
-                    profile(name)
+                executionCard(organization)
+                if let error = core.catalogError { ErrorText(raw: error) }
+                if core.loadingCatalog && core.policyGroups.isEmpty {
+                    ProgressView("正在读取策略组…").font(DS.small).frame(maxWidth: .infinity).padding(.vertical, 40)
+                } else if groups.isEmpty {
+                    EmptyState(icon: "square.stack", title: filter.isEmpty ? "还没有策略组" : "没有匹配的策略组",
+                               detail: filter.isEmpty ? "新建策略组，从任意订阅挑选节点" : "清除搜索后查看全部策略组",
+                               action: filter.isEmpty ? ("新建策略组", { edit(nil) }) : ("清除搜索", { filter = "" }))
+                        .padding(.vertical, 40)
+                } else {
+                    groupList(used, organization: organization)
+                    if !unused.isEmpty {
+                        Button { withAnimation(DS.spring) { showUnused.toggle() } } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "chevron.right").rotationEffect(.degrees(showUnused || !filter.isEmpty ? 90 : 0))
+                                Text("未被规则引用的组").font(DS.label.weight(.semibold))
+                                Text("\(unused.count)").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
+                                Spacer()
+                            }.contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).foregroundStyle(DS.ink2).padding(.top, 4)
+                        if showUnused || !filter.isEmpty {
+                            groupList(unused, organization: organization).transition(.opacity)
+                        }
+                    }
                 }
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
         }
         .paneHeader {
-            PaneHeader(title: "策略", subtitle: "按配置管理 · 规则决定执行入口") {
-                SearchField(prompt: "搜索当前配置的策略或节点", text: $filter)
+            PaneHeader(title: "策略", subtitle: "\(activeName) · \(core.policyGroups.count) 个策略组") {
+                SearchField(prompt: "搜索策略组或节点", text: $filter).frame(width: 200)
+                TestAllLatencyButton().help("测试当前配置的所有策略组")
+                Button { edit(nil) } label: { Label("新建策略组", systemImage: "plus") }
+                    .glassButton(prominent: true).disabled(!core.canChangeProfile)
             }
         }
-        .onAppear {
-            if let values = core.preferences.dictionary(forKey: "policy.expansions.v1") as? [String: Bool] { expanded = values }
-            refreshText(); core.refreshProfiles()
-        }
+        .onAppear(perform: refreshText)
         .task(id: "\(core.configPath)|\(core.state == .running)") {
             refreshText()
             if core.state != .running { await core.loadNodeCatalog() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refreshText(); core.refreshProfiles() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refreshText() }
         .onChange(of: core.reloading) { _, busy in if !busy { refreshText() } }
-        .sheet(isPresented: $importing) { IndependentProfileImportSheet() }
         .sheet(item: $editing, onDismiss: refreshText) { request in
             PolicyGroupSaveSheet(request: request)
         }
         .sheet(item: $reference, onDismiss: refreshText) { request in
             PolicyReferencesSheet(request: request)
         }
-        .confirmationDialog("切换配置会放弃当前未保存的修改", isPresented: Binding(get: { pendingSwitch != nil }, set: { if !$0 { pendingSwitch = nil } })) {
-            if let name = pendingSwitch {
-                Button("放弃修改并切换到「\(name)」", role: .destructive) { switchProfile(name) }
-                Button("复制草稿并切换到「\(name)」") { switchProfile(name, copyDraft: true) }
-            }
-            Button("取消", role: .cancel) { pendingSwitch = nil }
-        } message: { Text("复制草稿会覆盖目标配置，原配置文件保持不变。") }
     }
 
-    private var modeControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            GlassSegmented(options: OutboundMode.allCases.map { ($0, $0.title, $0.icon) },
-                           selection: Binding(get: { OutboundMode(rawValue: core.mode) ?? .rule }, set: { core.setMode($0.rawValue) }))
-                .disabled(core.state != .running)
-            Text((OutboundMode(rawValue: core.mode) ?? .rule).explanation).font(DS.small).foregroundStyle(DS.ink2)
+    private func visibleGroups(_ organization: PolicyOrganization) -> [PolicyGroup] {
+        let query = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        return core.policyGroups.filter { group in
+            query.isEmpty || subscriptionNodeLabel(group.group).localizedCaseInsensitiveContains(query)
+                || group.options.contains { subscriptionNodeLabel($0.name).localizedCaseInsensitiveContains(query) }
         }
     }
 
-    private var executionCard: some View {
+    private func groupList(_ groups: [PolicyGroup], organization: PolicyOrganization) -> some View {
+        VStack(spacing: DS.gap) {
+            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                let owned = organization.source(of: group.group) == nil
+                GroupSection(group: group, filter: filter, interactive: true, usage: organization.usage(of: group.group),
+                             onEdit: owned ? { edit(group) } : nil,
+                             onCopy: owned ? nil : { copy(group) },
+                             onDefault: organization.defaultPolicy != group.group ? { makeDefault(group) } : nil,
+                             onRule: { references(group, link: true) }, onReferences: { references(group, link: false) })
+                    .modifier(Entrance(index: index))
+            }
+        }
+    }
+
+    private var modeControls: some View {
+        GlassSegmented(options: OutboundMode.allCases.map { ($0, $0.title, $0.icon) },
+                       selection: Binding(get: { OutboundMode(rawValue: core.mode) ?? .rule }, set: { core.setMode($0.rawValue) }))
+            .disabled(core.state != .running)
+            .frame(maxWidth: 360)
+    }
+
+    private func executionCard(_ organization: PolicyOrganization) -> some View {
         let root = organization.defaultPolicy ?? "DIRECT"
         let direct = core.state == .running && core.mode == "direct"
         let path = direct ? ["DIRECT"] : organization.chain(from: root)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label(core.state == .running ? "当前配置 · \(activeName)" : "配置预览 · \(activeName)", systemImage: "arrow.triangle.branch")
-                    .font(DS.heading)
-                Spacer()
-                StatusBadge(text: direct ? "直接连接" : "默认出口", tone: DS.accent)
+        let mode = OutboundMode(rawValue: core.mode) ?? .rule
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Text("出站").font(DS.heading)
+                Spacer(minLength: 12)
+                modeControls
             }
-            Text(path.map(subscriptionNodeLabel).joined(separator: " → "))
-                .font(DS.label.weight(.medium)).foregroundStyle(DS.accent)
-                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-            Text(direct ? "直接连接模式跳过策略组。" : core.mode == "global" && core.state == .running
-                 ? "全局代理使用 FINAL 的入口；折叠与展开只影响展示。"
-                 : "专用规则优先匹配；未命中时使用此默认出口。导入组需要被引用才会承担流量。")
+            HStack(spacing: 6) {
+                ForEach(Array(path.enumerated()), id: \.offset) { index, step in
+                    if index > 0 { Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(DS.ink3) }
+                    Text(subscriptionShortLabel(step))
+                        .font(DS.label.weight(index == path.count - 1 ? .semibold : .regular))
+                        .foregroundStyle(index == path.count - 1 ? DS.accent : .primary)
+                        .lineLimit(1).truncationMode(.middle)
+                        .padding(.horizontal, 10).frame(height: 26)
+                        .background((index == path.count - 1 ? DS.accent : Color.primary).opacity(index == path.count - 1 ? 0.12 : 0.05), in: Capsule())
+                }
+                Spacer(minLength: 0)
+            }
+            .animation(DS.spring, value: path)
+            Text(core.state != .running ? "内核未启动，可先编辑策略组和测速" : direct ? "直接连接模式不经过策略组" : mode == .global ? "全局代理：所有流量走默认出口" : "未命中专用规则的流量走默认出口")
                 .font(DS.small).foregroundStyle(DS.ink2)
         }.card()
     }
 
-    @ViewBuilder private func profile(_ name: String) -> some View {
-        let active = name == activeName
-        let key = "profile|\(profilePath(name))"
-        DisclosureGroup(isExpanded: expansion(key, default: active, forced: active && !filter.isEmpty)) {
-            VStack(alignment: .leading, spacing: DS.gap) {
-                if active {
-                    if core.loadingCatalog && core.policyGroups.isEmpty { ProgressView("正在读取策略组…").font(DS.small) }
-                    else if organization.sections(filter: filter).isEmpty {
-                        EmptyState(icon: "square.stack", title: filter.isEmpty ? "还没有策略组" : "没有匹配的策略组",
-                                   detail: filter.isEmpty ? "新建自己的策略组，或在节点页添加订阅。" : "清除搜索后查看全部策略。",
-                                   action: filter.isEmpty ? ("新建组", { edit(nil) }) : ("清除搜索", { filter = "" }))
-                    } else {
-                        ForEach(organization.sections(filter: filter)) { section in
-                            sourceSection(section, organization: organization, active: true, path: core.configPath)
-                        }
-                    }
-                } else {
-                    InactivePolicyPreview(name: name, expanded: expanded[key] ?? false,
-                                          expansion: { section in expansion("section|\(profilePath(name))|\(section)", default: section == "mine") },
-                                          switchProfile: requestSwitch)
-                }
-            }.padding(.top, 14)
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: active ? "doc.text.fill" : "doc.text").foregroundStyle(active ? DS.accent : DS.ink2)
-                Text(name).font(DS.heading)
-                StatusBadge(text: active ? "当前启用" : "未启用 · 只读预览", tone: active ? DS.ok : DS.off)
-                Spacer()
-                if active { Text("\(core.policyGroups.count) 个组").font(DS.small).foregroundStyle(DS.ink2) }
-            }
-        }
-        .padding(DS.cardPadding).glass()
-    }
-
-    private func sourceSection(_ section: PolicySourceSection, organization: PolicyOrganization, active: Bool, path: String) -> some View {
-        DisclosureGroup(isExpanded: expansion("section|\(path)|\(section.id)", default: section.isLocal, forced: !filter.isEmpty)) {
-            VStack(spacing: DS.gap) {
-                ForEach(section.groups) { group in
-                    GroupSection(group: group, filter: filter, interactive: active, usage: organization.usage(of: group.group),
-                                 onEdit: section.isLocal ? { edit(group) } : nil,
-                                 onCopy: { copy(group) },
-                                 onDefault: organization.defaultPolicy != group.group ? { makeDefault(group) } : nil,
-                                 onRule: { references(group, link: true) }, onReferences: { references(group, link: false) })
-                }
-            }.padding(.top, 10)
-        } label: {
-            HStack {
-                Text(section.title).font(DS.label.weight(.semibold))
-                Text("\(section.groups.count)").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
-                Spacer()
-                if section.groups.contains(where: { $0.group == organization.defaultPolicy }) { Text("含默认出口").font(DS.caption).foregroundStyle(DS.accent) }
-            }
-        }
-    }
-
-    private func expansion(_ key: String, default value: Bool, forced: Bool = false) -> Binding<Bool> {
-        Binding(get: { forced || (expanded[key] ?? value) }, set: { on in
-            expanded[key] = on; core.preferences.set(expanded, forKey: "policy.expansions.v1")
-        })
-    }
-    private func profilePath(_ name: String) -> String {
-        URL(fileURLWithPath: core.configPath).deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension("conf").path
-    }
     private func refreshText() {
         text = core.readConfig()
         draft.refresh(path: core.configPath, disk: text)
@@ -207,57 +176,6 @@ struct PolicyView: View {
     }
     private func references(_ group: PolicyGroup, link: Bool) {
         reference = PolicyReferenceRequest(name: group.group, organization: organization, linkRule: link, path: core.configPath, text: core.readConfig())
-    }
-    private func requestSwitch(_ name: String) {
-        if draft.hasChanges { pendingSwitch = name } else { switchProfile(name) }
-    }
-    private func switchProfile(_ name: String, copyDraft: Bool = false) {
-        pendingSwitch = nil; switching = true
-        Task {
-            defer { switching = false }
-            do {
-                if copyDraft { try await core.copyDraftAndSwitch(to: name, text: draft.text) }
-                else { try await core.switchProfile(to: name) }
-                refreshText()
-            } catch { core.lastActionError = error.localizedDescription }
-        }
-    }
-}
-
-private struct InactivePolicyPreview: View {
-    @EnvironmentObject var core: Core
-    let name: String
-    let expanded: Bool
-    let expansion: (String) -> Binding<Bool>
-    let switchProfile: (String) -> Void
-    @State private var snapshot: ProfilePolicySnapshot?
-    @State private var error: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("仅预览此配置，展开不会改变当前运行方案。").font(DS.small).foregroundStyle(DS.ink2)
-                Spacer()
-                Button("切换并启用") { switchProfile(name) }.glassButton(prominent: true).disabled(!core.canChangeProfile)
-            }
-            if let error { Text(error).font(DS.small).foregroundStyle(DS.warn) }
-            else if let snapshot {
-                let org = snapshot.organization
-                if let root = org.defaultPolicy { Text("默认路径：" + org.chain(from: root).map(subscriptionNodeLabel).joined(separator: " → ")).font(DS.small).foregroundStyle(DS.ink2) }
-                ForEach(org.sections()) { section in
-                    DisclosureGroup(isExpanded: expansion(section.id)) {
-                        VStack(spacing: DS.gap) {
-                            ForEach(section.groups) { group in GroupSection(group: group, interactive: false, usage: org.usage(of: group.group)) }
-                        }.padding(.top, 10)
-                    } label: { Text("\(section.title)（\(section.groups.count)）").font(DS.label.weight(.semibold)) }
-                }
-            } else { ProgressView("正在读取此配置…").font(DS.small) }
-        }
-        .task(id: "\(name)|\(expanded)") {
-            guard expanded else { return }
-            do { snapshot = try await core.profilePolicySnapshot(name); error = nil }
-            catch { self.error = error.localizedDescription }
-        }
     }
 }
 
@@ -292,14 +210,14 @@ private struct PolicyReferencesSheet: View {
                     Text("域名及子域名").tag("DOMAIN-SUFFIX"); Text("精确域名").tag("DOMAIN"); Text("进程名称").tag("PROCESS-NAME")
                 }
                 SheetField(label: "匹配值", prompt: usage.ruleType == "PROCESS-NAME" ? "例如 Safari" : "例如 example.com", text: $usage.value)
-                Text("规则会插入 FINAL 之前，只处理匹配的请求。").font(DS.small).foregroundStyle(DS.ink2)
+                Text("规则插入在 FINAL 之前，只处理匹配的请求").font(DS.small).foregroundStyle(DS.ink2)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(request.organization.chain(from: request.name).map(subscriptionNodeLabel).joined(separator: " → ")).font(DS.label).textSelection(.enabled)
                         let rules = request.organization.ruleReferences(to: request.name)
                         let parents = request.organization.parentReferences(to: request.name)
-                        if rules.isEmpty && parents.isEmpty { Text("此组尚未被规则或其他组引用，不承担路由流量。").font(DS.small).foregroundStyle(DS.ink2) }
+                        if rules.isEmpty && parents.isEmpty { Text("此组尚未被规则或其他组引用，不承载流量").font(DS.small).foregroundStyle(DS.ink2) }
                         ForEach(Array(rules.enumerated()), id: \.offset) { _, rule in Text("规则：\(rule.type) \(rule.value)").font(DS.small) }
                         ForEach(parents, id: \.self) { Text("被策略组引用：\(subscriptionNodeLabel($0))").font(DS.small) }
                     }.frame(maxWidth: .infinity, alignment: .leading)

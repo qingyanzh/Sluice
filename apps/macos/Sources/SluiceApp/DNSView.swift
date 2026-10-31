@@ -71,10 +71,10 @@ struct DNSView: View {
             .overlay {
                 if core.state != .running {
                     if core.state == .starting {
-                        EmptyState(icon: "network", title: "Sluice 启动中", detail: "内核运行后会自动加载 DNS 缓存。")
+                        EmptyState(icon: "network", title: "Sluice 启动中", detail: "内核运行后会自动加载 DNS 缓存")
                     } else {
                         EmptyState(icon: "network", title: "Sluice 未运行",
-                                   detail: "启动后可查看和清空 DNS 缓存。",
+                                   detail: "启动后可查看和清空 DNS 缓存",
                                    action: ("启动 Sluice", { core.requestStart() }))
                     }
                 } else if !loaded && loadError == nil {
@@ -85,10 +85,10 @@ struct DNSView: View {
                                    detail: loadError, action: ("重试", { requestID = UUID() }))
                     } else if !query.isEmpty {
                         EmptyState(icon: "magnifyingglass", title: "没有匹配的缓存",
-                                   detail: "试试其他域名、类型或解析结果。", action: ("清除筛选", { search = "" }))
+                                   detail: "试试其他域名、类型或解析结果", action: ("清除筛选", { search = "" }))
                     } else {
                         EmptyState(icon: "network", title: "暂无 DNS 缓存",
-                                   detail: "域名解析后，缓存记录会自动显示在这里。",
+                                   detail: "域名解析后，缓存记录会自动显示在这里",
                                    action: ("刷新", { requestID = UUID() }))
                     }
                 }

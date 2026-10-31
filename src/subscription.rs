@@ -27,6 +27,38 @@ pub struct SubscriptionInfo {
     pub node_count: usize,
     /// Informational entries supplied as pseudo-nodes by the provider.
     pub notices: Vec<String>,
+    /// Node names from this fetch, compared on the next update.
+    #[serde(skip)]
+    pub nodes: Vec<String>,
+    /// The latest update that added or removed nodes.
+    pub change: Option<SubscriptionChange>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SubscriptionChange {
+    /// Unix seconds.
+    pub at: u64,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// Records what changed in each source since `previous`, keeping the last change
+/// when an update brought nothing new. A source is matched by name and URL.
+pub fn mark_changes(previous: &[SubscriptionInfo], current: &mut [SubscriptionInfo]) {
+    for info in current {
+        let Some(old) = previous.iter().find(|o| o.group == info.group && o.url == info.url) else { continue };
+        info.change = old.change.clone();
+        // A failed fetch with no cached body reports no nodes; that is not a change.
+        if info.nodes.is_empty() && info.last_error.is_some() { continue; }
+        let before: HashSet<&String> = old.nodes.iter().collect();
+        let after: HashSet<&String> = info.nodes.iter().collect();
+        let added: Vec<String> = info.nodes.iter().filter(|n| !before.contains(n)).cloned().collect();
+        let removed: Vec<String> = old.nodes.iter().filter(|n| !after.contains(n)).cloned().collect();
+        if !added.is_empty() || !removed.is_empty() {
+            let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            info.change = Some(SubscriptionChange { at, added, removed });
+        }
+    }
 }
 
 /// Public, credential-free catalog. References are scoped to a named source.
@@ -489,7 +521,12 @@ pub(crate) fn parse_with_metadata(text: &str, source: &str) -> (Vec<(String, Pro
 
 /// Downloads each group's `policy-path`, adds its nodes as proxies and group options.
 /// With `strict` off, a subscription that can't be fetched leaves its group empty.
+/// Set before a reload to download every subscription now instead of using a fresh cache.
+pub static REFRESH_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
+    let refresh_now = REFRESH_NOW.swap(false, std::sync::atomic::Ordering::AcqRel);
+    let max_age = |secs: u64| if refresh_now { Duration::ZERO } else { Duration::from_secs(secs) };
     let mut source_names = HashSet::new();
     for name in cfg.providers.iter().map(|p| &p.name).chain(cfg.groups.iter().filter(|g| g.policy_path.is_some()).map(|g| &g.name)) {
         if !source_names.insert(name.clone()) { bail!("duplicate subscription source {name:?}"); }
@@ -508,7 +545,7 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
         let key = (source.clone(), user_agent.clone());
         let mut note = String::new();
         if !imported.contains_key(&key) {
-            let max_age = Duration::from_secs(cfg.groups[gi].update_interval_secs);
+            let max_age = max_age(cfg.groups[gi].update_interval_secs);
             let (text, metadata, last_error) = match fetch(&source, base, max_age, user_agent.as_deref()).await {
                 Ok(result) => (result.text, result.metadata, result.last_error),
                 Err(e) if strict => return Err(e.context(format!("subscription for group {:?}", cfg.groups[gi].name))),
@@ -536,6 +573,7 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
         info!("{}", expansion_summary(&group_name, picked.len(), &source, &note));
         cfg.subscriptions.push(SubscriptionInfo {
             group: group_name.clone(), url: source, metadata: metadata.clone(), last_error: last_error.clone(), node_count: picked.len(), notices: notices.clone(),
+            nodes: picked.iter().map(|(name, _, _)| name.clone()).collect(), change: None,
         });
         cfg.groups[gi].options.extend(picked.iter().map(|(_, alias, _)| alias.clone()));
         // Legacy subscriptions can contain duplicate labels. Preserve their old
@@ -551,7 +589,7 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
         if cfg.groups[gi].import_groups { import_groups(cfg, &group_name, text)?; }
     }
     for provider in cfg.providers.clone() {
-        let result = fetch(&provider.path, base, Duration::from_secs(provider.update_interval_secs), provider.user_agent.as_deref()).await;
+        let result = fetch(&provider.path, base, max_age(provider.update_interval_secs), provider.user_agent.as_deref()).await;
         let (text, metadata, last_error) = match result {
             Ok(r) => (r.text, r.metadata, r.last_error),
             Err(e) if strict => return Err(e.context(format!("subscription {:?}", provider.name))),
@@ -562,7 +600,7 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
         nodes.retain(|(name, _)| filter.as_ref().is_none_or(|re| re.is_match(name)));
         info!("{}", expansion_summary(&provider.name, nodes.len(), &provider.path, &summarize(&skipped)));
         cfg.subscriptions.push(SubscriptionInfo { group: provider.name.clone(), url: provider.path,
-            metadata, last_error, node_count: nodes.len(), notices });
+            metadata, last_error, node_count: nodes.len(), notices, nodes: nodes.iter().map(|(n, _)| n.clone()).collect(), change: None });
         register_nodes(cfg, &provider.name, &nodes)?;
         if provider.import_groups { import_groups(cfg, &provider.name, &text)?; }
     }
@@ -656,12 +694,34 @@ mod tests {
         crate::router::Router::new(&cfg).unwrap();
     }
 
+    #[test]
+    fn updates_record_added_and_removed_nodes_and_keep_the_last_change() {
+        let info = |nodes: &[&str], error: Option<&str>| SubscriptionInfo {
+            group: "A".into(), url: "u".into(), metadata: Default::default(), last_error: error.map(Into::into),
+            node_count: nodes.len(), notices: vec![], nodes: nodes.iter().map(|n| n.to_string()).collect(), change: None,
+        };
+        let first = vec![info(&["HK", "JP"], None)];
+        let mut same = vec![info(&["JP", "HK"], None)];
+        mark_changes(&first, &mut same);
+        assert_eq!(same[0].change, None);
+        let mut changed = vec![info(&["HK", "SG"], None)];
+        mark_changes(&same, &mut changed);
+        let change = changed[0].change.clone().unwrap();
+        assert_eq!((change.added, change.removed), (vec!["SG".to_string()], vec!["JP".to_string()]));
+        let mut failed = vec![info(&[], Some("timeout"))];
+        mark_changes(&changed, &mut failed);
+        assert_eq!(failed[0].change, changed[0].change);
+        let mut other_url = vec![SubscriptionInfo { url: "v".into(), ..info(&["X"], None) }];
+        mark_changes(&changed, &mut other_url);
+        assert_eq!(other_url[0].change, None);
+    }
+
     #[tokio::test]
-    async fn independent_sources_import_groups_by_default_and_allow_opt_out() {
+    async fn independent_sources_import_only_nodes_unless_groups_are_requested() {
         let dir = std::env::temp_dir().join(format!("sluice-import-groups-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("source"), "[Proxy]\nHK = trojan, hk.example, 443, password=p\n[Proxy Group]\nMain = select, HK, DIRECT\n").unwrap();
-        for (flag, count) in [("", 2), (", import-groups=false", 1)] {
+        for (flag, count) in [("", 1), (", import-groups=false", 1), (", import-groups=true", 2)] {
             let mut cfg = Config::parse(&format!("[Subscription]\nA = policy-path=source{flag}\n[Proxy Group]\nProxy = select, use=A\n[Rule]\nFINAL,Proxy\n")).unwrap();
             expand(&mut cfg, &dir, true).await.unwrap();
             assert_eq!(cfg.groups.len(), count);

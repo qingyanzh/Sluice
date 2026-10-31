@@ -39,7 +39,7 @@ struct UpdateSettingsCard: View {
             } else {
                 Text("尚未检查更新")
             }
-            if updater.sessionInProgress { Text("软件更新正在进行，请查看更新窗口。") }
+            if updater.sessionInProgress { Text("软件更新正在进行，请查看更新窗口") }
         }
         .font(DS.caption).foregroundStyle(DS.ink3)
     }
@@ -94,7 +94,7 @@ struct DiagnosticsSettingsCard: View {
                 .font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
             switch exporter.state {
             case .idle:
-                Text("无需启动内核，也可以导出诊断信息。")
+                Text("无需启动内核，也可以导出诊断信息")
                     .font(DS.caption).foregroundStyle(DS.ink3)
             case .exporting:
                 HStack(spacing: 10) {

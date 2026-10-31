@@ -148,6 +148,12 @@ final class Core: ObservableObject {
     @Published private(set) var catalogGroups: [PolicyGroup] = []
     @Published private(set) var catalogError: String?
     @Published private(set) var loadingCatalog = false
+    /// Subscription usage and the latest node change, from the core or the catalog tool.
+    @Published private(set) var subscriptions: [SubscriptionStatus] = []
+    /// Node changes not yet dismissed on the subscription page, newest first.
+    @Published private(set) var subscriptionNotices: [SubscriptionNotice] = []
+    @Published private(set) var updatingSubscriptions = false
+    private var lastSubscriptionPoll = Date.distantPast
     private var catalogRevision = UUID()
     private var nodeTestTokens: [String: UUID] = [:]
     private var batchNodeTest: Task<Void, Never>?
@@ -1029,6 +1035,10 @@ final class Core: ObservableObject {
                 if !eventsConnected { await sampleTraffic(api) }
                 if windowVisible, !eventsConnected { await refreshConnections(api) }
                 if windowVisible, !eventsConnected, observingActiveConnections { await refreshActiveConnections(api) }
+                if Date().timeIntervalSince(lastSubscriptionPoll) >= 60 {
+                    lastSubscriptionPoll = Date()
+                    if let fresh = try? await api.subscriptions() { receiveSubscriptions(fresh) }
+                }
                 if windowVisible, Date().timeIntervalSince(lastStatsPoll) >= 5 {
                     await sampleStats(api)
                     lastStatsPoll = Date()
@@ -1631,8 +1641,8 @@ final class Core: ObservableObject {
                             as: "「\(name)」没有删除，配置没有改动。如果有规则直接使用它，请先在配置中修改这些规则。")
     }
 
-    /// Store the source independently; the FINAL select group imports its nodes.
-    func addSubscription(name: String, url: String, filter: String, userAgent: String = "", importGroups: Bool = true) async -> String? {
+    /// Store the source independently (nodes only); the FINAL select group uses its nodes.
+    func addSubscription(name: String, url: String, filter: String, userAgent: String = "", intervalHours: Int = 24) async -> String? {
         let url = url.trimmingCharacters(in: .whitespaces)
         guard Self.isSubscriptionURL(url) else { return "订阅地址需要以 http://、https:// 或 file:// 开头。" }
         var text = readConfig()
@@ -1640,7 +1650,7 @@ final class Core: ObservableObject {
         guard !group.contains(where: { "|,=\r\n\"".contains($0) }) else { return "订阅名称不能包含 |、逗号、等号、双引号或换行。" }
         guard !url.contains(where: { "\r\n\"".contains($0) }), !filter.contains(where: { "\r\n\"".contains($0) }) else { return "订阅地址和过滤规则不能包含换行或双引号。" }
         var line = "\(group) = policy-path=\"\(url)\""
-        line += ", import-groups=\(importGroups ? "true" : "false")"
+        line += ", update-interval=\(max(1, intervalHours) * 3600)"
         if !filter.trimmingCharacters(in: .whitespaces).isEmpty { line += ", policy-regex-filter=\"\(filter)\"" }
         let userAgent = userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !userAgent.contains("\r"), !userAgent.contains("\n"), !userAgent.contains("\"") else {
@@ -1681,12 +1691,61 @@ final class Core: ObservableObject {
             let catalog = try JSONDecoder().decode(SubscriptionCatalog.self, from: Data(output.utf8))
             guard configPath == path, catalogRevision == revision else { return }
             catalogNodes = catalog.nodes; catalogGroups = catalog.groups
+            if let fresh = catalog.subscriptions, state != .running { receiveSubscriptions(fresh) }
             for (reference, result) in Array(nodeTests) { recordMeasurement(result, for: reference) }
             updateCatalogMeasurements()
             catalogError = catalog.warnings.flatMap { $0.isEmpty ? nil : $0.joined(separator: "\n") }
         } catch {
             if configPath == path, catalogRevision == revision { catalogError = error.localizedDescription }
         }
+    }
+
+    // MARK: subscriptions
+
+    /// Downloads every subscription now: through the running core, or with the
+    /// catalog tool when the core is stopped.
+    func updateSubscriptions() async -> String? {
+        guard !updatingSubscriptions else { return nil }
+        updatingSubscriptions = true
+        defer { updatingSubscriptions = false }
+        if state == .running, let api {
+            do {
+                try await api.updateSubscriptions()
+                receiveSubscriptions(try await api.subscriptions())
+                _ = await refreshPolicies(api)
+            } catch { return error.localizedDescription }
+            await loadNodeCatalog()
+            return nil
+        }
+        guard let binary = coreBinary else { return "找不到 Sluice 内核。" }
+        let (status, output) = await runTool(binary.path, ["catalog", configPath, "--refresh"])
+        guard status == 0 else { return output.trimmingCharacters(in: .whitespacesAndNewlines) }
+        await loadNodeCatalog()
+        return nil
+    }
+
+    func dismissSubscriptionNotice(_ notice: SubscriptionNotice) {
+        subscriptionNotices.removeAll { $0 == notice }
+    }
+
+    /// Takes the latest status and announces node changes not seen before.
+    /// The first sighting of a source only records its last change, so launching
+    /// the app does not replay old notices.
+    func receiveSubscriptions(_ fresh: [SubscriptionStatus]) {
+        if subscriptions != fresh { subscriptions = fresh }
+        var seen = preferences.dictionary(forKey: "subscriptions.seenChanges.v1") as? [String: UInt64] ?? [:]
+        let key = { (s: SubscriptionStatus) in "\(s.group)|\(s.url)" }
+        var announced: [SubscriptionNotice] = []
+        for status in fresh {
+            guard let change = status.change else { continue }
+            defer { seen[key(status)] = change.at }
+            guard let last = seen[key(status)], change.at > last else { continue }
+            announced.append(SubscriptionNotice(source: status.group, change: change))
+        }
+        preferences.set(seen, forKey: "subscriptions.seenChanges.v1")
+        guard !announced.isEmpty else { return }
+        subscriptionNotices = (announced + subscriptionNotices).prefix(6).map { $0 }
+        for notice in announced { SystemNotice.post(title: "订阅「\(notice.source)」已更新", body: notice.summary) }
     }
 
     /// Replaces the generic first line of a check failure with one that fits the action,

@@ -88,7 +88,7 @@ final class InterfaceStateTests: XCTestCase {
             let rule = RuleConfigSheet(rule: .init(), isNew: isNew, policies: ["DIRECT"]) { _ in nil }
             let group = GroupConfigSheet(group: .init(), isNew: isNew, policies: ["DIRECT"]) { _ in nil }
             XCTAssertEqual(rule.title, isNew ? "添加规则" : "编辑规则")
-            XCTAssertEqual(group.title, isNew ? "添加策略组" : "编辑策略组")
+            XCTAssertEqual(group.title, isNew ? "新建策略组" : "编辑策略组")
         }
     }
 

@@ -4,7 +4,7 @@ import ServiceManagement
 import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
-    case activity, overview, requests, policy, nodes, rule, logs, dns, profile
+    case activity, overview, requests, policy, subscriptions, nodes, rule, logs, dns, profile
     var id: String { rawValue }
 
     var title: String {
@@ -13,6 +13,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .overview: "设置"
         case .requests: "请求"
         case .policy: "策略"
+        case .subscriptions: "订阅"
         case .nodes: "节点"
         case .rule: "规则"
         case .logs: "日志"
@@ -27,6 +28,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .overview: "gearshape"
         case .requests: "arrow.up.arrow.down.circle"
         case .policy: "signpost.right"
+        case .subscriptions: "link"
         case .nodes: "globe.asia.australia"
         case .rule: "line.3.horizontal.decrease.circle"
         case .logs: "doc.text"
@@ -42,7 +44,8 @@ enum Pane: String, CaseIterable, Identifiable {
         case .overview: "接管方式、代理服务、启动与外观"
         case .requests: ""
         case .policy: "出站模式与策略组"
-        case .nodes: "配置中的节点和订阅"
+        case .subscriptions: "节点来源、流量与到期"
+        case .nodes: "全部可用节点"
         case .rule: "自上而下匹配，命中即停止"
         case .logs: "内核输出"
         case .dns: "缓存的域名解析与剩余有效期"
@@ -53,7 +56,7 @@ enum Pane: String, CaseIterable, Identifiable {
     /// Sidebar sections, Surge-style: an untitled top group, then titled groups.
     static let sections: [(String?, [Pane])] = [
         (nil, [.activity]),
-        ("代理", [.requests, .policy, .nodes, .rule]),
+        ("代理", [.requests, .policy, .subscriptions, .nodes, .rule]),
         ("工具", [.logs, .dns, .profile]),
     ]
     /// 设置 sits apart at the bottom of the sidebar, above the status footer.
@@ -229,6 +232,7 @@ struct MainView: View {
                 case .overview: OverviewView()
                 case .requests: RequestsView()
                 case .policy: PolicyView(draft: configDraft)
+                case .subscriptions: SubscriptionsView()
                 case .nodes: NodesView(intent: $nodesIntent)
                 case .rule: RuleView(pane: $pane, draft: configDraft)
                 case .logs: LogsView()
@@ -1008,7 +1012,7 @@ struct OverviewView: View {
                     SectionTitle(text: "网络接管")
                     LazyVGrid(columns: columns, spacing: DS.gap) {
                         FeatureCard(icon: "network", title: "系统代理",
-                                    detail: "接管遵循系统代理设置的应用，适合日常使用。",
+                                    detail: "接管遵循系统代理设置的应用，适合日常使用",
                                     isOn: Binding(get: { core.systemProxyOn }, set: { core.setSystemProxy($0) }),
                                     status: core.systemProxyOn
                                         ? (core.state == .running ? "系统代理正在接管" : "已开启，内核未运行")
@@ -1017,7 +1021,7 @@ struct OverviewView: View {
                                     statusTone: core.systemProxyOn && core.state != .running ? DS.warn : nil)
                             .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
                         FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
-                                    detail: "为其他应用提供本机 HTTP 和 SOCKS5 代理。",
+                                    detail: "为其他应用提供本机 HTTP 和 SOCKS5 代理",
                                     status: [core.summary.httpListen.map { "HTTP :\(SystemProxy.split($0).map { String($0.1) } ?? $0)" },
                                          core.summary.socksListen.map { "SOCKS5 :\(SystemProxy.split($0).map { String($0.1) } ?? $0)" }]
                                         .compactMap { $0 }.joined(separator: " · ").ifEmpty("已禁用"),
@@ -1027,7 +1031,7 @@ struct OverviewView: View {
                     SectionTitle(text: "增强模式")
                     LazyVGrid(columns: columns, spacing: DS.gap) {
                         FeatureCard(icon: "shield.lefthalf.filled", title: "增强模式",
-                                    detail: "同时接管不遵循系统代理的应用，需要管理员授权。",
+                                    detail: "同时接管不遵循系统代理的应用，需要管理员授权",
                                     isOn: Binding(get: { core.summary.enhancedMode }, set: { on in
                                         enhancedBusy = true
                                         Task {
@@ -1043,7 +1047,7 @@ struct OverviewView: View {
                     SectionTitle(text: "代理服务")
                     LazyVGrid(columns: columns, spacing: DS.gap) {
                         FeatureCard(icon: "terminal", title: "控制 API",
-                                    detail: "用于切换策略、读取流量和测试规则。",
+                                    detail: "用于切换策略、读取流量和测试规则",
                                     status: core.summary.apiPort.map { "127.0.0.1:\($0)" } ?? "未配置（应用需要它）",
                                     statusOn: core.state == .running && core.summary.apiPort != nil)
                         VStack(alignment: .leading, spacing: 12) {
@@ -1061,7 +1065,7 @@ struct OverviewView: View {
                     SectionTitle(text: "通用").id("maintenance")
                     LazyVGrid(columns: columns, spacing: DS.gap) {
                         FeatureCard(icon: "power", title: "打开应用时启动",
-                                    detail: "打开 Sluice 时自动启动代理内核。",
+                                    detail: "打开 Sluice 时自动启动代理内核",
                                     isOn: $core.autoStart,
                                     status: core.autoStart ? "已启用" : "已禁用", statusOn: core.autoStart)
                         LoginItemCard()
@@ -1253,8 +1257,15 @@ struct GroupSection: View {
             HStack(spacing: 10) {
                 IconTile(symbol: kindIcon, size: 28)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(subscriptionNodeLabel(group.group)).font(DS.heading).lineLimit(1)
-                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · \(!interactive ? "只读预览" : core.state == .running ? "点击选项切换" : "点击选项测速")" : "\(Self.kindLabel(group.type)) · 自动 · 选择：\(subscriptionNodeLabel(group.selected))")
+                    HStack(spacing: 8) {
+                        Text(subscriptionShortLabel(group.group)).font(DS.heading).lineLimit(1)
+                        if let source = PolicyOrganization.importedSource(of: group.group) {
+                            Text(source).font(DS.caption).foregroundStyle(DS.ink2)
+                                .padding(.horizontal, 7).frame(height: 18)
+                                .background(Color.primary.opacity(0.06), in: Capsule())
+                        }
+                    }
+                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · \(!interactive ? "只读预览" : core.state == .running ? "点击选项切换" : "点击选项测速")" : "\(Self.kindLabel(group.type)) · 当前：\(subscriptionShortLabel(group.selected))")
                         .font(DS.caption).foregroundStyle(DS.ink2)
                     if let usage { Text(usage).font(DS.caption).foregroundStyle(usage.contains("默认出口") ? DS.accent : DS.ink3) }
                 }
@@ -1279,7 +1290,7 @@ struct GroupSection: View {
                     .disabled(!interactive || !core.canTestNodes || !core.testingNodes.isEmpty || core.testingGroups.contains(group.group))
                     .help("测试这个策略组里每个选项的延迟")
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 10)], spacing: 10) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 8)], spacing: 8) {
                 ForEach(group.options.filter { filter.isEmpty || subscriptionNodeLabel(group.group).localizedCaseInsensitiveContains(filter) || subscriptionNodeLabel($0.name).localizedCaseInsensitiveContains(filter) }, id: \.name) { OptionChip(group: group, option: $0, interactive: interactive) }
             }
         }
@@ -1327,12 +1338,12 @@ struct OptionChip: View {
         let chosen = group.selected == option.name
         return HStack(spacing: 8) {
             if chosen { Image(systemName: "checkmark").font(DS.caption).foregroundStyle(DS.accent) }
-            Text(subscriptionNodeLabel(option.name)).font(DS.label.weight(chosen ? .semibold : .regular))
-                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            Text(subscriptionShortLabel(option.name)).font(DS.label.weight(chosen ? .semibold : .regular))
+                .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 4)
             LatencyBadge(latency: option.latencyMs, testing: interactive && (core.testingGroups.contains(group.group) || core.testingNodes.contains(option.name)))
         }
-        .padding(.horizontal, 12).padding(.vertical, 10).frame(minHeight: 40)
+        .padding(.horizontal, 12).frame(height: 36)
         .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
                     in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
         .overlay {
@@ -1426,7 +1437,7 @@ struct AddNodeSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SheetHeader(icon: "server.rack", title: "添加节点",
-                        detail: "粘贴分享链接（ss、vmess、vless、trojan、hysteria2），或一行 Surge 风格的代理配置。")
+                        detail: "粘贴分享链接（ss、vmess、vless、trojan、hysteria2），或一行 Surge 风格的代理配置")
             SheetField(label: "分享链接或代理行", prompt: "例如 HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=…",
                        text: $input, multiline: true)
             SheetFooter(error: error, example: "HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=你的密码",
@@ -1450,32 +1461,32 @@ struct AddSubscriptionSheet: View {
     @State private var url = ""
     @State private var filter = ""
     @State private var userAgent = ""
-    @State private var importGroups = true
+    @State private var intervalHours = 24
     @State private var error: String?
     @State private var busy = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SheetHeader(icon: "link", title: "添加节点来源", detail: "导入节点和可选策略组，沿用当前规则。整套规则请使用「导入独立配置」。")
+            SheetHeader(icon: "link", title: "添加订阅", detail: "只导入节点与流量、到期信息")
             SheetField(label: "订阅地址", prompt: "https://…", text: $url)
-            HStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
                 SheetField(label: "名称", prompt: "Subscription", text: $name)
-                SheetField(label: "名称过滤（正则，可选）", prompt: "例如 香港|HK", text: $filter)
+                SheetField(label: "节点过滤（正则，可选）", prompt: "例如 香港|HK", text: $filter)
             }
-            SheetField(label: "User-Agent（可选）", prompt: "留空使用默认值", text: $userAgent)
-            Toggle("导入订阅自带的策略组", isOn: $importGroups)
-            Text("保留策略组的成员与嵌套关系，名称按订阅区分；当前配置的规则和系统设置保持不变。")
-                .font(DS.small).foregroundStyle(DS.ink2)
+            HStack(alignment: .top, spacing: 12) {
+                SheetField(label: "User-Agent（可选）", prompt: "留空使用默认值", text: $userAgent)
+                SubscriptionIntervalPicker(hours: $intervalHours)
+            }
             SheetFooter(error: error, primary: busy ? "下载中…" : "添加", enabled: !busy && !url.isEmpty, cancel: { dismiss() }) {
                 busy = true
                 Task {
-                    error = await core.addSubscription(name: name, url: url, filter: filter, userAgent: userAgent, importGroups: importGroups)
+                    error = await core.addSubscription(name: name, url: url, filter: filter, userAgent: userAgent, intervalHours: intervalHours)
                     busy = false
                     if error == nil { dismiss() }
                 }
             }
         }
-        .padding(28).frame(width: 540)
+        .padding(28).frame(width: 560)
     }
 }
 
@@ -1569,7 +1580,7 @@ struct RequestsView: View {
                             if rows.isEmpty {
                                 if !core.isActive && core.connections.isEmpty {
                                     EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                               detail: "启动后，经过 Sluice 的连接会实时显示在这里。", action: ("启动 Sluice", { core.requestStart() }))
+                                               detail: "启动后，经过 Sluice 的连接会实时显示在这里", action: ("启动 Sluice", { core.requestStart() }))
                                 } else if !core.connectionsLoaded {
                                     ProgressView("正在加载请求…").font(DS.small)
                                 } else {
@@ -1965,7 +1976,7 @@ struct RuleView: View {
                     .transition(.opacity)
                 }
             if offline {
-                Text("离线预览会跳过 GEOIP、规则集和需要 DNS 解析的规则；实际路由以启动后的内核结果为准。")
+                Text("离线预览会跳过 GEOIP、规则集和需要 DNS 解析的规则；实际路由以启动后的内核结果为准")
                     .font(DS.caption).foregroundStyle(DS.warn).fixedSize(horizontal: false, vertical: true)
             }
             if let error, result == nil { ErrorText(raw: error) }
@@ -2254,7 +2265,7 @@ struct ConfigView: View {
             }
             Button("取消", role: .cancel) { pendingSwitch = nil }
         } message: {
-            Text("复制草稿会覆盖目标配置，原配置文件保持不变。")
+            Text("复制草稿会覆盖目标配置，原配置文件保持不变")
         }
         .confirmationDialog("删除「\(pendingDelete ?? "")」？", isPresented: Binding(
             get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
@@ -2267,7 +2278,7 @@ struct ConfigView: View {
             }
             Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("配置文件将从本地永久删除。")
+            Text("配置文件将从本地永久删除")
         }
         .sheet(isPresented: $importingProfile) { IndependentProfileImportSheet() }
         .sheet(item: $profileEdit) { action in
