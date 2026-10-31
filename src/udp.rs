@@ -241,7 +241,7 @@ impl Framing {
     fn label(&self) -> String {
         match self {
             Self::Trojan => "Trojan".into(),
-            Self::Uot(t) => format!("UoT {t}"),
+            Self::Uot => "UoT".into(),
             Self::Xudp(t) => format!("XUDP {t}"),
         }
     }
