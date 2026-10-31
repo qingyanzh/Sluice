@@ -176,8 +176,10 @@ struct NodeBrowserRow: View {
                 Text(node.endpoint).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 8)
-            Text(node.kind).font(DS.caption).foregroundStyle(DS.ink2)
-                .padding(.horizontal, 8).padding(.vertical, 4).background(Color.primary.opacity(0.045), in: Capsule())
+            // Protocol and latency sit in fixed columns so badges line up down the list.
+            Text(node.kind).font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1)
+                .padding(.horizontal, 8).frame(height: 22).background(Color.primary.opacity(0.045), in: Capsule())
+                .frame(width: 96, alignment: .trailing)
             if !node.isSubscription { LatencyBadge(latency: latency, testing: testing) }
             Image(systemName: "chevron.right").font(DS.caption).foregroundStyle(DS.ink3)
         }

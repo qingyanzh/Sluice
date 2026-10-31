@@ -63,6 +63,10 @@ pub fn parse_socks_addr(b: &[u8]) -> Option<(Target, usize)> {
 /// Async counterpart of [`parse_socks_addr`] for stream protocols.
 pub async fn read_socks_addr<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Target> {
     let atyp = r.read_u8().await?;
+    read_addr(r, atyp).await
+}
+
+async fn read_addr<R: AsyncRead + Unpin>(r: &mut R, atyp: u8) -> std::io::Result<Target> {
     let mut buf = vec![atyp];
     let rest = match atyp {
         1 => 4 + 2,
@@ -183,15 +187,34 @@ pub fn direct() -> UdpPipe {
     app
 }
 
-/// How packets are framed inside a TCP-like stream. Both carry an address per packet.
+/// How addressed packets are framed inside a TCP-like stream.
 pub enum Framing {
     /// Trojan: `ATYP addr port len(u16) CRLF payload`.
     Trojan,
-    /// sing-box UoT v2 connect mode: length(u16) + payload for a fixed peer.
-    Uot(Target),
+    /// sing-box UoT non-connect mode: address + length(u16) + payload, with address
+    /// tags 0=IPv4, 1=IPv6, 2=domain (unlike the request's SOCKS tags).
+    Uot,
     /// Xray XUDP: Mux.Cool frames on session 0 (see [`xudp_frame`]); `Target` stands in
     /// for replies whose frame names no source.
     Xudp(Target),
+}
+
+/// sing-box common/uot packet format, shared by both directions in non-connect mode.
+pub fn uot_frame(addr: &Target, data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() > u16::MAX as usize {
+        bail!("UoT packet too large");
+    }
+    let mut out = Vec::with_capacity(data.len() + 32);
+    addr.write_socks_addr(&mut out)?;
+    out[0] = match out[0] {
+        1 => 0, // IPv4
+        4 => 1, // IPv6
+        3 => 2, // domain
+        _ => unreachable!(),
+    };
+    out.extend_from_slice(&(data.len() as u16).to_be_bytes());
+    out.extend_from_slice(data);
+    Ok(out)
 }
 
 /// Mux.Cool frame `meta_len(2) meta [len(2) data]`, meta = `session(2) status option`
@@ -236,18 +259,7 @@ impl Framing {
                 out.extend_from_slice(&p.data);
                 Ok(out)
             }
-            Framing::Uot(target) => {
-                if p.data.len() > u16::MAX as usize {
-                    bail!("UoT packet too large");
-                }
-                if p.addr.to_string() != target.to_string() {
-                    bail!("UoT connect destination changed");
-                }
-                let mut out = Vec::with_capacity(p.data.len() + 2);
-                out.extend_from_slice(&(p.data.len() as u16).to_be_bytes());
-                out.extend_from_slice(&p.data);
-                Ok(out)
-            }
+            Framing::Uot => uot_frame(&p.addr, &p.data),
             Framing::Xudp(_) => xudp_frame(first, &p.addr, &p.data),
         }
     }
@@ -267,10 +279,17 @@ impl Framing {
                 r.read_exact(&mut data).await?;
                 Ok(Some(Packet { addr, data }))
             }
-            Framing::Uot(target) => {
+            Framing::Uot => {
+                let atyp = match r.read_u8().await? {
+                    0 => 1,
+                    1 => 4,
+                    2 => 3,
+                    _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad UoT address type")),
+                };
+                let addr = read_addr(r, atyp).await?;
                 let mut data = vec![0; r.read_u16().await? as usize];
                 r.read_exact(&mut data).await?;
-                Ok(Some(Packet { addr: target.clone(), data }))
+                Ok(Some(Packet { addr, data }))
             }
             Framing::Xudp(fallback) => loop {
                 let len = r.read_u16().await? as usize;
@@ -417,6 +436,41 @@ mod tests {
             let got = f.decode(&mut r).await.unwrap().unwrap();
             assert_eq!((got.addr.to_string(), got.data), (p.addr.to_string(), p.data.clone()));
         }
+    }
+
+    #[tokio::test]
+    async fn uot_non_connect_wire_format() {
+        // Literal fixtures follow sing/common/uot's AddrParser, not SOCKS ATYP.
+        let fixtures = [
+            (Target::new("1.2.3.4", 53), vec![0, 1, 2, 3, 4, 0, 53, 0, 1, b'q']),
+            (Target::new("::1", 5353), vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x14, 0xe9, 0, 1, b'q']),
+            (Target::new("udp.test", 443), b"\x02\x08udp.test\x01\xbb\x00\x01q".to_vec()),
+        ];
+        let mut wire = Vec::new();
+        for (addr, expected) in &fixtures {
+            let packet = Packet { addr: addr.clone(), data: b"q".to_vec() };
+            assert_eq!(Framing::Uot.encode(true, &packet).unwrap(), *expected);
+            assert_eq!(Framing::Uot.encode(false, &packet).unwrap(), *expected);
+            wire.extend_from_slice(expected);
+            for n in 0..expected.len() {
+                assert!(Framing::Uot.decode(&mut &expected[..n]).await.is_err());
+            }
+        }
+        let (mut tx, mut rx) = tokio::io::duplex(3);
+        let sender = tokio::spawn(async move {
+            for byte in wire {
+                tx.write_u8(byte).await.unwrap();
+            }
+        });
+        for (addr, _) in &fixtures {
+            let packet = Framing::Uot.decode(&mut rx).await.unwrap().unwrap();
+            assert_eq!(packet.addr.to_string(), addr.to_string());
+            assert_eq!(packet.data, b"q");
+        }
+        sender.await.unwrap();
+        assert!(uot_frame(&Target::new("a", 1), &vec![0; 65536]).is_err());
+        assert!(uot_frame(&Target::new(&"a".repeat(256), 1), b"").is_err());
+        assert_eq!(Framing::Uot.decode(&mut &b"\x03"[..]).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]

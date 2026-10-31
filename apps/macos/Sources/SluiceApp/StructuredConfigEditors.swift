@@ -63,7 +63,7 @@ struct StructuredConfigEditors: View {
     }
 
     private var ruleTable: some View {
-        editorTable(headers: ["类型", "值", "策略", "选项"], weights: [0.25, 0.33, 0.23, 0.19],
+        editorTable(headers: ["类型", "值", "策略", "选项"], weights: [0.30, 0.32, 0.20, 0.18],
                     rows: document.rules.map { ($0.id, [$0.value.type, $0.value.value, $0.value.policy, $0.value.options]) })
             .overlay { if document.rules.isEmpty { empty("还没有规则", detail: "添加规则后，流量将按从上到下的顺序匹配。") } }
     }
@@ -91,20 +91,28 @@ struct StructuredConfigEditors: View {
                         Text(headers[column]).font(DS.caption).foregroundStyle(DS.ink2)
                             .frame(width: width * weights[column], alignment: .leading)
                     }
-                }.padding(.vertical, 10)
+                }.padding(.vertical, 10).padding(.horizontal, 8)
                 Divider()
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 2) {
                         ForEach(rows, id: \.id) { row in
                             HStack(alignment: .top, spacing: 12) {
                                 ForEach(headers.indices, id: \.self) { column in
-                                    Text(row.cells[column]).font(DS.small)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .frame(width: width * weights[column], alignment: .leading)
-                                        .help(row.cells[column])
+                                    // The first column is a keyword (rule type, group name): one line, set in code.
+                                    if column == 0 {
+                                        Text(row.cells[column]).font(section == "Rule" ? DS.code : DS.small.weight(.medium))
+                                            .lineLimit(1).minimumScaleFactor(0.8).truncationMode(.middle)
+                                            .frame(width: width * weights[column], alignment: .leading)
+                                            .help(row.cells[column])
+                                    } else {
+                                        Text(row.cells[column]).font(DS.small)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .frame(width: width * weights[column], alignment: .leading)
+                                            .help(row.cells[column])
+                                    }
                                 }
                             }
-                            .padding(.vertical, 10)
+                            .padding(.vertical, 9).padding(.horizontal, 8)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(selection == row.id ? DS.accent.opacity(0.10) : Color.clear,
                                         in: RoundedRectangle(cornerRadius: DS.smallRadius))

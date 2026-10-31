@@ -255,7 +255,8 @@ impl AnyTlsServer {
         Ok(Box::new(stream))
     }
 
-    /// UoT v2 connect mode, one stream per destination, preserving full-cone UdpPipe semantics.
+    /// UoT v2 non-connect mode: one stream per UdpPipe, with each packet carrying
+    /// its destination or reply source address for full-cone UDP semantics.
     pub async fn open_udp(&self) -> Result<UdpPipe> {
         if !self.udp {
             bail!("AnyTLS UDP is disabled (udp=false)");
@@ -263,72 +264,36 @@ impl AnyTlsServer {
         let (app, mut side) = pipe_pair();
         let server = self.clone();
         tokio::spawn(async move {
-            let mut destinations: HashMap<String, mpsc::Sender<crate::udp::Packet>> =
-                HashMap::new();
-            loop {
+            let packet = loop {
                 let packet = tokio::select! {
-                    _ = side.tx.closed() => break,
-                    packet = side.rx.recv() => match packet { Some(p) => p, None => break },
+                    _ = side.tx.closed() => return,
+                    packet = side.rx.recv() => match packet { Some(p) => p, None => return },
                 };
                 if packet.data.len() > u16::MAX as usize {
                     continue;
                 }
-                let key = packet.addr.to_string();
-                if destinations.get(&key).is_some_and(|tx| tx.is_closed()) {
-                    destinations.remove(&key);
-                }
-                if !destinations.contains_key(&key) {
-                    // Bound association resources, evicting old destinations if necessary.
-                    if destinations.len() >= 64 {
-                        destinations.clear();
-                    }
-                    match server.udp_destination(&packet.addr).await {
-                        Ok(UdpPipe { tx, mut rx }) => {
-                            let back = side.tx.clone();
-                            tokio::spawn(async move {
-                                loop {
-                                    tokio::select! {
-                                        _ = back.closed() => break,
-                                        p = rx.recv() => match p {
-                                            Some(p) => if back.send(p).await.is_err() { break; },
-                                            None => break,
-                                        }
-                                    }
-                                }
-                            });
-                            destinations.insert(key.clone(), tx);
-                        }
-                        Err(e) => {
-                            log::debug!("AnyTLS UDP {}: {e:#}", packet.addr);
-                            continue;
-                        }
-                    }
-                }
-                if let Some(tx) = destinations.get(&key) {
-                    if tx.send(packet).await.is_err() {
-                        destinations.remove(&key);
-                    }
-                }
+                break packet;
+            };
+            let result = async {
+                let mut stream = server
+                    .connect(&Target::new("sp.v2.udp-over-tcp.arpa", 0))
+                    .await?;
+                // The request uses SOCKS address tags; subsequent packets use UoT tags.
+                let mut header = vec![0]; // isConnect=false
+                packet.addr.write_socks_addr(&mut header)?;
+                stream.write_all(&header).await?;
+                stream
+                    .write_all(&crate::udp::uot_frame(&packet.addr, &packet.data)?)
+                    .await?;
+                stream.flush().await?;
+                crate::udp::over_stream(stream, crate::udp::Framing::Uot, side.rx, side.tx, true);
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(e) = result {
+                log::debug!("AnyTLS UDP {}: {e:#}", packet.addr);
             }
         });
-        Ok(app)
-    }
-
-    async fn udp_destination(&self, target: &Target) -> Result<UdpPipe> {
-        let mut stream = self
-            .connect(&Target::new("sp.v2.udp-over-tcp.arpa", 0))
-            .await?;
-        let mut header = vec![1]; // isConnect
-        target.write_socks_addr(&mut header)?;
-        stream.write_all(&header).await?;
-        let (app, side) = pipe_pair();
-        crate::udp::over_stream(
-            stream,
-            crate::udp::Framing::Uot(target.clone()),
-            side.rx,
-            side.tx,
-            false,
-        );
         Ok(app)
     }
 }
@@ -1107,6 +1072,12 @@ mod tests {
         }
     }
 
+    enum PeerStream {
+        Tcp,
+        UotRequest,
+        Uot(Vec<u8>),
+    }
+
     async fn run_peer<S: AsyncRead + AsyncWrite + Unpin>(wire: &mut S, hearts: Arc<AtomicUsize>) {
         let (cmd, sid, settings) = read_frame(wire).await.unwrap();
         assert_eq!((cmd, sid), (SETTINGS, 0));
@@ -1128,7 +1099,7 @@ mod tests {
             .await
             .unwrap();
         wire.flush().await.unwrap();
-        let mut streams: HashMap<u32, Option<(bool, Vec<u8>)>> = HashMap::new();
+        let mut streams: HashMap<u32, Option<PeerStream>> = HashMap::new();
         let mut last_id = 0;
         while let Ok((cmd, sid, data)) = read_frame(wire).await {
             match cmd {
@@ -1164,45 +1135,77 @@ mod tests {
                             return;
                         }
                         wire.write_all(&frame(SYNACK, sid, &[])).await.unwrap();
-                        *stream =
-                            Some((target.host_str() == "sp.v2.udp-over-tcp.arpa", Vec::new()));
                         if target.host_str() == "sp.v2.udp-over-tcp.arpa" {
                             assert_eq!(target.port, 0);
+                            *stream = Some(PeerStream::UotRequest);
+                        } else {
+                            *stream = Some(PeerStream::Tcp);
                         }
                     } else {
-                        let (uot, pending) = stream.as_mut().unwrap();
-                        if *uot {
-                            // First PSH in UoT mode is exactly the v2 connect request.
-                            assert_eq!(data[0], 1);
-                            let (target, n) = crate::udp::parse_socks_addr(&data[1..]).unwrap();
-                            assert_eq!(n + 1, data.len());
-                            assert!(matches!(
-                                target.host_str().as_str(),
-                                "127.0.0.1" | "::1" | "udp.test"
-                            ));
-                            *uot = false;
-                            // A sentinel distinguishes connected UoT from TCP echo.
-                            pending.push(0);
-                        } else if !pending.is_empty() {
-                            pending.extend_from_slice(&data);
-                            while pending.len() >= 3 {
-                                let n = u16::from_be_bytes([pending[1], pending[2]]) as usize;
-                                if pending.len() < n + 3 {
-                                    break;
-                                }
-                                for chunk in pending[1..n + 3].chunks(WRITE_CHUNK) {
-                                    wire.write_all(&frame(PSH, sid, chunk)).await.unwrap();
-                                }
-                                pending.drain(1..n + 3);
+                        match stream.as_mut().unwrap() {
+                            PeerStream::UotRequest => {
+                                // The v2 request uses SOCKS tags, unlike packet addresses.
+                                assert_eq!(data[0], 0);
+                                let (target, n) = crate::udp::parse_socks_addr(&data[1..]).unwrap();
+                                assert_eq!(n + 1, data.len());
+                                assert!(matches!(
+                                    target.host_str().as_str(),
+                                    "127.0.0.1" | "::1" | "udp.test"
+                                ));
+                                *stream = Some(PeerStream::Uot(Vec::new()));
                             }
-                        } else if data == b"server-fin" {
-                            wire.write_all(&frame(PSH, sid, b"before-fin"))
-                                .await
-                                .unwrap();
-                            wire.write_all(&frame(FIN, sid, &[])).await.unwrap();
-                            streams.remove(&sid);
-                        } else {
-                            wire.write_all(&frame(PSH, sid, &data)).await.unwrap();
+                            PeerStream::Uot(pending) => {
+                                pending.extend_from_slice(&data);
+                                while !pending.is_empty() {
+                                    let addr_len = match pending[0] {
+                                        0 => 7,  // IPv4 + port
+                                        1 => 19, // IPv6 + port
+                                        2 => match pending.get(1) {
+                                            Some(len) => 4 + *len as usize,
+                                            None => break,
+                                        },
+                                        tag => panic!("invalid UoT address tag {tag}"),
+                                    };
+                                    if pending.len() < addr_len + 2 {
+                                        break;
+                                    }
+                                    let n = u16::from_be_bytes([
+                                        pending[addr_len],
+                                        pending[addr_len + 1],
+                                    ]) as usize;
+                                    let end = addr_len + 2 + n;
+                                    if pending.len() < end {
+                                        break;
+                                    }
+                                    for chunk in pending[..end].chunks(WRITE_CHUNK) {
+                                        wire.write_all(&frame(PSH, sid, chunk)).await.unwrap();
+                                    }
+                                    if &pending[addr_len + 2..end] == b"full-cone" {
+                                        // B replies to A's packet before this pipe ever sends to B.
+                                        // UoT IPv4 source 127.0.0.2:5353, then length + payload.
+                                        let reply = [
+                                            &[0, 127, 0, 0, 2, 0x14, 0xe9, 0, 17][..],
+                                            b"B-for-A:full-cone",
+                                        ]
+                                        .concat();
+                                        // Split inside the source address and length as well.
+                                        for chunk in reply.chunks(2) {
+                                            wire.write_all(&frame(PSH, sid, chunk)).await.unwrap();
+                                        }
+                                    }
+                                    pending.drain(..end);
+                                }
+                            }
+                            PeerStream::Tcp if data == b"server-fin" => {
+                                wire.write_all(&frame(PSH, sid, b"before-fin"))
+                                    .await
+                                    .unwrap();
+                                wire.write_all(&frame(FIN, sid, &[])).await.unwrap();
+                                streams.remove(&sid);
+                            }
+                            PeerStream::Tcp => {
+                                wire.write_all(&frame(PSH, sid, &data)).await.unwrap();
+                            }
                         }
                     }
                 }
@@ -1262,6 +1265,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uot_v2_full_cone_reply_from_uncontacted_source() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let peer = peer().await;
+            let mut pipe = peer.server.open_udp().await.unwrap();
+            pipe.tx
+                .send(Packet {
+                    addr: Target::new("127.0.0.1", 53),
+                    data: b"full-cone".to_vec(),
+                })
+                .await
+                .unwrap();
+            let reply = pipe.rx.recv().await.unwrap();
+            assert_eq!(reply.addr.to_string(), "127.0.0.1:53");
+            assert_eq!(reply.data, b"full-cone");
+            let reply = pipe.rx.recv().await.unwrap();
+            assert_eq!(reply.addr.to_string(), "127.0.0.2:5353");
+            assert_eq!(reply.data, b"B-for-A:full-cone");
+            drop(pipe);
+            loop {
+                if peer
+                    .server
+                    .client
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|s| s.is_idle())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn synack_error_alert_and_remote_fin() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let peer = peer().await;
@@ -1308,6 +1349,13 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             let peer = peer().await;
             let mut pipe = peer.server.open_udp().await.unwrap();
+            pipe.tx
+                .send(Packet {
+                    addr: Target::new("127.0.0.1", 53),
+                    data: vec![0; 65536],
+                })
+                .await
+                .unwrap();
             for host in ["127.0.0.1", "::1", "udp.test", "127.0.0.1"] {
                 let target = Target::new(host, 53);
                 for data in [vec![], b"dns query".to_vec(), vec![5; 65535]] {
@@ -1323,7 +1371,14 @@ mod tests {
                     assert_eq!(reply.data, data);
                 }
             }
-            assert_eq!(peer.accepted.load(Ordering::SeqCst), 3);
+            assert_eq!(peer.accepted.load(Ordering::SeqCst), 1);
+            {
+                let sessions = peer.server.client.sessions.lock().unwrap();
+                assert_eq!(sessions.len(), 1);
+                let state = sessions[0].state.lock().unwrap();
+                assert_eq!(state.next_id, 2);
+                assert_eq!(state.streams.len(), 1);
+            }
             let mut disabled = peer.server.clone();
             disabled.udp = false;
             assert!(disabled

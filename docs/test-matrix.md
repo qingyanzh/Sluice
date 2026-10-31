@@ -122,8 +122,8 @@ FINAL,REJECT
 | G-040 | 设置／增强模式 | 增强模式 | `apps/macos/Sources/SluiceApp/Views.swift:976`<br>`apps/macos/Sources/SluiceApp/Views.swift:1064` | 写入增强模式设置，按需重启／授权，忙碌时禁用 | 否 | 需无Surge机器；测试管理员批准、取消和失败；核对 TUN、路由、DNS恢复；启动自检可能访问外网 |  |
 | G-041 | 设置／增强模式辅助程序 | 安装辅助程序／打开系统设置／刷新状态／重试（状态按钮） | `apps/macos/Sources/SluiceApp/MaintenanceSettingsView.swift:63`<br>`apps/macos/Sources/SluiceApp/Helper.swift:34` | 按未安装、待批准、就绪、失败状态注册、打开登录项或刷新状态 | 否 | 需无Surge机器；完整 app 覆盖四状态及未打包构建错误，确认后台服务状态 |  |
 | G-042 | 设置／当前配置 | 显示文件 | `apps/macos/Sources/SluiceApp/Views.swift:1004` | Finder 显示当前配置文件 | 否 | 切换本地配置后点击，核对选中的确切路径 |  |
-| G-043 | 设置／代理服务 | 复制 HTTP 地址 | `apps/macos/Sources/SluiceApp/Views.swift:1010` | 复制 http://host:port，IPv6 加方括号；未配置时隐藏 | 否 | 用 IPv4/IPv6 本地监听配置，粘贴核对；无需设置系统代理 |  |
-| G-044 | 设置／代理服务 | 复制 SOCKS5 地址 | `apps/macos/Sources/SluiceApp/Views.swift:1015` | 复制 socks5://host:port，IPv6 加方括号；未配置时隐藏 | 否 | 用本地监听配置，复制比对 |  |
+| G-043 | 设置／网络接管（HTTP & SOCKS5 卡片） | 复制 HTTP 地址（卡片内「HTTP」按钮） | `apps/macos/Sources/SluiceApp/Views.swift:1010` | 复制 http://host:port，IPv6 加方括号；未配置时隐藏 | 否 | 用 IPv4/IPv6 本地监听配置，粘贴核对；无需设置系统代理 |  |
+| G-044 | 设置／网络接管（HTTP & SOCKS5 卡片） | 复制 SOCKS5 地址（卡片内「SOCKS5」按钮） | `apps/macos/Sources/SluiceApp/Views.swift:1015` | 复制 socks5://host:port，IPv6 加方括号；未配置时隐藏 | 否 | 用本地监听配置，复制比对 |  |
 | G-045 | 设置／通用 | 打开应用时启动 | `apps/macos/Sources/SluiceApp/Views.swift:1023`<br>`apps/macos/Sources/SluiceApp/Views.swift:1064` | 保存自动启动偏好，后续打开主窗口时按偏好启动内核 | 否 | 仅本地配置测试关闭/开启和重开应用；涉及系统代理或 TUN 时需无Surge机器 |  |
 | G-046 | 设置／通用 | 登录时打开 | `apps/macos/Sources/SluiceApp/Views.swift:1131`<br>`apps/macos/Sources/SluiceApp/Views.swift:1064` | 注册／注销 SMAppService 登录项并反映错误和待批准状态 | 否 | 完整 app 切换后核对登录项和实际登录启动；仅使用本地配置；若启动会接管网络，需无Surge机器 |  |
 | G-047 | 设置／软件更新 | 检查更新… | `apps/macos/Sources/SluiceApp/MaintenanceSettingsView.swift:29` | 打开 Sparkle 更新流程；未打包、未配置或检查中按 canCheck 禁用 | 是 | 完整 app 验证更新渠道、无更新、有更新、失败、上次检查时间；开发构建只核对禁用态 |  |

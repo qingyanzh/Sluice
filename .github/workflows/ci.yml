@@ -2,8 +2,8 @@
 name: CI
 
 on:
-  push:
-  pull_request:
+  # Manual only: pushes and pull requests don't start CI; changes are verified
+  # locally. Run it by hand (Actions tab or `gh workflow run CI`) when needed.
   workflow_dispatch:
 
 jobs:
