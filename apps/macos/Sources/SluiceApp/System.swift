@@ -219,7 +219,7 @@ enum ConfigText {
         for raw in text.components(separatedBy: "\n") {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("[") { section = line; continue }
-            if (section == "[Proxy]" || section == "[Proxy Group]"), let eq = line.firstIndex(of: "="), !line.hasPrefix("#") {
+            if ["[Proxy]", "[Proxy Group]", "[Subscription]"].contains(section), let eq = line.firstIndex(of: "="), !line.hasPrefix("#") {
                 out.insert(line[..<eq].trimmingCharacters(in: .whitespaces))
             }
         }
@@ -241,6 +241,9 @@ enum ConfigText {
     /// Removes the `name = …` line from `[section]` and drops `name` from every group's
     /// member list, so nothing keeps pointing at the removed node or subscription.
     static func remove(_ name: String, from section: String, of text: String) -> String {
+        let source = section == "Subscription" || (section == "Proxy Group" && StructuredConfig(text).groups.contains {
+            $0.value.name == name && $0.value.parameter("policy-path") != nil
+        })
         var lines = text.components(separatedBy: "\n")
         var current = ""
         var out: [String] = []
@@ -251,6 +254,17 @@ enum ConfigText {
                 let key = line[..<eq].trimmingCharacters(in: .whitespaces)
                 if current == section && key == name { continue }
                 if current == "Proxy Group" {
+                    if source, var group = StructuredConfig.Group(line: line) {
+                        let before = group
+                        let prefix = subscriptionNodeReference(source: name, name: "")
+                        group.sources.removeAll { $0 == name }
+                        group.members.removeAll { $0 == name || $0.hasPrefix(prefix) }
+                        if group != before {
+                            if group.members.isEmpty && group.sources.isEmpty && group.parameter("policy-path") == nil { group.members = ["REJECT"] }
+                            out.append(group.serialised)
+                            continue
+                        }
+                    }
                     let fields = raw[raw.index(after: raw.firstIndex(of: "=")!)...].split(separator: ",", omittingEmptySubsequences: false)
                     let kept = fields.filter { $0.trimmingCharacters(in: .whitespaces) != name }
                     if kept.count != fields.count {
@@ -278,5 +292,29 @@ enum ConfigText {
         }), lines[i].contains("select") else { return text }
         lines[i] += ", \(option)"
         return lines.joined(separator: "\n")
+    }
+
+    static func addSourceToFinalGroup(_ source: String, in text: String) -> String {
+        var document = StructuredConfig(text)
+        guard let final = document.rules.last(where: { $0.value.isFinal }),
+              let entry = document.groups.first(where: { $0.value.name == final.value.policy && $0.value.type.lowercased() == "select" })
+        else { return text }
+        var group = entry.value
+        if !group.sources.contains(source) { group.sources.append(source) }
+        document.setGroup(group, at: entry.id)
+        return document.serialise()
+    }
+
+    static func setImportGroups(_ on: Bool, source: String, section: String, in text: String) -> String {
+        var current = ""
+        return text.components(separatedBy: "\n").map { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") && line.hasSuffix("]") { current = String(line.dropFirst().dropLast()); return raw }
+            guard current == section, let equal = line.firstIndex(of: "="), line[..<equal].trimmingCharacters(in: .whitespaces) == source else { return raw }
+            let body = String(line[line.index(after: equal)...])
+            guard var group = StructuredConfig.Group(line: "\(source) = \(section == "Subscription" ? "select," : "")\(body)") else { return raw }
+            group.importsGroups = on
+            return section == "Subscription" ? "\(source) = " + group.parameters.joined(separator: ", ") : group.serialised
+        }.joined(separator: "\n")
     }
 }

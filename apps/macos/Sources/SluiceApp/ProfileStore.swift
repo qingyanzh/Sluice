@@ -67,6 +67,8 @@ final class ProfileStore {
         baseDirectory.appendingPathComponent(name).appendingPathExtension("conf")
     }
 
+    func selectionsURL(for name: String) -> URL { url(for: name).appendingPathExtension("selections.json") }
+
     func validateAvailableName(_ name: String) throws {
         try Self.validateName(name)
         let filename = name + ".conf"
@@ -90,6 +92,11 @@ final class ProfileStore {
         let source = try existingURL(name)
         try validateAvailableName(newName)
         try files.copyItem(at: source, to: url(for: newName))
+        do {
+            if files.fileExists(atPath: selectionsURL(for: name).path) {
+                try files.copyItem(at: selectionsURL(for: name), to: selectionsURL(for: newName))
+            }
+        } catch { try? files.removeItem(at: url(for: newName)); throw error }
     }
 
     func read(_ name: String) throws -> String {
@@ -109,6 +116,11 @@ final class ProfileStore {
         if name == newName { return }
         try validateAvailableName(newName)
         try files.moveItem(at: source, to: url(for: newName))
+        do {
+            if files.fileExists(atPath: selectionsURL(for: name).path) {
+                try files.moveItem(at: selectionsURL(for: name), to: selectionsURL(for: newName))
+            }
+        } catch { try? files.moveItem(at: url(for: newName), to: source); throw error }
         if activeName == name {
             activeName = newName
             defaults.set(newName, forKey: Self.activeNameKey)
@@ -118,7 +130,11 @@ final class ProfileStore {
     func delete(_ name: String) throws {
         let source = try existingURL(name)
         guard name != activeName else { throw StoreError.activeProfile }
-        try files.removeItem(at: source)
+        let state = selectionsURL(for: name)
+        let backup = try? Data(contentsOf: state)
+        if files.fileExists(atPath: state.path) { try files.removeItem(at: state) }
+        do { try files.removeItem(at: source) }
+        catch { if let backup { try? backup.write(to: state, options: .atomic) }; throw error }
     }
 
     func activate(_ name: String) throws {

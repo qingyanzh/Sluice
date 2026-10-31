@@ -38,7 +38,7 @@
 //! `latency_ms` is null and `error` contains the full error chain for a failed option;
 //! `error` is null on success. Policy options also expose the last `error`.
 //! `/v1/nodes/<name>/test` takes `url=` (http://,
-//! default the group default test URL) and `timeout=` (ms, default 5000) and answers
+//! default the group default test URL) and `timeout=` (ms, default 10000) and answers
 //! `{"node","outbound","ok","connect_ms","latency_ms","status","error"}`: `connect_ms` is
 //! the time to open a stream through the node (TCP connect plus its handshake), `latency_ms`
 //! until the HTTP status line came back.
@@ -212,10 +212,11 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
                         })
                         .collect();
                     format!(
-                        "{{\"group\":{},\"type\":\"{}\",\"selected\":{},\"options\":[{}]}}",
+                        "{{\"group\":{},\"type\":\"{}\",\"selected\":{},\"url\":{},\"interval\":{},\"tolerance\":{},\"options\":[{}]}}",
                         json_str(&g.name),
                         g.kind,
                         json_str(&g.selected),
+                        json_str(&g.url), g.interval, g.tolerance.map_or("null".into(), |v| v.to_string()),
                         opts.join(",")
                     )
                 })
@@ -246,8 +247,8 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
         }
         ("POST", p) if p.starts_with("/v1/nodes/") && p.ends_with("/test") && p.len() > "/v1/nodes//test".len() => {
             let node = percent_decode(&p["/v1/nodes/".len()..p.len() - "/test".len()]);
-            let url = query_param(query, "url").unwrap_or_else(|| crate::config::DEFAULT_TEST_URL.to_string());
-            let ms = query_param(query, "timeout").and_then(|t| t.parse().ok()).unwrap_or(5000u64).clamp(100, 60_000);
+            let url = query_param(query, "url").unwrap_or_else(|| router.test_url(&node).to_string());
+            let ms = query_param(query, "timeout").and_then(|t| t.parse().ok()).unwrap_or(crate::router::PROBE_TIMEOUT.as_millis() as u64).clamp(100, 60_000);
             match router.test_node(&node, &url, std::time::Duration::from_millis(ms)).await {
                 Ok(t) => (
                     "200 OK",

@@ -225,6 +225,20 @@ pub struct GroupDef {
     /// Only subscription nodes whose name matches this regex are kept.
     pub policy_filter: Option<String>,
     pub update_interval_secs: u64,
+    /// Named subscription sources whose nodes are flattened into this group.
+    pub sources: Vec<String>,
+    pub node_filter: Option<String>,
+    pub import_groups: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubscriptionDef {
+    pub name: String,
+    pub path: String,
+    pub user_agent: Option<String>,
+    pub filter: Option<String>,
+    pub update_interval_secs: u64,
+    pub import_groups: bool,
 }
 
 pub const DEFAULT_TEST_URL: &str = "http://www.gstatic.com/generate_204";
@@ -251,6 +265,9 @@ impl GroupDef {
             }
         }
         parts.push(format!("update-interval={}", self.update_interval_secs));
+        if !self.sources.is_empty() { parts.push(format!("use={}", self.sources.join("|"))); }
+        if let Some(filter) = &self.node_filter { parts.push(format!("node-filter=\"{filter}\"")); }
+        if self.import_groups { parts.push("import-groups=true".into()); }
         format!("{} = {}", self.name, parts.join(", "))
     }
 }
@@ -266,6 +283,8 @@ pub struct Config {
     pub mitm: crate::mitm::MitmConfig,
     pub rewrites: crate::rewrite::Rewrites,
     pub subscriptions: Vec<crate::subscription::SubscriptionInfo>,
+    pub providers: Vec<SubscriptionDef>,
+    pub subscription_nodes: Vec<crate::subscription::SubscriptionNode>,
 }
 
 fn split_kv(line: &str) -> Result<(&str, &str)> {
@@ -405,7 +424,7 @@ pub fn parse_proxy(line: &str) -> Result<(String, ProxyDef)> {
     Ok((name.to_string(), def))
 }
 
-fn parse_group(line: &str) -> Result<GroupDef> {
+pub(crate) fn parse_group(line: &str) -> Result<GroupDef> {
     let (name, rest) = split_kv(line)?;
     let mut quoted = false;
     let mut parts = rest.split(|c| {
@@ -433,11 +452,14 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         other => bail!("unsupported group type {other:?} (supported: select, url-test, fallback, load-balance)"),
     };
     let policy_path = params.get("policy-path").cloned();
+    let sources: Vec<String> = params.get("use").map(|v| v.split('|').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()).unwrap_or_default();
+    let node_filter = params.get("node-filter").cloned();
+    if let Some(filter) = &node_filter { regex::Regex::new(filter).context("bad node-filter")?; }
     let user_agent = params.get("user-agent").cloned();
     if let Some(value) = &user_agent {
         http::HeaderValue::from_str(value).context("bad user-agent")?;
     }
-    if options.is_empty() && policy_path.is_none() {
+    if options.is_empty() && policy_path.is_none() && sources.is_empty() {
         bail!("group {name:?} has no options");
     }
     if let Some(re) = params.get("policy-regex-filter") {
@@ -453,6 +475,13 @@ fn parse_group(line: &str) -> Result<GroupDef> {
         user_agent,
         policy_filter: params.get("policy-regex-filter").cloned(),
         update_interval_secs: num("update-interval", 86400)?.max(60),
+        sources,
+        node_filter,
+        import_groups: match params.get("import-groups").map(String::as_str) {
+            None | Some("false") => false,
+            Some("true") => true,
+            _ => bail!("import-groups must be true or false"),
+        },
     })
 }
 
@@ -498,6 +527,19 @@ impl Config {
                 }
                 "Proxy" => cfg.proxies.push(parse_proxy(line).with_context(ctx)?),
                 "Proxy Group" => cfg.groups.push(parse_group(line).with_context(ctx)?),
+                "Subscription" => {
+                    let (name, params) = split_kv(line).with_context(ctx)?;
+                    if name.is_empty() || name.contains(['|', ',', '=', '\r', '\n']) {
+                        bail!("{}: invalid subscription name", ctx());
+                    }
+                    let group = parse_group(&format!("{name} = select, import-groups=true, {params}")).with_context(ctx)?;
+                    let path = group.policy_path.ok_or_else(|| anyhow!("{}: subscription needs policy-path", ctx()))?;
+                    if path.is_empty() || !group.options.is_empty() || !group.sources.is_empty() {
+                        bail!("{}: subscription only accepts source parameters", ctx());
+                    }
+                    cfg.providers.push(SubscriptionDef { name: name.into(), path, user_agent: group.user_agent,
+                        filter: group.policy_filter, update_interval_secs: group.update_interval_secs, import_groups: group.import_groups });
+                }
                 "Host" => {
                     let (k, v) = split_kv(line).with_context(ctx)?;
                     cfg.hosts.push((k.to_string(), v.to_string()));
@@ -520,6 +562,22 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_subscriptions_and_group_sources_parse_and_roundtrip() {
+        let cfg = Config::parse("[Subscription]\nA = policy-path=nodes.txt, user-agent=Test, policy-regex-filter=HK, update-interval=100\n[Proxy Group]\nMixed = select, @A/HK, use=A|B, node-filter=\"^(HK|JP)$\"\n").unwrap();
+        assert_eq!(cfg.providers[0].name, "A");
+        assert_eq!(cfg.providers[0].path, "nodes.txt");
+        assert_eq!(cfg.providers[0].update_interval_secs, 100);
+        assert_eq!(cfg.groups[0].sources, ["A", "B"]);
+        let back = parse_group(&cfg.groups[0].to_line()).unwrap();
+        assert_eq!(back.sources, cfg.groups[0].sources);
+        assert_eq!(back.node_filter, cfg.groups[0].node_filter);
+        for line in ["A = policy-path=", "A = user-agent=Test", "A = policy-path=x, DIRECT", "A|B = policy-path=x"] {
+            assert!(Config::parse(&format!("[Subscription]\n{line}\n")).is_err(), "{line}");
+        }
+        assert!(Config::parse("[Proxy Group]\nG = select, use=A, node-filter=[\n").is_err());
+    }
 
     #[test]
     fn anytls_roundtrip_and_defaults() {

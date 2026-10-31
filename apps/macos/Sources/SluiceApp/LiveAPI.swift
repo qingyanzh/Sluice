@@ -22,10 +22,10 @@ struct ActiveConnection: Decodable, Identifiable {
         case startMs = "start_ms", rateUp = "rate_up", rateDown = "rate_down"
     }
 
-    var policyChain: String { chain.joined(separator: " → ") }
+    var policyChain: String { chain.map(subscriptionNodeLabel).joined(separator: " → ") }
 
     func matches(_ query: String) -> Bool {
-        query.isEmpty || ([target, src ?? "", rule, policy, outbound, process ?? ""] + chain)
+        query.isEmpty || ([target, src ?? "", rule, policy, outbound, subscriptionNodeLabel(outbound), process ?? ""] + chain + chain.map(subscriptionNodeLabel))
             .contains { $0.localizedCaseInsensitiveContains(query) }
     }
 

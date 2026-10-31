@@ -1,12 +1,52 @@
 import Foundation
 
+struct SubscriptionNode: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let source: String
+    var kind: String? = nil
+    var server: String? = nil
+    var port: UInt16? = nil
+    var aliases: [String]? = nil
+    var title: String { "\(source) / \(name)" }
+}
+
+struct SubscriptionCatalog: Decodable {
+    let nodes: [SubscriptionNode]
+    let groups: [PolicyGroup]
+    var warnings: [String]? = nil
+}
+
+func subscriptionNodeLabel(_ reference: String) -> String {
+    guard reference.hasPrefix("@"), let slash = reference.firstIndex(of: "/") else { return reference }
+    let source = String(reference[reference.index(after: reference.startIndex)..<slash]).removingPercentEncoding
+    let suffix = String(reference[reference.index(after: slash)...])
+    let isGroup = suffix.hasPrefix("group/")
+    let name = (isGroup ? String(suffix.dropFirst(6)) : suffix).removingPercentEncoding
+    guard let source, let name else { return reference }
+    return "\(source) / \(name)\(isGroup ? " · 策略组" : "")"
+}
+
+func subscriptionNodeReference(source: String, name: String) -> String {
+    func component(_ value: String) -> String {
+        value.unicodeScalars.map { scalar in
+            if scalar.value < 33 || CharacterSet.controlCharacters.contains(scalar) || "%/,=|\"@".unicodeScalars.contains(scalar) {
+                return String(scalar).utf8.map { String(format: "%%%02X", $0) }.joined()
+            }
+            return String(scalar)
+        }.joined()
+    }
+    return "@\(component(source))/\(component(name))"
+}
+
 struct GroupOption: Decodable, Hashable {
     let name: String
     /// nil: not tested yet; -1: last health check failed.
     let latencyMs: Int?
+    var error: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name
+        case name, error
         case latencyMs = "latency_ms"
     }
 }
@@ -14,11 +54,20 @@ struct GroupOption: Decodable, Hashable {
 struct PolicyGroup: Decodable, Identifiable, Hashable {
     let group: String
     let type: String
-    let selected: String
-    let options: [GroupOption]
+    var selected: String
+    var options: [GroupOption]
+    var url: String? = nil
+    var interval: UInt64? = nil
+    var tolerance: UInt64? = nil
 
     var id: String { group }
     var isSelectable: Bool { type == "select" }
+    func updated(selected: String? = nil, options: [GroupOption]? = nil) -> Self {
+        var copy = self
+        if let selected { copy.selected = selected }
+        if let options { copy.options = options }
+        return copy
+    }
 }
 
 struct RouteResult: Decodable {

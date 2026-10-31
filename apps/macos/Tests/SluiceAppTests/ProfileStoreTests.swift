@@ -26,6 +26,22 @@ final class ProfileStoreTests: XCTestCase {
                          defaults: defaults, migratingFrom: source)
     }
 
+    func testProfileStateFollowsCopyRenameAndDeletionWithoutSharingFiles() throws {
+        let store = try makeStore()
+        let choices = Data(#"{"Proxy":"REJECT"}"#.utf8)
+        try choices.write(to: store.selectionsURL(for: "Default"))
+        try store.duplicate("Default", as: "Work")
+        XCTAssertEqual(try Data(contentsOf: store.selectionsURL(for: "Work")), choices)
+        try Data(#"{"Proxy":"DIRECT"}"#.utf8).write(to: store.selectionsURL(for: "Work"))
+        XCTAssertEqual(try Data(contentsOf: store.selectionsURL(for: "Default")), choices)
+        try store.rename("Work", to: "Travel")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.selectionsURL(for: "Work").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.selectionsURL(for: "Travel").path))
+        try store.delete("Travel")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.selectionsURL(for: "Travel").path))
+        XCTAssertEqual(try Data(contentsOf: store.selectionsURL(for: "Default")), choices)
+    }
+
     func testMigrationCopiesOriginalAndDoesNotRepeat() throws {
         let store = try makeStore()
         XCTAssertEqual(try store.names(), ["Default"])

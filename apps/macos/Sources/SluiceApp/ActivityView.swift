@@ -146,7 +146,7 @@ struct ActivityView: View {
     private var currentNode: String {
         if !core.summary.hasNodes { return "无 · 直连" }
         guard core.state == .running, let selected = mainGroup?.selected else { return "启动后显示" }
-        return selected == "DIRECT" ? "直连" : selected
+        return selected == "DIRECT" ? "直连" : subscriptionNodeLabel(selected)
     }
 
     /// One fact: its tile is coloured by the state grammar (nil = grey, off or no data).
@@ -263,7 +263,7 @@ struct ActivityView: View {
                     ForEach(Array(rows), id: \.key) { name, count in
                         VStack(spacing: 5) {
                             HStack {
-                                Text(name).font(DS.small).lineLimit(1).truncationMode(.middle)
+                                Text(subscriptionNodeLabel(name)).font(DS.small).lineLimit(1).truncationMode(.middle)
                                 Spacer(minLength: 12)
                                 Text("\(count)").font(DS.small.monospacedDigit()).foregroundStyle(DS.ink2)
                                     .frame(width: 56, alignment: .trailing)

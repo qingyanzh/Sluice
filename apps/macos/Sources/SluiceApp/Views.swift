@@ -228,7 +228,7 @@ struct MainView: View {
                 case .activity: ActivityView(pane: $pane, nodesIntent: $nodesIntent)
                 case .overview: OverviewView()
                 case .requests: RequestsView()
-                case .policy: PolicyView()
+                case .policy: PolicyView(draft: configDraft)
                 case .nodes: NodesView(intent: $nodesIntent)
                 case .rule: RuleView(pane: $pane, draft: configDraft)
                 case .logs: LogsView()
@@ -550,7 +550,7 @@ struct TestAllLatencyButton: View {
             }
         }
         .glassButton()
-        .disabled(core.state != .running || core.groups.isEmpty || !core.testingGroups.isEmpty)
+        .disabled(!core.canTestNodes || core.policyGroups.isEmpty || !core.testingGroups.isEmpty || !core.testingNodes.isEmpty)
         .help("并发测试所有策略组的节点延迟")
     }
 }
@@ -1212,58 +1212,19 @@ struct LoginItemCard: View {
 
 // MARK: policy
 
-struct PolicyView: View {
-    @EnvironmentObject var core: Core
-    @State private var filter = ""
-
-    var body: some View {
-        let mode = OutboundMode(rawValue: core.mode) ?? .rule
-        let groups = core.groups.filter { group in
-            filter.isEmpty || group.group.localizedCaseInsensitiveContains(filter)
-                || group.options.contains { $0.name.localizedCaseInsensitiveContains(filter) }
-        }
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                GlassSegmented(options: OutboundMode.allCases.map { ($0, $0.title, $0.icon) },
-                               selection: Binding(get: { mode }, set: { core.setMode($0.rawValue) }))
-                .disabled(core.state != .running)
-                Text(mode.explanation).font(DS.small).foregroundStyle(DS.ink2)
-
-                HStack {
-                    SectionTitle(text: "策略组")
-                    Spacer()
-                    TestAllLatencyButton().controlSize(.small)
-                }
-                if core.groups.isEmpty && core.state == .running && !core.policiesLoaded {
-                    ProgressView("正在加载策略…").font(DS.small)
-                } else if core.groups.isEmpty {
-                    EmptyState(icon: "signpost.right",
-                               title: core.state == .running ? "没有策略组" : "Sluice 未运行",
-                               detail: core.state == .running ? "在配置的 [Proxy Group] 中添加策略组。" : "启动 Sluice 后可以查看和切换策略组。",
-                               action: core.isActive ? nil : ("启动 Sluice", { core.requestStart() }) as (String, () -> Void)?)
-                        .frame(minHeight: 260)
-                } else if groups.isEmpty {
-                    EmptyState(icon: "magnifyingglass", title: "没有匹配的策略", detail: "按策略组名称或节点名称搜索。", action: ("清除搜索", { filter = "" }))
-                } else {
-                    ForEach(Array(groups.enumerated()), id: \.element.id) { i, g in GroupSection(group: g, filter: filter).entrance(i) }
-                }
-            }
-            .padding(.horizontal, DS.gutter).padding(.bottom, DS.gutter)
-        }
-        .paneHeader {
-            PaneHeader(title: "策略", subtitle: Pane.policy.subtitle) {
-                SearchField(prompt: "搜索策略组或节点", text: $filter)
-            }
-        }
-    }
-}
-
 /// A policy group with every option laid out, so the current choice, latency and
 /// availability compare at a glance. Manual groups switch by clicking an option.
 struct GroupSection: View {
     @EnvironmentObject var core: Core
     let group: PolicyGroup
     var filter = ""
+    var interactive = true
+    var usage: String? = nil
+    var onEdit: (() -> Void)? = nil
+    var onCopy: (() -> Void)? = nil
+    var onDefault: (() -> Void)? = nil
+    var onRule: (() -> Void)? = nil
+    var onReferences: (() -> Void)? = nil
 
     static func kindLabel(_ type: String) -> String {
         switch type {
@@ -1292,22 +1253,34 @@ struct GroupSection: View {
             HStack(spacing: 10) {
                 IconTile(symbol: kindIcon, size: 28)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(group.group).font(DS.heading).lineLimit(1)
-                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · 点击选项切换" : "\(Self.kindLabel(group.type)) · 自动 · 当前：\(group.selected)")
+                    Text(subscriptionNodeLabel(group.group)).font(DS.heading).lineLimit(1)
+                    Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · \(!interactive ? "只读预览" : core.state == .running ? "点击选项切换" : "点击选项测速")" : "\(Self.kindLabel(group.type)) · 自动 · 选择：\(subscriptionNodeLabel(group.selected))")
                         .font(DS.caption).foregroundStyle(DS.ink2)
+                    if let usage { Text(usage).font(DS.caption).foregroundStyle(usage.contains("默认出口") ? DS.accent : DS.ink3) }
                 }
                 Spacer(minLength: 8)
+                if onEdit != nil || onCopy != nil || onDefault != nil || onRule != nil || onReferences != nil {
+                    Menu {
+                        if let onEdit { Button("编辑策略组", action: onEdit) }
+                        if let onCopy { Button("复制为我的组…", action: onCopy) }
+                        if let onDefault { Button("设为默认出口", action: onDefault) }
+                        if let onRule { Button("关联专用规则…", action: onRule) }
+                        if let onReferences { Divider(); Button("查看引用与执行链", action: onReferences) }
+                    } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .accessibilityLabel("\(subscriptionNodeLabel(group.group)) 的操作")
+                }
                 if tested > 0 {
                     Text(failed == 0 ? "\(tested) 个可用" : "\(tested - failed) 个可用 · \(failed) 个失败")
                         .font(DS.caption).monospacedDigit().foregroundStyle(failed == 0 ? DS.ink2 : failed == tested ? DS.fail : DS.warn)
                 }
-                if core.testingGroups.contains(group.group) { ProgressView().controlSize(.small).accessibilityLabel("正在测试") }
-                Button(core.testingGroups.contains(group.group) ? "测试中…" : "测试") { core.test(group: group.group) }.glassButton()
-                    .disabled(core.state != .running || core.testingGroups.contains(group.group))
+                if interactive && core.testingGroups.contains(group.group) { ProgressView().controlSize(.small).accessibilityLabel("正在测试") }
+                Button(interactive && core.testingGroups.contains(group.group) ? "测试中…" : "测试") { core.test(group: group.group) }.glassButton()
+                    .disabled(!interactive || !core.canTestNodes || !core.testingNodes.isEmpty || core.testingGroups.contains(group.group))
                     .help("测试这个策略组里每个选项的延迟")
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 10)], spacing: 10) {
-                ForEach(group.options.filter { filter.isEmpty || group.group.localizedCaseInsensitiveContains(filter) || $0.name.localizedCaseInsensitiveContains(filter) }, id: \.name) { OptionChip(group: group, option: $0) }
+                ForEach(group.options.filter { filter.isEmpty || subscriptionNodeLabel(group.group).localizedCaseInsensitiveContains(filter) || subscriptionNodeLabel($0.name).localizedCaseInsensitiveContains(filter) }, id: \.name) { OptionChip(group: group, option: $0, interactive: interactive) }
             }
         }
         .padding(DS.cardPadding)
@@ -1321,26 +1294,32 @@ struct OptionChip: View {
     @EnvironmentObject var core: Core
     let group: PolicyGroup
     let option: GroupOption
+    var interactive = true
     @State private var hovering = false
 
     var body: some View {
         optionContent.contextMenu {
             Button(core.testingNodes.contains(option.name) ? "测试中…" : "测试节点") { core.test(node: option.name) }
-                .disabled(core.state != .running || core.testingNodes.contains(option.name))
+                .disabled(!interactive || !core.canTestNodes || core.testingNodes.contains(option.name))
         }
     }
 
     @ViewBuilder private var optionContent: some View {
-        if group.isSelectable {
+        if !interactive { content }
+        else if core.state != .running {
+            Button { core.test(node: option.name) } label: { content }
+                .buttonStyle(PressableStyle()).disabled(!core.canTestNodes || core.isTesting(node: option.name))
+                .help(option.error ?? "点击测试节点；启动代理后可切换选择")
+        } else if group.isSelectable {
             Button {
                 if group.selected != option.name { core.select(group: group.group, option: option.name) }
             } label: { content }
             .buttonStyle(PressableStyle())
-            .disabled(core.state != .running)
-            .help(group.selected == option.name ? "当前选择" : "切换到 \(option.name)")
+            .disabled(core.reloading || core.restarting)
+            .help(option.error ?? (group.selected == option.name ? "当前选择" : "切换到 \(subscriptionNodeLabel(option.name))"))
         } else {
             content
-                .help("自动选择 · 当前：\(group.selected)")
+                .help(option.error ?? "自动选择 · 当前：\(subscriptionNodeLabel(group.selected))")
         }
     }
 
@@ -1348,10 +1327,10 @@ struct OptionChip: View {
         let chosen = group.selected == option.name
         return HStack(spacing: 8) {
             if chosen { Image(systemName: "checkmark").font(DS.caption).foregroundStyle(DS.accent) }
-            Text(option.name).font(DS.label.weight(chosen ? .semibold : .regular))
+            Text(subscriptionNodeLabel(option.name)).font(DS.label.weight(chosen ? .semibold : .regular))
                 .lineLimit(2).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            LatencyBadge(latency: option.latencyMs, testing: core.testingGroups.contains(group.group) || core.testingNodes.contains(option.name))
+            LatencyBadge(latency: option.latencyMs, testing: interactive && (core.testingGroups.contains(group.group) || core.testingNodes.contains(option.name)))
         }
         .padding(.horizontal, 12).padding(.vertical, 10).frame(minHeight: 40)
         .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
@@ -1471,22 +1450,26 @@ struct AddSubscriptionSheet: View {
     @State private var url = ""
     @State private var filter = ""
     @State private var userAgent = ""
+    @State private var importGroups = true
     @State private var error: String?
     @State private var busy = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SheetHeader(icon: "link", title: "添加订阅", detail: "保存配置前会先下载订阅并检查其中的节点。")
+            SheetHeader(icon: "link", title: "添加节点来源", detail: "导入节点和可选策略组，沿用当前规则。整套规则请使用「导入独立配置」。")
             SheetField(label: "订阅地址", prompt: "https://…", text: $url)
             HStack(spacing: 12) {
                 SheetField(label: "名称", prompt: "Subscription", text: $name)
                 SheetField(label: "名称过滤（正则，可选）", prompt: "例如 香港|HK", text: $filter)
             }
             SheetField(label: "User-Agent（可选）", prompt: "留空使用默认值", text: $userAgent)
+            Toggle("导入订阅自带的策略组", isOn: $importGroups)
+            Text("保留策略组的成员与嵌套关系，名称按订阅区分；当前配置的规则和系统设置保持不变。")
+                .font(DS.small).foregroundStyle(DS.ink2)
             SheetFooter(error: error, primary: busy ? "下载中…" : "添加", enabled: !busy && !url.isEmpty, cancel: { dismiss() }) {
                 busy = true
                 Task {
-                    error = await core.addSubscription(name: name, url: url, filter: filter, userAgent: userAgent)
+                    error = await core.addSubscription(name: name, url: url, filter: filter, userAgent: userAgent, importGroups: importGroups)
                     busy = false
                     if error == nil { dismiss() }
                 }
@@ -1623,7 +1606,7 @@ struct OutboundTag: View {
     let name: String
     var body: some View {
         let color: Color = name == "REJECT" ? DS.fail : name == "DIRECT" ? DS.ok : DS.info
-        StatusBadge(text: name, tone: color)
+        StatusBadge(text: subscriptionNodeLabel(name), tone: color)
     }
 }
 
@@ -2186,11 +2169,13 @@ struct ConfigView: View {
     @State private var pendingSwitch: String?
     @State private var pendingDelete: String?
     @State private var profileEdit: ProfileEdit?
+    @State private var importingProfile = false
 
     var body: some View {
         VStack(spacing: 0) {
             let name = URL(fileURLWithPath: core.configPath).lastPathComponent
             PaneHeader(title: "配置", subtitle: draft.text == draft.saved ? "\(name) · 已保存" : "\(name) · 有未保存的修改") {
+                Button("导入独立配置…") { importingProfile = true }.glassButton().disabled(draft.busy)
                 Button("从当前新建…") { profileEdit = .create }.glassButton().disabled(draft.busy)
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
             }
@@ -2284,6 +2269,7 @@ struct ConfigView: View {
         } message: {
             Text("配置文件将从本地永久删除。")
         }
+        .sheet(isPresented: $importingProfile) { IndependentProfileImportSheet() }
         .sheet(item: $profileEdit) { action in
             ProfileNameSheet(action: action) { name in
                 switch action {

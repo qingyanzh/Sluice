@@ -103,7 +103,8 @@ fn rule_set_interval(cfg: &Config) -> Duration {
 
 /// Shortest `update-interval` among subscription groups, if there are any.
 fn subscription_interval(cfg: &Config) -> Option<Duration> {
-    cfg.groups.iter().filter(|g| g.policy_path.is_some()).map(|g| Duration::from_secs(g.update_interval_secs)).min()
+    cfg.groups.iter().filter(|g| g.policy_path.is_some()).map(|g| g.update_interval_secs)
+        .chain(cfg.providers.iter().map(|p| p.update_interval_secs)).min().map(Duration::from_secs)
 }
 
 /// Expands subscriptions, builds the router and fills rule sets. With `strict` off,
@@ -134,7 +135,7 @@ fn selections(router: &Router) -> std::collections::BTreeMap<String, String> {
     router.groups().into_iter().filter(|g| g.kind == "select").map(|g| (g.name, g.selected)).collect()
 }
 
-fn restore_selections(router: &Router, path: &str) {
+pub(crate) fn restore_selections(router: &Router, path: &str) {
     let path = selection_path(path);
     match std::fs::read(&path) {
         Ok(data) => {
@@ -188,19 +189,6 @@ impl Fixed {
             tun: (g.enhanced_mode, g.tun_mtu, g.fake_ip_range.clone(), g.dns_server.clone()),
         }
     }
-}
-
-/// Checks that `path` is a config Sluice can run, without touching the running one:
-/// it must parse and its proxies, groups and rules must build into a router.
-pub fn validate_profile(path: &str) -> Result<Config> {
-    let mut cfg = read_config(path)?;
-    // Subscriptions aren't fetched here; stand in for their nodes (REJECT, as `expand`
-    // does for an empty subscription) so `policy-path` groups with no inline options build.
-    for g in cfg.groups.iter_mut().filter(|g| g.policy_path.is_some() && g.options.is_empty()) {
-        g.options.push("REJECT".into());
-    }
-    Router::new(&cfg).with_context(|| format!("profile {path}"))?;
-    Ok(cfg)
 }
 
 /// Other config files next to `path` (`.conf`), sorted, for a profile picker.
@@ -293,8 +281,9 @@ impl Reloader {
     pub async fn switch_profile(&self, path: &str) -> Result<String> {
         let _one_at_a_time = self.lock.lock().await;
         let path = std::fs::canonicalize(path).with_context(|| format!("profile {path}"))?.to_string_lossy().into_owned();
-        validate_profile(&path)?;
-        let summary = self.reload_from(&path, "profile switch").await?;
+        // reload_from expands subscription nodes/groups before validating the router.
+        // A preflight Router::new on the raw file rejects valid imported references.
+        let summary = self.reload_from(&path, "profile switch").await.with_context(|| format!("profile {path}"))?;
         *self.path.lock().unwrap() = path;
         Ok(summary)
     }
@@ -306,7 +295,14 @@ impl Reloader {
         }
         let (cfg, router) = build(cfg, path, false).await?;
         let router = Arc::new(router);
-        router.inherit_state(&self.handle.current());
+        let current = self.path();
+        let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+        if canonical(&current) == canonical(path) {
+            router.inherit_state(&self.handle.current());
+        } else {
+            // A profile owns its choices, even when group/node names overlap.
+            restore_selections(&router, path);
+        }
         save_selections(&router, path)?;
         activate(&router, &cfg);
         *self.handle.0.write().unwrap() = router;
@@ -456,6 +452,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn switching_profiles_restores_the_target_choices_without_inheriting_same_named_groups() {
+        let dir = std::env::temp_dir().join(format!("sluice-profile-choices-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "[Proxy Group]\nProxy = select, DIRECT, REJECT\n[Rule]\nFINAL,Proxy\n";
+        let a = write(&dir, "a.conf", text);
+        let b = write(&dir, "b.conf", text);
+        let cfg = read_config(&a).unwrap();
+        let core = Reloader::start(Router::new(&cfg).unwrap(), &cfg, &a);
+        core.select("Proxy", "REJECT").await.unwrap();
+        core.switch_profile(&b).await.unwrap();
+        assert_eq!(core.handle.current().resolve("Proxy").unwrap(), "DIRECT");
+        core.select("Proxy", "DIRECT").await.unwrap();
+        core.switch_profile(&a).await.unwrap();
+        assert_eq!(core.handle.current().resolve("Proxy").unwrap(), "REJECT");
+        core.reload("same profile").await.unwrap();
+        assert_eq!(core.handle.current().resolve("Proxy").unwrap(), "REJECT");
+        core.switch_profile(&b).await.unwrap();
+        assert_eq!(core.handle.current().resolve("Proxy").unwrap(), "DIRECT");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn profile_switch_expands_imported_groups_nodes_and_dynamic_sources_before_validation() {
+        let dir = std::env::temp_dir().join(format!("sluice-profile-import-switch-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = write(&dir, "a.conf", "[Rule]\nFINAL,DIRECT\n");
+        let source = "[Proxy]\nHK = trojan, hk.example, 443, password=fixture\n[Proxy Group]\n节点选择 = select, 自动选择, DIRECT\n自动选择 = select, HK\n[Rule]\nDOMAIN-KEYWORD,mojie,自动选择\nFINAL,节点选择\n";
+        let source_path = write(&dir, "source.txt", source);
+        let source_url = url::Url::from_file_path(&source_path).unwrap();
+        let imported = crate::profile_import::convert(source, source_url.as_str(), "").unwrap();
+        // Match the device settings of the currently running fixture.
+        let imported = imported.lines().filter(|line| !line.contains("-listen =")).collect::<Vec<_>>().join("\n");
+        let b = write(&dir, "b.conf", &imported);
+        let cfg = read_config(&a).unwrap();
+        let core = Reloader::start(Router::new(&cfg).unwrap(), &cfg, &a);
+        core.switch_profile(&b).await.unwrap();
+        assert_eq!(core.path(), b);
+        let router = core.handle.current();
+        assert_eq!(router.resolve("@导入来源/group/节点选择").unwrap(), "@导入来源/HK");
+        let decision = router.decide(&crate::util::Target::parse_authority("mojie.example:443", 443).unwrap()).await.unwrap();
+        assert_eq!(decision.policy, "@导入来源/group/自动选择");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), imported);
+        for (name, group) in [("dynamic", "Own = select, use=Airport"), ("pinned", "Own = select, @Airport/HK")] {
+            let text = format!("[Subscription]\nAirport = policy-path=\"{source_url}\", import-groups=false\n[Proxy Group]\n{group}\n[Rule]\nFINAL,Own\n");
+            let path = write(&dir, &format!("{name}.conf"), &text);
+            core.switch_profile(&path).await.unwrap();
+            assert_eq!(core.handle.current().resolve("Own").unwrap(), "@Airport/HK");
+        }
+        let invalid = write(&dir, "invalid.conf", &imported.replace("@导入来源/group/自动选择", "@导入来源/group/Missing"));
+        let previous_path = core.path();
+        let previous = core.handle.current();
+        assert!(core.switch_profile(&invalid).await.is_err());
+        assert_eq!(core.path(), previous_path);
+        assert!(Arc::ptr_eq(&core.handle.current(), &previous));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn profile_switch_validates_and_keeps_old_on_error() {
         let dir = std::env::temp_dir().join(format!("sluice-profile-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -463,24 +517,24 @@ mod tests {
         let b = write(&dir, "b.conf", "[Proxy Group]\nG = select, DIRECT, REJECT\n[Rule]\nFINAL,G\n");
         let bad = write(&dir, "bad.conf", "[Rule]\nFINAL,NoSuchPolicy\n");
         let garbage = write(&dir, "garbage.conf", "[Proxy]\nA = vless, h, 1\n");
-        assert!(validate_profile(&a).is_ok());
-        assert!(validate_profile(&bad).is_err());
-        assert!(validate_profile(&garbage).is_err());
-        // A subscription group with no inline options must validate, not panic.
-        let sub = write(&dir, "sub.conf", "[Proxy Group]\nS = select, policy-path=https://example.invalid/sub\n[Rule]\nFINAL,S\n");
-        validate_profile(&sub).unwrap();
-        std::fs::remove_file(&sub).unwrap();
-        assert!(validate_profile(&dir.join("missing.conf").to_string_lossy()).is_err());
         assert_eq!(sibling_profiles(&a), vec![a.clone(), b.clone(), bad.clone(), garbage.clone()]);
 
         let cfg = read_config(&a).unwrap();
         let r = Reloader::start(Router::new(&cfg).unwrap(), &cfg, &a);
-        assert!(r.switch_profile(&bad).await.is_err());
-        assert_eq!(r.path(), a);
-        assert!(r.handle.current().groups().is_empty());
+        for path in [&bad, &garbage, &dir.join("missing.conf").to_string_lossy().into_owned()] {
+            let previous = r.handle.current();
+            assert!(r.switch_profile(path).await.is_err());
+            assert_eq!(r.path(), a);
+            assert!(Arc::ptr_eq(&r.handle.current(), &previous));
+        }
         r.switch_profile(&b).await.unwrap();
         assert_eq!(r.path(), b);
         assert_eq!(r.handle.current().groups()[0].name, "G");
+        // A subscription group with no inline members is validated after expansion.
+        write(&dir, "empty.txt", "");
+        let sub = write(&dir, "sub.conf", "[Proxy Group]\nS = select, policy-path=empty.txt\n[Rule]\nFINAL,S\n");
+        r.switch_profile(&sub).await.unwrap();
+        assert_eq!(r.handle.current().resolve("S").unwrap(), "REJECT");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

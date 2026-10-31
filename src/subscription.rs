@@ -1,5 +1,5 @@
-//! Subscriptions: groups with `policy-path=<url|file>` get their nodes from a list of
-//! share links (plain or base64) or Surge-style proxy lines.
+//! Independent subscription sources and legacy `policy-path` groups. Groups may
+//! flatten multiple sources or pin source-scoped nodes from their public catalog.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -15,7 +15,8 @@ use crate::config::{parse_proxy, Config, ProxyDef};
 use crate::ruleset::fetch;
 use crate::transport::{Layer, WsOpts, XhttpMode, XhttpOpts};
 
-/// One entry per (group, source), shared with control API readers by the reloader.
+/// One entry per named source, shared with control API readers by the reloader.
+/// `group` is retained for API compatibility; independent sources have no policy group.
 #[derive(Debug, Clone, Serialize)]
 pub struct SubscriptionInfo {
     pub group: String,
@@ -26,6 +27,122 @@ pub struct SubscriptionInfo {
     pub node_count: usize,
     /// Informational entries supplied as pseudo-nodes by the provider.
     pub notices: Vec<String>,
+}
+
+/// Public, credential-free catalog. References are scoped to a named source.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscriptionNode {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+    pub kind: String,
+    pub server: String,
+    pub port: u16,
+    pub aliases: Vec<String>,
+}
+
+/// Escape config delimiters while keeping ordinary Unicode names readable.
+pub fn node_reference(source: &str, name: &str) -> String {
+    fn component(value: &str) -> String {
+        let mut out = String::new();
+        for c in value.chars() {
+            if c.is_control() || c.is_ascii_whitespace() || matches!(c, '%' | '/' | ',' | '=' | '|' | '"' | '@') {
+                let mut bytes = [0; 4];
+                for b in c.encode_utf8(&mut bytes).as_bytes() { out.push_str(&format!("%{b:02X}")); }
+            } else { out.push(c); }
+        }
+        out
+    }
+    format!("@{}/{}", component(source), component(name))
+}
+
+pub fn group_reference(source: &str, name: &str) -> String {
+    let node = node_reference(source, name);
+    let (prefix, component) = node.split_once('/').unwrap();
+    format!("{prefix}/group/{component}")
+}
+
+/// Import topology only: upstream listeners, DNS, MITM and rules never override
+/// the active profile. All node/group references stay inside the source namespace.
+pub(crate) fn import_groups(cfg: &mut Config, source: &str, text: &str) -> Result<()> {
+    let decoded = b64_str(text);
+    let text = if text.contains("proxy-groups:") || text.contains("[Proxy Group]") { text }
+        else { decoded.as_deref().unwrap_or(text) };
+    let mut groups = Vec::new();
+    if text.lines().any(|l| l.starts_with("proxy-groups:")) {
+        let document: serde_yaml::Value = serde_yaml::from_str(text)?;
+        let items = document.get("proxy-groups").and_then(serde_yaml::Value::as_sequence)
+            .ok_or_else(|| anyhow!("subscription {source:?}: proxy-groups must be a list"))?;
+        for item in items {
+            let value = |key| item.get(key).and_then(serde_yaml::Value::as_str);
+            let name = value("name").ok_or_else(|| anyhow!("subscription group needs a name"))?;
+            let kind = value("type").ok_or_else(|| anyhow!("subscription group {name:?} needs a type"))?;
+            if item.get("use").and_then(serde_yaml::Value::as_sequence).is_some_and(|v| !v.is_empty()) {
+                bail!("subscription group {name:?}: external proxy-providers are not imported; supply a config with inline proxies");
+            }
+            let mut group = crate::config::parse_group(&format!("Temporary = {kind}, REJECT"))?;
+            group.name = name.into();
+            group.options = item.get("proxies").and_then(serde_yaml::Value::as_sequence).map(|items| {
+                items.iter().map(|v| v.as_str().map(String::from).ok_or_else(|| anyhow!("group {name:?}: member must be a name"))).collect::<Result<Vec<_>>>()
+            }).transpose()?.unwrap_or_default();
+            if let Some(url) = value("url") { group.url = url.into(); }
+            if let Some(interval) = item.get("interval").and_then(serde_yaml::Value::as_u64) { group.interval_secs = interval.max(10); }
+            if let crate::config::GroupKind::UrlTest { ref mut tolerance_ms } = group.kind {
+                if let Some(tolerance) = item.get("tolerance").and_then(serde_yaml::Value::as_u64) { *tolerance_ms = tolerance; }
+            }
+            groups.push(group);
+        }
+    } else {
+        let mut section = "";
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') && line.ends_with(']') { section = line; continue; }
+            if section == "[Proxy Group]" && !line.is_empty() && !line.starts_with(['#', ';']) && !line.starts_with("//") {
+                groups.push(crate::config::parse_group(line)?);
+            }
+        }
+    }
+    let mut names = HashSet::new();
+    for group in &groups {
+        if !names.insert(group.name.clone()) { bail!("subscription {source:?}: duplicate group {:?}", group.name); }
+    }
+    let nodes: HashSet<_> = cfg.subscription_nodes.iter().filter(|n| n.source == source).map(|n| n.name.clone()).collect();
+    for mut group in groups {
+        if group.policy_path.is_some() || !group.sources.is_empty() {
+            bail!("subscription group {:?}: nested subscription sources are not supported", group.name);
+        }
+        group.name = group_reference(source, &group.name);
+        if cfg.groups.iter().any(|g| g.name == group.name) || cfg.proxies.iter().any(|(n, _)| n == &group.name) {
+            bail!("imported subscription group {:?} is already used", group.name);
+        }
+        group.options = group.options.iter().filter_map(|name| {
+            if matches!(name.as_str(), "DIRECT" | "REJECT") { Some(name.clone()) }
+            else if names.contains(name) { Some(group_reference(source, name)) }
+            else if nodes.contains(name) { Some(node_reference(source, name)) }
+            else { warn!("subscription {source:?}: unavailable member {name:?} skipped"); None }
+        }).collect();
+        if group.options.is_empty() { group.options.push("REJECT".into()); }
+        cfg.groups.push(group);
+    }
+    Ok(())
+}
+
+fn register_nodes(cfg: &mut Config, source: &str, nodes: &[(String, ProxyDef)]) -> Result<()> {
+    let mut names = HashSet::new();
+    for (name, def) in nodes {
+        if !names.insert(name) {
+            bail!("subscription {source:?} has duplicate node name {name:?}; node names within a source must be unique");
+        }
+        let id = node_reference(source, name);
+        if cfg.proxies.iter().any(|(n, _)| n == &id) || cfg.groups.iter().any(|g| g.name == id) {
+            bail!("subscription node reference {id:?} is already used");
+        }
+        cfg.proxies.push((id.clone(), def.clone()));
+        let line = def.to_line("node");
+        let parts: Vec<_> = line.split_once('=').unwrap().1.split(',').map(str::trim).collect();
+        cfg.subscription_nodes.push(SubscriptionNode { id, name: name.clone(), source: source.into(),
+            kind: parts[0].into(), server: parts[1].into(), port: parts[2].parse()?, aliases: Vec::new() });
+    }
+    Ok(())
 }
 
 fn b64(s: &str) -> Option<Vec<u8>> {
@@ -327,7 +444,7 @@ pub fn parse(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>) {
     (nodes, skipped)
 }
 
-fn parse_with_metadata(text: &str, source: &str) -> (Vec<(String, ProxyDef)>, Vec<String>, Vec<String>) {
+pub(crate) fn parse_with_metadata(text: &str, source: &str) -> (Vec<(String, ProxyDef)>, Vec<String>, Vec<String>) {
     let local_source = url::Url::parse(source).is_ok_and(|url| url.scheme() == "file" || url.host_str().is_some_and(is_loopback));
     let decoded;
     let text = text.trim_start_matches('\u{feff}');
@@ -373,12 +490,18 @@ fn parse_with_metadata(text: &str, source: &str) -> (Vec<(String, ProxyDef)>, Ve
 /// Downloads each group's `policy-path`, adds its nodes as proxies and group options.
 /// With `strict` off, a subscription that can't be fetched leaves its group empty.
 pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
+    let mut source_names = HashSet::new();
+    for name in cfg.providers.iter().map(|p| &p.name).chain(cfg.groups.iter().filter(|g| g.policy_path.is_some()).map(|g| &g.name)) {
+        if !source_names.insert(name.clone()) { bail!("duplicate subscription source {name:?}"); }
+    }
     let mut taken: HashSet<String> = cfg.proxies.iter().map(|(n, _)| n.clone()).collect();
     taken.extend(cfg.groups.iter().map(|g| g.name.clone()));
     taken.extend(["DIRECT".to_string(), "REJECT".to_string()]);
-    // Groups sharing a subscription share its proxies: source -> final proxy names.
+    // Keep old bare names for existing configurations. New references always use
+    // a source namespace, and never depend on another source's import order.
     let mut imported = HashMap::new();
     cfg.subscriptions.clear();
+    cfg.subscription_nodes.clear();
     for gi in 0..cfg.groups.len() {
         let Some(source) = cfg.groups[gi].policy_path.clone() else { continue };
         let user_agent = cfg.groups[gi].user_agent.clone();
@@ -400,26 +523,74 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
             for (name, def) in nodes {
                 let mut unique = name.clone();
                 let mut i = 2;
-                while !taken.insert(unique.clone()) {
-                    unique = format!("{name} {i}");
-                    i += 1;
-                }
-                cfg.proxies.push((unique.clone(), def));
-                names.push(unique);
+                while !taken.insert(unique.clone()) { unique = format!("{name} {i}"); i += 1; }
+                cfg.proxies.push((unique.clone(), def.clone()));
+                names.push((name, unique, def));
             }
-            imported.insert(key.clone(), (names, metadata, last_error, notices));
+            imported.insert(key.clone(), (names, metadata, last_error, notices, text));
         }
         let filter = cfg.groups[gi].policy_filter.as_deref().map(regex::Regex::new).transpose()?;
-        let (names, metadata, last_error, notices) = &imported[&key];
-        let picked: Vec<String> = names.iter().filter(|n| filter.as_ref().is_none_or(|re| re.is_match(n))).cloned().collect();
-        let g = &mut cfg.groups[gi];
-        info!("{}", expansion_summary(&g.name, picked.len(), &source, &note));
+        let (names, metadata, last_error, notices, text) = &imported[&key];
+        let picked: Vec<_> = names.iter().filter(|(_, alias, _)| filter.as_ref().is_none_or(|re| re.is_match(alias))).collect();
+        let group_name = cfg.groups[gi].name.clone();
+        info!("{}", expansion_summary(&group_name, picked.len(), &source, &note));
         cfg.subscriptions.push(SubscriptionInfo {
-            group: g.name.clone(), url: source.clone(), metadata: metadata.clone(), last_error: last_error.clone(), node_count: picked.len(), notices: notices.clone(),
+            group: group_name.clone(), url: source, metadata: metadata.clone(), last_error: last_error.clone(), node_count: picked.len(), notices: notices.clone(),
         });
-        g.options.extend(picked);
+        cfg.groups[gi].options.extend(picked.iter().map(|(_, alias, _)| alias.clone()));
+        // Legacy subscriptions can contain duplicate labels. Preserve their old
+        // behaviour, but do not expose ambiguous labels as stable references.
+        let mut counts = HashMap::new();
+        for (name, _, _) in &picked { *counts.entry(name.as_str()).or_insert(0) += 1; }
+        let stable: Vec<_> = picked.iter().filter(|(name, _, _)| counts[name.as_str()] == 1)
+            .map(|(name, _, def)| (name.clone(), def.clone())).collect();
+        register_nodes(cfg, &group_name, &stable)?;
+        for node in cfg.subscription_nodes.iter_mut().filter(|n| n.source == group_name) {
+            node.aliases = picked.iter().filter(|(name, _, _)| name == &node.name).map(|(_, alias, _)| alias.clone()).collect();
+        }
+        if cfg.groups[gi].import_groups { import_groups(cfg, &group_name, text)?; }
+    }
+    for provider in cfg.providers.clone() {
+        let result = fetch(&provider.path, base, Duration::from_secs(provider.update_interval_secs), provider.user_agent.as_deref()).await;
+        let (text, metadata, last_error) = match result {
+            Ok(r) => (r.text, r.metadata, r.last_error),
+            Err(e) if strict => return Err(e.context(format!("subscription {:?}", provider.name))),
+            Err(e) => (String::new(), Default::default(), Some(format!("{e:#}"))),
+        };
+        let (mut nodes, skipped, notices) = parse_with_metadata(&text, &provider.path);
+        let filter = provider.filter.as_deref().map(regex::Regex::new).transpose()?;
+        nodes.retain(|(name, _)| filter.as_ref().is_none_or(|re| re.is_match(name)));
+        info!("{}", expansion_summary(&provider.name, nodes.len(), &provider.path, &summarize(&skipped)));
+        cfg.subscriptions.push(SubscriptionInfo { group: provider.name.clone(), url: provider.path,
+            metadata, last_error, node_count: nodes.len(), notices });
+        register_nodes(cfg, &provider.name, &nodes)?;
+        if provider.import_groups { import_groups(cfg, &provider.name, &text)?; }
+    }
+    let available: HashSet<_> = cfg.subscription_nodes.iter().map(|n| n.id.as_str()).collect();
+    let prefixes: Vec<_> = source_names.iter().map(|s| node_reference(s, "")).collect();
+    let concrete: HashSet<String> = cfg.proxies.iter().map(|(name, _)| name.clone()).chain(cfg.groups.iter().map(|g| g.name.clone())).collect();
+    for g in &mut cfg.groups {
+        let filter = g.node_filter.as_deref().map(regex::Regex::new).transpose()?;
+        for source in &g.sources {
+            if !source_names.contains(source) { bail!("group {:?} refers to unknown subscription {source:?}", g.name); }
+            g.options.extend(cfg.subscription_nodes.iter().filter(|n| &n.source == source && filter.as_ref().is_none_or(|re| re.is_match(&n.name))).map(|n| n.id.clone()));
+        }
+        for option in &g.options {
+            if option.starts_with('@') && option.contains('/') && !available.contains(option.as_str())
+                && !concrete.contains(option.as_str()) && !prefixes.iter().any(|prefix| option.starts_with(prefix)) {
+                bail!("group {:?} refers to an unknown subscription node source in {option:?}", g.name);
+            }
+        }
+        let mut seen = HashSet::new();
+        g.options.retain(|option| {
+            if option.starts_with('@') && option.contains('/') && !available.contains(option.as_str()) && !concrete.contains(option.as_str()) {
+                warn!("group {:?}: subscription node {option:?} is unavailable; skipping it", g.name);
+                return false;
+            }
+            seen.insert(option.clone())
+        });
         if g.options.is_empty() {
-            warn!("group {} has no usable nodes; it will REJECT", g.name);
+            warn!("group {:?} has no usable nodes; it will REJECT", g.name);
             g.options.push("REJECT".into());
         }
     }
@@ -460,6 +631,133 @@ mod tests {
             match i { 8 => "127.0.0.1", 9 => "0.0.0.0", 10 => "1.1.1.1", _ => "node.example.com" },
             match i { 11 => 1, 12 => 0, _ => 443 },
         )).collect()
+    }
+
+    #[test]
+    fn imports_upstream_group_topology_without_overwriting_profile_rules_or_settings() {
+        let mut cfg = Config::parse("[General]\nhttp-listen=127.0.0.1:12345\n[Rule]\nFINAL,DIRECT\n").unwrap();
+        let nodes = parse("HK = trojan, hk.example, 443, password=p\nJP = trojan, jp.example, 443, password=p\n").0;
+        register_nodes(&mut cfg, "Airport", &nodes).unwrap();
+        let yaml = "proxies: []\nproxy-groups:\n  - {name: Auto, type: url-test, proxies: [HK, JP], url: 'https://example.test/check', interval: 120, tolerance: 25}\n  - {name: Main, type: select, proxies: [Auto, DIRECT]}\nrules: [MATCH,REJECT]\n";
+        import_groups(&mut cfg, "Airport", yaml).unwrap();
+        assert_eq!(cfg.groups[0].name, "@Airport/group/Auto");
+        assert_eq!(cfg.groups[0].options, ["@Airport/HK", "@Airport/JP"]);
+        assert_eq!(cfg.groups[0].interval_secs, 120);
+        assert_eq!(cfg.groups[0].kind, crate::config::GroupKind::UrlTest { tolerance_ms: 25 });
+        assert_eq!(cfg.groups[1].options, ["@Airport/group/Auto", "DIRECT"]);
+        assert_eq!(cfg.general.http_listen.as_deref(), Some("127.0.0.1:12345"));
+        assert_eq!(cfg.rules[0].policy, "DIRECT");
+        crate::router::Router::new(&cfg).unwrap();
+        let surge = "[General]\nhttp-listen=0.0.0.0:9999\n[Proxy Group]\nAuto = fallback, HK, JP, url=http://127.0.0.1/\nMain = select, Auto, DIRECT\n[Rule]\nFINAL,REJECT\n";
+        register_nodes(&mut cfg, "Other", &nodes).unwrap();
+        import_groups(&mut cfg, "Other", &STANDARD.encode(surge)).unwrap();
+        assert_eq!(cfg.groups[3].name, "@Other/group/Main");
+        assert_eq!(cfg.groups[3].options, ["@Other/group/Auto", "DIRECT"]);
+        crate::router::Router::new(&cfg).unwrap();
+    }
+
+    #[tokio::test]
+    async fn independent_sources_import_groups_by_default_and_allow_opt_out() {
+        let dir = std::env::temp_dir().join(format!("sluice-import-groups-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("source"), "[Proxy]\nHK = trojan, hk.example, 443, password=p\n[Proxy Group]\nMain = select, HK, DIRECT\n").unwrap();
+        for (flag, count) in [("", 2), (", import-groups=false", 1)] {
+            let mut cfg = Config::parse(&format!("[Subscription]\nA = policy-path=source{flag}\n[Proxy Group]\nProxy = select, use=A\n[Rule]\nFINAL,Proxy\n")).unwrap();
+            expand(&mut cfg, &dir, true).await.unwrap();
+            assert_eq!(cfg.groups.len(), count);
+            assert_eq!(cfg.subscription_nodes[0].kind, "trojan");
+            assert_eq!(cfg.subscription_nodes[0].server, "hk.example");
+            crate::router::Router::new(&cfg).unwrap();
+        }
+        let mut cfg = Config::parse("[Proxy Group]\nOld = select, policy-path=source, import-groups=true\nProxy = select, @Old/group/Main\n[Rule]\nFINAL,Proxy\n").unwrap();
+        expand(&mut cfg, &dir, true).await.unwrap();
+        assert_eq!(cfg.groups[1].options, ["@Old/group/Main"]);
+        assert_eq!(crate::router::Router::new(&cfg).unwrap().resolve("Proxy").unwrap(), "@Old/HK");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unsupported_group_sources_fail_explicitly_instead_of_importing_an_empty_group() {
+        let mut cfg = Config::default();
+        let yaml = "proxy-groups:\n  - {name: Main, type: select, use: [External]}\n";
+        assert!(import_groups(&mut cfg, "A", yaml).unwrap_err().to_string().contains("external proxy-providers"));
+        assert_ne!(node_reference("A", "group/Main"), group_reference("A", "Main"));
+    }
+
+    #[test]
+    fn source_reference_escapes_delimiters_without_losing_unicode() {
+        assert_eq!(node_reference("机场 A", "香港/01,=|%@\n"), "@机场%20A/香港%2F01%2C%3D%7C%25%40%0A");
+        assert_ne!(node_reference("A/B", "C"), node_reference("A", "B/C"));
+    }
+
+    #[tokio::test]
+    async fn multiple_sources_flatten_and_keep_selections_after_other_sources_change() {
+        let dir = std::env::temp_dir().join(format!("sluice-source-union-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), "HK = trojan, a.example, 24431, password=p\nJP = trojan, jp.example, 24433, password=p\n").unwrap();
+        std::fs::write(dir.join("b"), "HK = trojan, b.example, 24432, password=p\n").unwrap();
+        let text = "[Subscription]\nA = policy-path=a\nB = policy-path=b\n[Proxy Group]\nAuto = url-test, use=A|B, node-filter=^HK$, url=http://127.0.0.1/\nManual = select, @B/HK, use=A|B\n[Rule]\nFINAL,Manual\n";
+        let mut first = Config::parse(text).unwrap();
+        expand(&mut first, &dir, true).await.unwrap();
+        assert_eq!(first.groups[0].options, ["@A/HK", "@B/HK"]);
+        assert_eq!(first.groups[1].options, ["@B/HK", "@A/HK", "@A/JP"]); // deduplicated
+        assert_eq!(first.subscription_nodes.len(), 3);
+        assert!(first.proxies.iter().find(|(id, _)| id == "@B/HK").unwrap().1.to_line("").contains("b.example, 24432"));
+        let old = crate::router::Router::new(&first).unwrap();
+        old.select("Manual", "@B/HK").unwrap();
+        std::fs::write(dir.join("a"), "JP = trojan, jp.example, 24433, password=p\n").unwrap();
+        let mut next = Config::parse(text).unwrap();
+        next.providers.reverse();
+        expand(&mut next, &dir, true).await.unwrap();
+        assert_eq!(next.groups[0].options, ["@B/HK"]);
+        let router = crate::router::Router::new(&next).unwrap();
+        router.inherit_state(&old);
+        assert_eq!(router.resolve("Manual").unwrap(), "@B/HK");
+        assert!(!serde_json::to_string(&next.subscription_nodes).unwrap().contains("password"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn removed_explicit_nodes_are_skipped_and_empty_groups_reject() {
+        let dir = std::env::temp_dir().join(format!("sluice-source-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nodes"), "JP = trojan, jp.example, 443, password=p\n").unwrap();
+        let text = "[Subscription]\nA = policy-path=nodes\n[Proxy Group]\nOnlyGone = select, @A/HK\nHasFallback = select, @A/HK, DIRECT\nFiltered = select, use=A, node-filter=^HK$\n[Rule]\nFINAL,HasFallback\n";
+        let mut cfg = Config::parse(text).unwrap();
+        expand(&mut cfg, &dir, true).await.unwrap();
+        assert_eq!(cfg.groups[0].options, ["REJECT"]);
+        assert_eq!(cfg.groups[1].options, ["DIRECT"]);
+        assert_eq!(cfg.groups[2].options, ["REJECT"]);
+        crate::router::Router::new(&cfg).unwrap();
+        for member in ["use=Unknown", "@Unknown/HK"] {
+            let mut cfg = Config::parse(&format!("[Subscription]\nA = policy-path=nodes\n[Proxy Group]\nG = select, {member}\n")).unwrap();
+            assert!(expand(&mut cfg, &dir, true).await.unwrap_err().to_string().contains("unknown subscription"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_sources_can_be_flattened_without_changing_their_existing_options() {
+        let dir = std::env::temp_dir().join(format!("sluice-source-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nodes"), "HK = trojan, hk.example, 443, password=p\nJP = trojan, jp.example, 443, password=p\n").unwrap();
+        let mut cfg = Config::parse("[Proxy Group]\nOld = select, policy-path=nodes\nMix = url-test, use=Old, node-filter=HK\n[Rule]\nFINAL,Mix\n").unwrap();
+        expand(&mut cfg, &dir, true).await.unwrap();
+        assert_eq!(cfg.groups[0].options, ["HK", "JP"]);
+        assert_eq!(cfg.groups[1].options, ["@Old/HK"]);
+        assert_eq!(cfg.subscription_nodes.iter().find(|n| n.id == "@Old/HK").unwrap().aliases, ["HK"]);
+        crate::router::Router::new(&cfg).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn duplicate_names_inside_a_new_source_are_rejected_instead_of_silently_retargeted() {
+        let dir = std::env::temp_dir().join(format!("sluice-source-duplicate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nodes"), "HK = trojan, a.example, 443, password=p\nHK = trojan, b.example, 443, password=p\n").unwrap();
+        let mut cfg = Config::parse("[Subscription]\nA = policy-path=nodes\n").unwrap();
+        assert!(expand(&mut cfg, &dir, true).await.unwrap_err().to_string().contains("duplicate node name"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -591,7 +889,8 @@ mod tests {
             assert_eq!(expected.len(), count);
             let mut cfg = Config::parse(&format!("[Proxy Group]\nLocal = select, policy-path={source}\n")).unwrap();
             expand(&mut cfg, Path::new("/unused"), true).await.unwrap();
-            assert_eq!(cfg.proxies.len(), count);
+            assert_eq!(cfg.groups[0].options.len(), count);
+            assert_eq!(cfg.subscription_nodes.len(), count);
             assert_eq!(cfg.groups[0].options, expected);
             assert_eq!(cfg.subscriptions[0].node_count, count);
             assert!(cfg.subscriptions[0].last_error.is_none());
@@ -622,7 +921,8 @@ mod tests {
         std::fs::write(dir.join("nodes.txt"), "[Proxy]\nHK = trojan, h, 443, password=p\nJP = trojan, h, 443, password=p\n[Rule]\nFINAL,DIRECT\n").unwrap();
         let mut cfg = Config::parse("[Proxy Group]\nAll = select, policy-path=nodes.txt\nHKOnly = select, policy-path=nodes.txt, policy-regex-filter=HK\nMissing = select, policy-path=missing.txt\n").unwrap();
         expand(&mut cfg, &dir, false).await.unwrap();
-        assert_eq!(cfg.proxies.len(), 2);
+        assert_eq!(cfg.subscription_nodes.len(), 3); // All has HK/JP; HKOnly exposes HK.
+        assert_eq!(cfg.proxies.iter().filter(|(name, _)| !name.starts_with('@')).count(), 2);
         assert_eq!(cfg.subscriptions.iter().map(|s| (s.group.as_str(), s.node_count)).collect::<Vec<_>>(), [("All", 2), ("HKOnly", 1), ("Missing", 0)]);
         assert_eq!(cfg.subscriptions[0].url, "nodes.txt");
         assert!(cfg.subscriptions[0].last_error.is_none());

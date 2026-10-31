@@ -306,16 +306,16 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         if running, !state.groups.isEmpty {
             for group in state.groups {
                 let groupName = group.group
-                let options = submenu(in: menu, title: groupName)
-                rows.append(RightColumn(item: menu.items.last!, name: groupName, detail: group.selected,
+                let options = submenu(in: menu, title: subscriptionNodeLabel(groupName))
+                rows.append(RightColumn(item: menu.items.last!, name: subscriptionNodeLabel(groupName), detail: subscriptionNodeLabel(group.selected),
                                         color: outboundColor(group.selected)))
                 var optionRows: [RightColumn] = []
                 for option in group.options {
                     let optionName = option.name
-                    let item = add(to: options, optionName, checked: group.selected == optionName) { [core, groupName, optionName] in
+                    let item = add(to: options, subscriptionNodeLabel(optionName), checked: group.selected == optionName) { [core, groupName, optionName] in
                         core.select(group: groupName, option: optionName)
                     }
-                    optionRows.append(RightColumn(item: item, name: optionName, detail: latencyText(option.latencyMs),
+                    optionRows.append(RightColumn(item: item, name: subscriptionNodeLabel(optionName), detail: latencyText(option.latencyMs),
                                                   color: NSColor(latencyStyle(option.latencyMs).1)))
                     item.image = latencyIcon(option.latencyMs)
                 }

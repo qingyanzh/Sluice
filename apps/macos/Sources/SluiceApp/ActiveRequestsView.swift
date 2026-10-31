@@ -15,51 +15,64 @@ struct ActiveRequestsView: View {
         let rows = source.sorted(by: ActiveConnection.displayOrder).filter { kind.admits($0.outbound) && $0.matches(filter.trimmingCharacters(in: .whitespacesAndNewlines)) }
         VStack(spacing: 12) {
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) { filters; actions }
+                HStack(spacing: 12) { filters; Spacer(minLength: 0); actions }
                 VStack(alignment: .leading, spacing: 12) {
                     filters
                     HStack { Spacer(); actions }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             if let error = core.activeConnectionsError {
                 Text(error).font(DS.small).foregroundStyle(DS.warn)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(alignment: .top, spacing: DS.gap) {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(rows) { connection in
-                            Button { selection = connection.id } label: {
-                                activeRow(connection)
-                                    .padding(12)
-                                    .background(selection == connection.id ? DS.accent.opacity(0.08) : .clear,
-                                                in: RoundedRectangle(cornerRadius: DS.smallRadius))
+                GeometryReader { geometry in
+                    let columns = geometry.size.width >= ActiveConnectionRow.columnBreakpoint
+                    VStack(spacing: 0) {
+                        ActiveConnectionListHeader(showsTrafficColumns: columns)
+                        Divider()
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(rows) { connection in
+                                    ActiveConnectionRow(connection: connection,
+                                                        rates: displayedRates(for: connection.id),
+                                                        selected: selection == connection.id,
+                                                        showsTrafficColumns: columns) {
+                                        selection = connection.id
+                                    }
+                                    .overlay { ActiveConnectionMenu(connection: connection, core: core) }
+                                    if connection.id != rows.last?.id {
+                                        Divider().padding(.horizontal, 14)
+                                    }
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .overlay { ActiveConnectionMenu(connection: connection, core: core) }
+                            .padding(.horizontal, 6)
                         }
-                    }.padding(6)
-                }
-                .overlay {
-                    if rows.isEmpty {
-                        if core.state != .running {
-                            EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                       detail: "启动后可查看活动 TCP 连接。", action: ("启动 Sluice", { core.requestStart() }))
-                        } else if !core.activeConnectionsLoaded {
-                            if let error = core.activeConnectionsError {
-                                EmptyState(icon: "exclamationmark.triangle", title: "无法读取活动连接", detail: error)
-                            } else {
-                                ProgressView("正在加载活动连接…").font(DS.small)
+                        .overlay {
+                            if rows.isEmpty {
+                                if core.state != .running {
+                                    EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
+                                               detail: "启动后可查看活动 TCP 连接。", action: ("启动 Sluice", { core.requestStart() }))
+                                } else if !core.activeConnectionsLoaded {
+                                    if let error = core.activeConnectionsError {
+                                        EmptyState(icon: "exclamationmark.triangle", title: "无法读取活动连接", detail: error)
+                                    } else {
+                                        ProgressView("正在加载活动连接…").font(DS.small)
+                                    }
+                                } else if !filter.isEmpty || kind != .all {
+                                    EmptyState(icon: "magnifyingglass", title: "没有匹配的活动连接", detail: "清除筛选查看全部连接。",
+                                               action: ("清除筛选", { filter = ""; kind = .all }))
+                                } else {
+                                    EmptyState(icon: "arrow.up.arrow.down", title: "没有活动连接", detail: "连接建立后会显示在这里；UDP 不在此列表中。")
+                                }
                             }
-                        } else if !filter.isEmpty || kind != .all {
-                            EmptyState(icon: "magnifyingglass", title: "没有匹配的活动连接", detail: "清除筛选查看全部连接。",
-                                       action: ("清除筛选", { filter = ""; kind = .all }))
-                        } else {
-                            EmptyState(icon: "arrow.up.arrow.down", title: "没有活动连接", detail: "连接建立后会显示在这里；UDP 不在此列表中。")
                         }
                     }
                 }
-                .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity).glass()
+                .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+                .glass()
                 detail(source.first { $0.id == selection })
                     .frame(width: 260).frame(maxHeight: .infinity, alignment: .top).glass()
             }
@@ -110,46 +123,8 @@ struct ActiveRequestsView: View {
         core.state == .running && core.activeConnections.contains { $0.id == id }
     }
 
-    private func activeRow(_ connection: ActiveConnection) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(connection.target).font(DS.label.weight(.medium)).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 4)
-                OutboundTag(name: connection.outbound)
-            }
-            Text(connection.policyChain).font(DS.small).foregroundStyle(DS.ink2).lineLimit(2)
-            if let process = connection.process { Text(process).font(DS.caption).foregroundStyle(DS.ink3) }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    connectionRate(connection, upload: true)
-                    Spacer(minLength: 8)
-                    connectionRate(connection, upload: false)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    connectionRate(connection, upload: true)
-                    connectionRate(connection, upload: false)
-                }
-            }
-            .font(DS.caption.monospacedDigit())
-            .foregroundStyle(DS.ink2)
-        }
-    }
-
     private func displayedRates(for id: UInt64) -> DisplayedRates {
         (paused ? frozenRates[id] : core.displayedConnectionRates[id]) ?? DisplayedRates()
-    }
-
-    private func connectionRate(_ connection: ActiveConnection, upload: Bool) -> some View {
-        let rates = displayedRates(for: connection.id)
-        let bytes = upload ? connection.up : connection.down
-        let rate = upload ? rates.up : rates.down
-        return HStack(spacing: 4) {
-            Text(upload ? "↑" : "↓")
-            Text(formatBytes(Double(bytes))).frame(width: 68, alignment: .trailing)
-            Text(rate.formatted.text).frame(width: 88, alignment: .trailing)
-        }
-        .foregroundStyle(upload ? DS.ink2 : DS.accent)
-        .fixedSize()
     }
 
     @ViewBuilder private func detail(_ connection: ActiveConnection?) -> some View {
@@ -179,5 +154,115 @@ struct ActiveRequestsView: View {
             Text(label).font(DS.caption).foregroundStyle(DS.ink3)
             Text(value).font(DS.small).monospacedDigit().foregroundStyle(DS.ink2).textSelection(.enabled)
         }
+    }
+}
+
+/// The header and every row share their traffic columns and responsive breakpoint.
+struct ActiveConnectionListHeader: View {
+    let showsTrafficColumns: Bool
+
+    var body: some View {
+        HStack(spacing: ActiveConnectionRow.columnSpacing) {
+            Text("目标与路由").frame(maxWidth: .infinity, alignment: .leading)
+            if showsTrafficColumns {
+                Text("↑ 上传").frame(width: ActiveConnectionRow.trafficColumnWidth, alignment: .trailing)
+                Text("↓ 下载").frame(width: ActiveConnectionRow.trafficColumnWidth, alignment: .trailing)
+            } else {
+                Text("速率 / 累计")
+            }
+        }
+        .font(DS.caption).foregroundStyle(DS.ink2)
+        .padding(.horizontal, 20).padding(.vertical, 12)
+    }
+}
+
+struct ActiveConnectionRow: View {
+    static let columnBreakpoint: CGFloat = 620
+    static let trafficColumnWidth: CGFloat = 104
+    static let columnSpacing: CGFloat = 20
+
+    let connection: ActiveConnection
+    let rates: DisplayedRates
+    let selected: Bool
+    let showsTrafficColumns: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if showsTrafficColumns {
+                    HStack(spacing: Self.columnSpacing) {
+                        destination.frame(maxWidth: .infinity, alignment: .leading)
+                        traffic(upload: true).frame(width: Self.trafficColumnWidth, alignment: .trailing)
+                        traffic(upload: false).frame(width: Self.trafficColumnWidth, alignment: .trailing)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        destination
+                        HStack(spacing: Self.columnSpacing) {
+                            traffic(upload: true).frame(maxWidth: .infinity, alignment: .leading)
+                            traffic(upload: false).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? DS.accent.opacity(0.08) : hovering ? Color.primary.opacity(0.035) : .clear,
+                        in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous)
+                        .strokeBorder(DS.accent.opacity(0.3), lineWidth: 1)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var destination: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(connection.target).font(DS.label.weight(.medium))
+                    .foregroundStyle(Color.primary).lineLimit(1).truncationMode(.middle)
+                    .help(connection.target)
+                Spacer(minLength: 0)
+                OutboundTag(name: connection.outbound).frame(maxWidth: 140, alignment: .trailing)
+                    .help(connection.outbound)
+            }
+            HStack(spacing: 6) {
+                if let process = connection.process, !process.isEmpty {
+                    Text(process).lineLimit(1).truncationMode(.middle)
+                        .help(process)
+                    Text("·").foregroundStyle(DS.ink3)
+                }
+                Text(connection.policyChain).lineLimit(1).truncationMode(.middle)
+                    .help(connection.policyChain)
+            }
+            .font(DS.small).foregroundStyle(DS.ink2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func traffic(upload: Bool) -> some View {
+        let rate = upload ? rates.up : rates.down
+        let bytes = formatBytes(Double(upload ? connection.up : connection.down))
+        let title = upload ? "上传" : "下载"
+        return VStack(alignment: showsTrafficColumns ? .trailing : .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                if !showsTrafficColumns { Text(upload ? "↑" : "↓") }
+                Text(rate.formatted.text)
+            }
+            .font(DS.small.weight(.medium).monospacedDigit())
+            .foregroundStyle(upload ? DS.ink2 : DS.accent)
+            Text("\(bytes) 累计").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
+        }
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title)，速率 \(rate.formatted.text)，累计 \(bytes)")
     }
 }

@@ -11,20 +11,33 @@ struct NodeRecord: Identifiable {
     let filter: String
     let interval: String
     let isSubscription: Bool
+    let section: String
+    let reference: String
+    let importsGroups: Bool
+    var displayName: String { subscriptionNodeLabel(reference) }
+    var canDelete: Bool { section != "Imported" }
 
     var copyableEndpoint: String? { isSubscription ? nil : endpoint }
 
-    init(line: String, id: String) {
+    init(line: String, id: String, section: String? = nil) {
         self.id = id
         let pair = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
         name = pair.first ?? line
-        let parts = (pair.count > 1 ? pair[1] : "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        reference = name
+        let body = (section == "Subscription" ? "select, " : "") + (pair.count > 1 ? pair[1] : "")
+        var quoted = false
+        let parts = body.split { c in
+            if c == "\"" { quoted.toggle() }
+            return c == "," && !quoted
+        }.map { $0.trimmingCharacters(in: .whitespaces) }
         var parameters: [String: String] = [:]
         for part in parts.dropFirst() {
             let kv = part.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             if kv.count == 2 { parameters[kv[0].lowercased()] = kv[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }
         }
         isSubscription = parameters["policy-path"] != nil
+        importsGroups = parameters["import-groups"].map { $0 == "true" } ?? (section == "Subscription")
+        self.section = section ?? (isSubscription ? "Proxy Group" : "Proxy")
         kind = isSubscription ? "订阅" : (parts.first ?? "未知").uppercased()
         if let source = parameters["policy-path"] {
             endpoint = URL(string: source)?.host ?? "本地订阅文件"
@@ -40,8 +53,19 @@ struct NodeRecord: Identifiable {
         interval = humanInterval(Int(parameters["update-interval"] ?? "") ?? 86400)
     }
 
+    init(subscription node: SubscriptionNode) {
+        id = node.id; reference = node.id; name = node.name
+        kind = node.kind?.uppercased() ?? "订阅节点"
+        if let server = node.server, let port = node.port {
+            endpoint = "\(server.contains(":") ? "[\(server)]" : server):\(port)"
+        } else { endpoint = node.source }
+        transport = node.source; filter = ""; interval = ""
+        isSubscription = false; section = "Imported"
+        importsGroups = false
+    }
+
     func matches(_ query: String) -> Bool {
-        query.isEmpty || [name, kind, endpoint, transport].contains { $0.localizedCaseInsensitiveContains(query) }
+        query.isEmpty || [name, displayName, kind, endpoint, transport].contains { $0.localizedCaseInsensitiveContains(query) }
     }
 }
 
@@ -59,11 +83,14 @@ struct NodesView: View {
 
     var body: some View {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let visible = records.filter { $0.matches(query) && (category == 0 || $0.isSubscription == (category == 2)) }
+        let allRecords = records + core.catalogNodes.map(NodeRecord.init(subscription:))
+        let visible = allRecords.filter { $0.matches(query) && (category == 0 || $0.isSubscription == (category == 2)) }
         VStack(spacing: 0) {
-            PaneHeader(title: "节点", subtitle: "\(records.filter { !$0.isSubscription }.count) 个节点 · \(records.filter(\.isSubscription).count) 个订阅") {
+            PaneHeader(title: "节点", subtitle: "\(allRecords.filter { !$0.isSubscription }.count) 个节点 · \(records.filter(\.isSubscription).count) 个订阅") {
                 Button { refresh() } label: { Label("刷新列表", systemImage: "arrow.clockwise") }.labelStyle(.iconOnly)
-                TestAllLatencyButton()
+                Button { core.testNodes(allRecords.filter { !$0.isSubscription }.map(\.reference)) } label: {
+                    Label(core.testingNodes.isEmpty ? "测试全部" : "测试中…", systemImage: "speedometer")
+                }.disabled(!core.canTestNodes || allRecords.allSatisfy(\.isSubscription) || !core.testingNodes.isEmpty || !core.testingGroups.isEmpty)
                 Button { showAddNode = true } label: { Label("添加节点", systemImage: "plus") }
                 Button { showAddSub = true } label: { Label("添加订阅", systemImage: "link.badge.plus") }.glassButton(prominent: true)
             }
@@ -75,23 +102,24 @@ struct NodesView: View {
                 SearchField(prompt: "名称、协议或服务器", text: $search)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, 12)
-            if let loadError {
+            if core.loadingCatalog { ProgressView("正在读取订阅节点…").font(DS.small).padding(.bottom, 8) }
+            if let loadError = loadError ?? core.catalogError {
                 ErrorText(raw: loadError).padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(visible) { node in
                         Button { selected = node } label: {
-                            NodeBrowserRow(node: node, latency: latency(for: node), testing: core.isTesting(node: node.name))
+                            NodeBrowserRow(node: node, latency: latency(for: node), testing: core.isTesting(node: node.reference))
                         }
                         .buttonStyle(.plain)
                         .overlay {
                             RowContextMenu { [node, core, selected = $selected] in
                                 let menu = RowContextMenu.Menu()
                                 menu.addAction("查看详情") { selected.wrappedValue = node }
-                                let testing = core.testingNodes.contains(node.name)
-                                menu.addAction(testing ? "测试中…" : "测试节点", isEnabled: core.state == .running && !testing) {
-                                    core.test(node: node.name)
+                                let testing = core.isTesting(node: node.reference)
+                                menu.addAction(testing ? "测试中…" : "测试节点", isEnabled: !node.isSubscription && core.canTestNodes && !testing) {
+                                    core.test(node: node.reference)
                                 }
                                 menu.addAction("复制名称") { copyText(node.name) }
                                 if let endpoint = node.copyableEndpoint {
@@ -117,7 +145,7 @@ struct NodesView: View {
                                action: ("清除筛选", { search = ""; category = 0 }))
                 }
             }
-            Text("点击查看详情 · 订阅导入的节点可在策略页查看和选择")
+            Text("无需启动代理即可查看和测试节点 · 订阅节点随来源更新")
                 .font(DS.caption).foregroundStyle(DS.ink3).padding(12)
         }
         .sheet(isPresented: $showAddNode, onDismiss: refresh) { AddNodeSheet() }
@@ -139,7 +167,7 @@ struct NodesView: View {
     }
 
     private func latency(for node: NodeRecord) -> Int? {
-        core.nodeLatencies[node.name] ?? core.groups.lazy.flatMap(\.options).first { $0.name == node.name && $0.latencyMs != nil }?.latencyMs
+        core.nodeLatencies[node.reference] ?? core.groups.lazy.flatMap(\.options).first { $0.name == node.reference && $0.latencyMs != nil }?.latencyMs
     }
 
     private func refresh() {
@@ -151,14 +179,15 @@ struct NodesView: View {
         }
         loaded = true
         loadError = nil
-        records = ["Proxy Group", "Proxy"].flatMap { section in
+        records = ["Subscription", "Proxy Group", "Proxy"].flatMap { section in
             ConfigText.lines(of: section, in: text).compactMap { line in
                 let name = line.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? line
-                let node = NodeRecord(line: line, id: "\(section):\(name)")
+                let node = NodeRecord(line: line, id: "\(section):\(name)", section: section)
                 return section == "Proxy" || node.isSubscription ? node : nil
             }
         }
         core.refreshSummary()
+        Task { await core.loadNodeCatalog() }
     }
 }
 
@@ -172,7 +201,7 @@ struct NodeBrowserRow: View {
         HStack(spacing: 12) {
             IconTile(symbol: node.isSubscription ? "link" : "server.rack", size: 28)
             VStack(alignment: .leading, spacing: 3) {
-                Text(node.name).font(DS.label.weight(.medium)).foregroundStyle(Color.primary).lineLimit(1)
+                Text(node.displayName).font(DS.label.weight(.medium)).foregroundStyle(Color.primary).lineLimit(1)
                 Text(node.endpoint).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 8)
@@ -201,10 +230,11 @@ struct NodeDetailSheet: View {
     @State private var confirmDelete = false
     @State private var working = false
     @State private var error: String?
+    @State private var requestedImportGroups: Bool?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SheetHeader(icon: node.isSubscription ? "link" : "server.rack", title: node.name,
+            SheetHeader(icon: node.isSubscription ? "link" : "server.rack", title: node.displayName,
                         detail: node.isSubscription ? "订阅信息" : "节点连接信息")
             VStack(spacing: 12) {
                 row("类型", node.kind)
@@ -212,15 +242,24 @@ struct NodeDetailSheet: View {
                 if node.isSubscription {
                     row("名称过滤", node.filter)
                     row("更新间隔", node.interval)
+                    Toggle("导入订阅自带的策略组", isOn: Binding(get: { requestedImportGroups ?? node.importsGroups }, set: { on in
+                        requestedImportGroups = on; working = true
+                        Task {
+                            let text = core.readConfig()
+                            error = await core.saveConfig(ConfigText.setImportGroups(on, source: node.name, section: node.section, in: text), expected: text)
+                            working = false
+                            if error == nil { changed() } else { requestedImportGroups = nil }
+                        }
+                    })).disabled(working)
                 } else {
-                    row("传输方式", node.transport)
+                    row(node.canDelete ? "传输方式" : "来源", node.transport)
                     HStack {
                         Text("最近延迟").font(DS.label).foregroundStyle(DS.ink2)
                         Spacer(minLength: 16)
-                        LatencyBadge(latency: core.nodeLatencies[node.name] ?? latency, testing: core.isTesting(node: node.name))
+                        LatencyBadge(latency: core.nodeLatencies[node.reference] ?? latency, testing: core.isTesting(node: node.reference))
                     }
                 }
-                if let result = core.nodeTests[node.name] {
+                if let result = core.nodeTests[node.reference] {
                     row("连接耗时", result.connectMs.map { "\($0) ms" } ?? "—")
                     row("响应延迟", result.latencyMs.map { "\($0) ms" } ?? "—")
                     if let outbound = result.outbound { row("实际出站", outbound) }
@@ -231,22 +270,27 @@ struct NodeDetailSheet: View {
                 }
             }
             .padding(DS.cardPadding).glass()
-            Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : "连接参数可在配置页编辑，节点切换请前往策略页。")
+            Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : node.canDelete ? "连接参数可在配置页编辑，节点切换请前往策略页。" : "此节点由订阅管理，参数随订阅更新。无需启动代理服务即可测速。")
                 .font(DS.small).foregroundStyle(DS.ink2)
             if let error { Text(error).font(DS.small).foregroundStyle(DS.fail).textSelection(.enabled) }
             HStack {
-                Button(role: .destructive) { confirmDelete = true } label: { Label("删除", systemImage: "trash") }
-                    .glassButton().disabled(working)
+                if node.canDelete {
+                    Button(role: .destructive) { confirmDelete = true } label: { Label("删除", systemImage: "trash") }
+                        .glassButton().disabled(working)
+                }
                 if node.isSubscription {
-                    Button { core.reload(); dismiss() } label: { Label("立即更新", systemImage: "arrow.triangle.2.circlepath") }
-                        .glassButton().disabled(core.state != .running || core.reloading)
+                    Button {
+                        if core.state == .running { core.reload() }
+                        Task { await core.loadNodeCatalog(); changed() }
+                    } label: { Label("刷新节点", systemImage: "arrow.triangle.2.circlepath") }
+                        .glassButton().disabled(core.loadingCatalog || core.reloading)
                         .help("重新下载订阅并重载配置")
                 } else {
                     if let endpoint = node.copyableEndpoint {
                         Button("复制服务器") { copyText(endpoint) }.glassButton()
                     }
-                    Button(core.testingNodes.contains(node.name) ? "测试中…" : "测试节点") { core.test(node: node.name) }
-                        .glassButton().disabled(core.state != .running || core.testingNodes.contains(node.name))
+                    Button(core.isTesting(node: node.reference) ? "测试中…" : "测试节点") { core.test(node: node.reference) }
+                        .glassButton().disabled(!core.canTestNodes || core.isTesting(node: node.reference))
                 }
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction).glassButton(prominent: true)

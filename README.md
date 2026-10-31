@@ -30,12 +30,16 @@ Then point the system or app proxy at `127.0.0.1:6252` (HTTP) or `127.0.0.1:6253
 - `GET /v1/connections` lists recent routing decisions (with `process` when a PROCESS-NAME rule looked it up); `/v1/route` accepts `process=`, `src=` and `proto=`
 - Rule sets: `RULE-SET,<url|file>,Policy` (Surge rule lists) and `DOMAIN-SET,<url|file>,Policy` (domain lists, `.example.com` = with subdomains; Clash `payload:` lists also accepted). Remote lists are cached in `~/Library/Caches/Sluice` and refreshed every `rule-set-update-interval` seconds (default 86400).
 - Subscriptions: `Group = select, policy-path=<url|file>, policy-regex-filter=<regex>, update-interval=86400` imports nodes from share links (`ss://`, `vmess://`, `vless://`, `trojan://`, `hysteria2://`, plain or base64), Surge proxy lines, or Clash / Mihomo YAML (`proxies:`). Links needing unsupported features (XTLS-Vision flow, Hysteria2 port hopping) are skipped and reported. Groups sharing a URL share its nodes.
+- Independent subscription sources: `[Subscription]` entries such as `Airport = policy-path="https://example.com/sub"`. Groups can flatten multiple sources with `use=Airport-A|Airport-B`, optionally filter dynamic nodes with `node-filter="HK|JP"`, or pin individual nodes by source-scoped references such as `@Airport-A/HK`. `sluice nodes <config>` lists references without credentials. Existing `policy-path` groups remain supported and can also be used as sources. Removed pinned nodes are skipped; empty groups reject traffic.
+- Subscription group import: independent sources default to `import-groups=true`; Surge `[Proxy Group]` and Clash `proxy-groups` are imported under source-scoped names, preserving supported group types and nesting. Adding a node source leaves the profile's rules, listeners and DNS intact. `sluice catalog <config>` inspects nodes/groups with no listeners, and `sluice probe <config> <node> [url]` measures one outbound without starting proxy/TUN services. Profile switches restore the target profile's own saved choices rather than carrying choices between identically named groups.
+- The policy page folds groups by profile and subscription source, with read-only previews for inactive profiles, default egress chains and rule/group references. Create a group using multiple sources, copy an imported group into an owned group, set a default or attach a domain/process rule. Independent profile import copies supported upstream rules as an editable snapshot and keeps device settings for converted Surge/Clash input; native Sluice profiles retain their own settings. Importing does not activate the profile.
+
 - Policy groups (nestable):
   - `select`: switchable at runtime
   - `url-test`: lowest latency, with `tolerance` to avoid flapping
   - `fallback`: first healthy option in order
   - `load-balance`: random among healthy options per connection
-  - Automatic groups probe `url` (default `http://www.gstatic.com/generate_204`) every `interval` seconds through each option
+  - Referenced automatic groups probe `url` (default `http://www.gstatic.com/generate_204`) every `interval` seconds through each option; background checks follow routing mode and selected manual branches. Manual testing remains available for all groups.
 - Control API (`api-listen`):
   - `GET /v1/policies`
   - `POST /v1/policies/<group>?select=<option>`

@@ -93,7 +93,7 @@ struct ConfigProfileList: View {
                     }
                 }
             }
-            Text("运行中切换会热重载；监听地址或增强模式变化时会重启。")
+            Text("切换整套订阅、策略组和规则，并恢复该配置的节点选择。监听地址或增强模式变化时会重启。")
                 .font(DS.small).foregroundStyle(DS.ink2)
         }
         .frame(maxHeight: .infinity, alignment: .top)

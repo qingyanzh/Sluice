@@ -65,6 +65,18 @@ struct StructuredConfig {
             get { parameter("interval") ?? "" }
             set { setParameter("interval", to: newValue) }
         }
+        var sources: [String] {
+            get { (parameter("use") ?? "").split(separator: "|").map { StructuredConfig.trim(String($0)) }.filter { !$0.isEmpty } }
+            set { setParameter("use", to: newValue.joined(separator: "|")) }
+        }
+        var nodeFilter: String {
+            get { parameter("node-filter") ?? "" }
+            set { setParameter("node-filter", to: newValue.isEmpty ? "" : "\"\(newValue)\"") }
+        }
+        var importsGroups: Bool {
+            get { parameter("import-groups") == "true" }
+            set { setParameter("import-groups", to: newValue ? "true" : "false") }
+        }
 
         init() {}
         init?(line: String) {
@@ -125,6 +137,12 @@ struct StructuredConfig {
     func serialise() -> String { lines.map { $0.text + $0.ending }.joined() }
     var rules: [Entry<Rule>] { indices(in: "Rule").compactMap { i in Rule(line: Self.trim(lines[i].text)).map { Entry(id: i, value: $0) } } }
     var groups: [Entry<Group>] { indices(in: "Proxy Group").compactMap { i in Group(line: Self.trim(lines[i].text)).map { Entry(id: i, value: $0) } } }
+    var subscriptionNames: [String] {
+        let independent = ConfigText.lines(of: "Subscription", in: serialise()).compactMap {
+            $0.split(separator: "=", maxSplits: 1).first.map { Self.trim(String($0)) }
+        }
+        return independent + groups.filter { $0.value.parameter("policy-path") != nil }.map { $0.value.name }
+    }
     var policies: [String] {
         let proxies = indices(in: "Proxy").compactMap { i -> String? in
             guard let eq = lines[i].text.firstIndex(of: "=") else { return nil }

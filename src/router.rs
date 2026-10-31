@@ -75,7 +75,7 @@ impl Mode {
     }
 }
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn short_health_error(error: &str) -> String {
     error.chars().map(|c| if c.is_control() { ' ' } else { c }).take(160).collect()
@@ -117,6 +117,9 @@ pub struct GroupStatus {
     pub kind: &'static str,
     pub selected: String,
     pub options: Vec<OptionStatus>,
+    pub url: String,
+    pub interval: u64,
+    pub tolerance: Option<u64>,
 }
 
 fn kind_name(k: &GroupKind) -> &'static str {
@@ -130,9 +133,11 @@ fn kind_name(k: &GroupKind) -> &'static str {
 
 /// Splits an `http://host[:port]/path` test URL.
 fn parse_test_url(url: &str) -> Result<(Target, String)> {
-    let rest = url.strip_prefix("http://").ok_or_else(|| anyhow!("test url must be http:// ({url})"))?;
+    let (rest, port) = if let Some(rest) = url.strip_prefix("http://") { (rest, 80) }
+        else if let Some(rest) = url.strip_prefix("https://") { (rest, 443) }
+        else { bail!("test url must be http:// or https:// ({url})"); };
     let (authority, path) = rest.find('/').map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
-    Ok((Target::parse_authority(authority, 80)?, path.to_string()))
+    Ok((Target::parse_authority(authority, port)?, path.to_string()))
 }
 
 /// Result of matching a target: which rule hit, its policy, and the concrete outbound.
@@ -558,6 +563,8 @@ impl Router {
                 // Load-balance picks per connection, so there is no single selection.
                 selected: if g.kind == GroupKind::LoadBalance { "*".to_string() } else { selected[&g.name].clone() },
                 options: g.options.iter().map(|o| OptionStatus { name: o.clone(), latency: latency.get(o).map(|r| r.latency_ms), error: latency.get(o).and_then(|r| r.error.clone()) }).collect(),
+                url: g.url.clone(), interval: g.interval_secs,
+                tolerance: if let GroupKind::UrlTest { tolerance_ms } = g.kind { Some(tolerance_ms) } else { None },
             })
             .collect()
     }
@@ -597,6 +604,12 @@ impl Router {
         Ok(())
     }
 
+    pub fn test_url(&self, name: &str) -> &str {
+        self.group(name).or_else(|| self.groups.iter().find(|g| g.kind != GroupKind::Select && g.options.iter().any(|o| o == name)))
+            .or_else(|| self.groups.iter().find(|g| g.options.iter().any(|o| o == name)))
+            .map(|g| g.url.as_str()).unwrap_or(crate::config::DEFAULT_TEST_URL)
+    }
+
     /// Tests one node or group through its current selection: time to open the stream
     /// through it (TCP connect plus the proxy handshake), and time until the test URL's
     /// HTTP status line arrives. Also stored as the option's health-check result.
@@ -605,13 +618,22 @@ impl Router {
             bail!("no such node or group {name:?}");
         }
         let start = Instant::now();
+        let mut stage = "connecting to node (DNS, TCP and proxy handshake)";
         let attempt = async {
             let (target, path) = parse_test_url(url)?;
             let outbound = self.resolve(name)?;
             let mut s = self.open(&outbound, &target).await?.ok_or_else(|| anyhow!("rejected by {outbound}"))?;
+            if url.starts_with("https://") {
+                stage = "establishing HTTPS to test target";
+                let (connector, name) = crate::trojan::tls_client(&target.host_str(), None, false)?;
+                s = Box::new(connector.connect(name, s).await.context("probe HTTPS handshake")?);
+            }
             let connect_ms = start.elapsed().as_millis() as u64;
+            stage = "writing test request";
             let req = format!("HEAD {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", target.host_str());
             s.write_all(req.as_bytes()).await?;
+            s.flush().await?;
+            stage = "waiting for HTTP response from test target";
             let mut head = [0u8; 12];
             s.read_exact(&mut head).await?;
             if !head.starts_with(b"HTTP/1.") {
@@ -622,7 +644,7 @@ impl Router {
         };
         let r = match tokio::time::timeout(timeout, attempt).await {
             Ok(r) => r,
-            Err(_) => Err(anyhow!("timed out after {}ms", timeout.as_millis())),
+            Err(_) => Err(anyhow!("timed out after {}ms while {stage}", timeout.as_millis())),
         };
         let health = HealthCheck::from_result(r.as_ref().map(|t| t.latency_ms).map_err(|e| anyhow!("{e:#}")));
         if let Some(error) = &health.error { warn!("health check {name}: {error}"); }
@@ -632,24 +654,10 @@ impl Router {
 
     /// Time until the test URL's status line arrives, retaining the full failure chain.
     async fn probe(&self, option: &str, url: &str) -> HealthCheck {
-        let start = Instant::now();
-        let attempt = async {
-            let (target, path) = parse_test_url(url)?;
-            let outbound = self.resolve(option)?;
-            let mut s = self.open(&outbound, &target).await?.ok_or_else(|| anyhow!("rejected"))?;
-            let req = format!("HEAD {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", target.host_str());
-            s.write_all(req.as_bytes()).await?;
-            let mut head = [0u8; 9];
-            s.read_exact(&mut head).await?;
-            if !head.starts_with(b"HTTP/1.") {
-                bail!("not an HTTP response");
-            }
-            Ok(())
-        };
-        let result = match tokio::time::timeout(PROBE_TIMEOUT, attempt).await {
-            Ok(r) => r.map(|()| start.elapsed().as_millis() as u64),
-            Err(_) => Err(anyhow!("timed out after {}ms", PROBE_TIMEOUT.as_millis())),
-        };
+        // Groups and individual nodes must measure the same request, timeout and
+        // response validation. Keep the established REJECT diagnostic unchanged.
+        let result = self.test_node(option, url, PROBE_TIMEOUT).await.map(|t| t.latency_ms)
+            .map_err(|e| if e.to_string() == "rejected by REJECT" { anyhow!("rejected") } else { e });
         HealthCheck::from_result(result)
     }
 
@@ -658,11 +666,18 @@ impl Router {
     pub async fn check_group(self: &Arc<Self>, name: &str) -> Option<Vec<(String, HealthCheck)>> {
         let g = self.group(name).cloned()?;
         let mut set = tokio::task::JoinSet::new();
+        let mut results = vec![HealthCheck::from_result(Err(anyhow!("health check task did not complete"))); g.options.len()];
         for (i, o) in g.options.iter().enumerate() {
+            if set.len() >= 4 {
+                match set.join_next().await {
+                    Some(Ok((i, result))) => results[i] = result,
+                    Some(Err(error)) => warn!("health check {name}: task failed: {error}"),
+                    None => {}
+                }
+            }
             let (me, o, url) = (self.clone(), o.clone(), g.url.clone());
             set.spawn(async move { (i, me.probe(&o, &url).await) });
         }
-        let mut results = vec![HealthCheck::from_result(Err(anyhow!("health check task did not complete"))); g.options.len()];
         while let Some(joined) = set.join_next().await {
             match joined {
                 Ok((i, r)) => results[i] = r,
@@ -706,19 +721,51 @@ impl Router {
         Some(g.options.into_iter().zip(results).collect())
     }
 
-    /// Runs health checks for every automatic group, forever, each on its own interval.
-    /// Stops on its own once this router is replaced by a reload and dropped.
-    pub fn spawn_health_checks(self: &Arc<Self>) {
-        for g in self.groups.iter().filter(|g| g.kind != GroupKind::Select) {
-            let (me, name, every) = (Arc::downgrade(self), g.name.clone(), Duration::from_secs(g.interval_secs));
-            tokio::spawn(async move {
-                while let Some(router) = me.upgrade() {
-                    router.check_group(&name).await;
-                    drop(router);
-                    tokio::time::sleep(every).await;
-                }
-            });
+    /// Groups needed by the active routing mode. Manual groups follow their current
+    /// selection; automatic groups need all candidates to make their next choice.
+    pub fn required_groups(&self) -> std::collections::HashSet<String> {
+        let mut pending: Vec<String> = match self.mode() {
+            Mode::Direct => Vec::new(),
+            Mode::Global => self.rules.iter().find(|r| matches!(r.matcher, Matcher::Final)).map(|r| vec![r.policy.clone()]).unwrap_or_default(),
+            Mode::Rule => self.rules.iter().map(|r| r.policy.clone()).collect(),
+        };
+        let selected = self.selected.read().unwrap();
+        let mut required = std::collections::HashSet::new();
+        while let Some(name) = pending.pop() {
+            let Some(group) = self.group(&name) else { continue };
+            if !required.insert(name.clone()) { continue; }
+            if group.kind == GroupKind::Select {
+                if let Some(option) = selected.get(&name) { pending.push(option.clone()); }
+            } else { pending.extend(group.options.iter().cloned()); }
         }
+        required
+    }
+
+    /// Only reachable automatic groups probe in the background. A newly selected
+    /// group is checked on the next tick instead of waiting a full probe interval.
+    pub fn spawn_health_checks(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut checked = HashMap::<String, Instant>::new();
+            let mut running = std::collections::HashSet::new();
+            let mut tasks = tokio::task::JoinSet::new();
+            loop {
+                while let Some(result) = tasks.try_join_next() {
+                    if let Ok(name) = result { running.remove(&name); }
+                }
+                let Some(router) = weak.upgrade() else { break };
+                let needed = router.required_groups();
+                checked.retain(|name, _| needed.contains(name));
+                for group in router.groups.iter().filter(|g| g.kind != GroupKind::Select && needed.contains(&g.name)) {
+                    if running.contains(&group.name) || checked.get(&group.name).is_some_and(|last| last.elapsed().as_secs() < group.interval_secs) { continue; }
+                    let (name, owner) = (group.name.clone(), router.clone());
+                    checked.insert(name.clone(), Instant::now()); running.insert(name.clone());
+                    tasks.spawn(async move { owner.check_group(&name).await; name });
+                }
+                drop(router);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
     }
 
     /// Carries group selections and health-check results over from the router being
@@ -759,6 +806,68 @@ mod tests {
 
     fn router(text: &str) -> Router {
         Router::new(&Config::parse(text).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn background_probes_follow_routing_mode_rules_and_manual_selections() {
+        let r = router("[Proxy Group]\nRoot = select, DIRECT, Auto\nWork = select, Auto, DIRECT\nAuto = url-test, DIRECT\nUnused = fallback, REJECT\n[Rule]\nDOMAIN,work.test,Work\nFINAL,Root\n");
+        assert_eq!(r.required_groups(), ["Root", "Work", "Auto"].into_iter().map(String::from).collect());
+        r.select("Work", "DIRECT").unwrap();
+        assert!(!r.required_groups().contains("Auto"));
+        r.select("Root", "Auto").unwrap();
+        assert!(r.required_groups().contains("Auto"));
+        assert!(!r.required_groups().contains("Unused"));
+        r.set_mode(Mode::Global);
+        assert_eq!(r.required_groups(), ["Root", "Auto"].into_iter().map(String::from).collect());
+        r.set_mode(Mode::Direct);
+        assert!(r.required_groups().is_empty());
+    }
+
+    #[tokio::test]
+    async fn newly_referenced_automatic_group_is_probed_without_waiting_its_long_interval() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let r = Arc::new(router(&format!("[Proxy Group]\nRoot = select, DIRECT, Auto\nAuto = url-test, DIRECT, interval=600, url=http://{address}/\n[Rule]\nFINAL,Root\n")));
+        r.spawn_health_checks();
+        assert!(tokio::time::timeout(Duration::from_millis(150), listener.accept()).await.is_err());
+        r.select("Root", "Auto").unwrap();
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await.unwrap().unwrap();
+        let mut buffer = [0; 1024];
+        let count = stream.read(&mut buffer).await.unwrap();
+        assert!(count > 0);
+        stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn group_and_node_probes_use_the_same_target_and_report_the_timeout_phase() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                let received = stream.read(&mut request).await.unwrap();
+                assert!(received > 0);
+                stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let received = stream.read(&mut request).await.unwrap();
+            assert!(received > 0);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let config = format!("[Proxy Group]\nG = select, DIRECT, url=http://{address}/measured\n[Rule]\nFINAL,G\n");
+        let router = Arc::new(router(&config));
+        assert_eq!(router.test_url("DIRECT"), format!("http://{address}/measured"));
+        let node = router.test_node("DIRECT", router.test_url("DIRECT"), PROBE_TIMEOUT).await.unwrap();
+        assert_eq!(node.status, 204);
+        let results = router.check_group("G").await.unwrap();
+        assert!(results[0].1.latency_ms.is_some());
+        assert!(results[0].1.error.is_none());
+        let error = router.test_node("DIRECT", router.test_url("DIRECT"), Duration::from_millis(100)).await.err().unwrap().to_string();
+        assert!(error.contains("waiting for HTTP response"), "{error}");
+        server.abort();
     }
 
     #[tokio::test]

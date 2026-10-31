@@ -87,7 +87,7 @@ struct TrafficStatsView: View {
         Picker("策略", selection: $policy) {
             Text("全部流量").tag(nil as String?)
             ForEach(policyNames, id: \.self) { name in
-                Text(name).tag(Optional(name))
+                Text(subscriptionNodeLabel(name)).tag(Optional(name))
             }
         }
         .font(DS.label).disabled(core.statsFallback || core.stats == nil)
@@ -157,7 +157,7 @@ struct TrafficStatsView: View {
     private var totalsTable: some View {
         Table(totals) {
             TableColumn("策略") { row in
-                Text(row.name ?? "全部流量").font(DS.label).lineLimit(1).help(row.name ?? "全部流量")
+                Text(row.name.map(subscriptionNodeLabel) ?? "全部流量").font(DS.label).lineLimit(1).help(row.name.map(subscriptionNodeLabel) ?? "全部流量")
             }.width(min: 100, ideal: 240)
             TableColumn("上传") { row in
                 Text(formatBytes(Double(row.up))).font(DS.label.monospacedDigit())

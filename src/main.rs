@@ -10,6 +10,7 @@ mod inbound;
 mod live;
 mod mitm;
 mod process;
+mod profile_import;
 mod obfs;
 mod reload;
 mod reality;
@@ -51,6 +52,11 @@ usage:
                [--proto TCP|UDP|HTTP|HTTPS|QUIC] [--in-port port] [--url url]
                                            show which rule and outbound a target uses
   sluice convert <share-link>                print a share link as a [Proxy] line
+  sluice nodes <config.conf>                 list subscription node references as JSON
+  sluice catalog <config.conf>               inspect nodes and groups without listeners
+  sluice import-profile <source> <base.conf> convert a complete source into a new profile
+  sluice probe <config.conf> <node> [url]     test one outbound without starting the proxy
+  sluice probe-group <config.conf> <group>   test group members without starting the proxy
   sluice mitm gen-ca [--force]               create the HTTPS decryption CA (not installed)
   sluice diag export <out.zip> [config.conf] write a redacted diagnostics bundle";
 
@@ -211,6 +217,51 @@ async fn run() -> Result<()> {
         ["convert", link] => {
             let (name, def) = subscription::parse_link(link)?;
             println!("{}", def.to_line(name.as_deref().unwrap_or("Imported")));
+        }
+        ["nodes", path] => {
+            let mut cfg = read_config(path)?;
+            let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+            subscription::expand(&mut cfg, base, true).await?;
+            println!("{}", serde_json::to_string(&cfg.subscription_nodes)?);
+        }
+        ["import-profile", source, base] => {
+            let base_text = std::fs::read_to_string(base)?;
+            let parent = std::path::Path::new(base).parent().unwrap_or(std::path::Path::new("."));
+            let result = ruleset::fetch(source, parent, std::time::Duration::ZERO, None).await?;
+            print!("{}", profile_import::convert(&result.text, source, &base_text)?);
+        }
+        ["catalog", path] => {
+            let mut cfg = config::Config::parse(&std::fs::read_to_string(path)?)?;
+            let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+            subscription::expand(&mut cfg, base, false).await?;
+            let router = router::Router::new(&cfg)?;
+            reload::restore_selections(&router, path);
+            let groups: Vec<_> = router.groups().into_iter().map(|g| serde_json::json!({
+                "group":g.name, "type":g.kind, "selected":g.selected,"url":g.url,"interval":g.interval,"tolerance":g.tolerance,
+                "options":g.options.into_iter().map(|o| serde_json::json!({"name":o.name,"latency_ms":null})).collect::<Vec<_>>()
+            })).collect();
+            let warnings: Vec<_> = cfg.subscriptions.iter().filter_map(|s| s.last_error.as_ref()
+                .map(|error| diag::redact(&format!("{}: {error}", s.group)))).collect();
+            println!("{}", serde_json::json!({"nodes":cfg.subscription_nodes, "groups":groups,"warnings":warnings}));
+        }
+        ["probe-group", path, group] => {
+            let (_, router) = build(read_config(path)?, path, false).await?;
+            reload::restore_selections(&router, path);
+            let router = Arc::new(router);
+            let results = router.check_group(group).await.ok_or_else(|| anyhow!("no such group {group:?}"))?;
+            let selected = router.groups().into_iter().find(|g| g.name == *group).unwrap().selected;
+            println!("{}", serde_json::json!({"tested":group,"selected":selected,"results":results.into_iter().map(|(name,result)|
+                serde_json::json!({"name":name,"latency_ms":result.latency_ms,"error":result.error})).collect::<Vec<_>>()}));
+        }
+        ["probe", path, node, rest @ ..] if rest.len() <= 1 => {
+            let (_, router) = build(read_config(path)?, path, false).await?;
+            reload::restore_selections(&router, path);
+            let url = rest.first().copied().unwrap_or_else(|| router.test_url(node));
+            let result = match router.test_node(node, url, router::PROBE_TIMEOUT).await {
+                Ok(t) => serde_json::json!({"node":node,"outbound":t.outbound,"ok":true,"connect_ms":t.connect_ms,"latency_ms":t.latency_ms,"status":t.status,"error":null}),
+                Err(e) => serde_json::json!({"node":node,"outbound":router.resolve(node).ok(),"ok":false,"connect_ms":null,"latency_ms":null,"status":null,"error":format!("{e:#}")}),
+            };
+            println!("{result}");
         }
         ["mitm", "gen-ca"] => mitm::gen_ca(false)?,
         ["mitm", "gen-ca", "--force"] => mitm::gen_ca(true)?,

@@ -60,10 +60,20 @@ controls may fade, while enabled supporting text should remain legible.
 
 - Search fields use ⌘F to focus and Esc to clear. Empty filtered lists offer
   a clear action. Request updates can be paused without pausing traffic.
+- Active connections use aligned destination, upload, and download columns when
+  the list is at least 620 pt wide. Each traffic column shows rate above cumulative
+  bytes. Narrow lists put both directions together below the destination. Keep
+  row separators, selection, and hover feedback visible; clip scrolling content
+  to the list card.
 - Nodes show names, protocol, and endpoint metadata. Details do not reveal
   passwords or subscription URL tokens.
 - Configuration drafts survive pane navigation. External edits are detected
   before saving, and saved and applied are separate outcomes.
+- Policy groups use profile and source disclosures, remembering expansion per
+  profile. Inactive profiles are read-only until explicitly switched. Show the
+  default egress chain and references separately from presentation order. Imported
+  groups can be copied into owned groups; creation offers default or rule usage.
+  Adding a node source and importing a complete profile are separate actions.
 - Empty states explain why content is unavailable and offer one useful action.
   Running and stopped states should be visually coherent in every pane.
 

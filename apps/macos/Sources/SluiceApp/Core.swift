@@ -27,7 +27,7 @@ struct Connection: Decodable, Identifiable {
         case timeMs = "time_ms"
     }
 
-    var policyChain: String { policy == outbound ? policy : "\(policy) → \(outbound)" }
+    var policyChain: String { policy == outbound ? subscriptionNodeLabel(policy) : "\(subscriptionNodeLabel(policy)) → \(subscriptionNodeLabel(outbound))" }
 
     var byteCounts: [(String, String)] {
         [("↑ 上传", up), ("↓ 下载", down)].compactMap { label, bytes in
@@ -36,7 +36,7 @@ struct Connection: Decodable, Identifiable {
     }
 
     func matches(_ query: String) -> Bool {
-        query.isEmpty || [target, policy, outbound, process ?? ""].contains { $0.localizedCaseInsensitiveContains(query) }
+        query.isEmpty || [target, policy, outbound, subscriptionNodeLabel(outbound), process ?? ""].contains { $0.localizedCaseInsensitiveContains(query) }
     }
 }
 
@@ -89,7 +89,8 @@ struct ConfigSummary {
             }
             if line.isEmpty || line.hasPrefix("#") || line.hasPrefix(";") { continue }
             if section == "Proxy", line.contains("=") { proxyCount += 1; continue }
-            if section == "Proxy Group", line.contains("policy-path=") { subscriptionCount += 1; continue }
+            if section == "Subscription", line.contains("=") { subscriptionCount += 1; continue }
+            if section == "Proxy Group", StructuredConfig.Group(line: line)?.parameter("policy-path") != nil { subscriptionCount += 1; continue }
             guard section == "General", let eq = line.firstIndex(of: "=") else { continue }
             let key = line[..<eq].trimmingCharacters(in: .whitespaces)
             let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
@@ -143,6 +144,13 @@ final class Core: ObservableObject {
     @Published private(set) var testingNodes: Set<String> = []
     @Published private(set) var nodeTests: [String: NodeTestResult] = [:]
     @Published private(set) var nodeLatencies: [String: Int] = [:]
+    @Published private(set) var catalogNodes: [SubscriptionNode] = []
+    @Published private(set) var catalogGroups: [PolicyGroup] = []
+    @Published private(set) var catalogError: String?
+    @Published private(set) var loadingCatalog = false
+    private var catalogRevision = UUID()
+    private var nodeTestTokens: [String: UUID] = [:]
+    private var batchNodeTest: Task<Void, Never>?
     @Published private(set) var summary = ConfigSummary(text: "")
     @Published var lastActionError: String?
     @Published private(set) var systemProxyOn = false
@@ -257,7 +265,7 @@ final class Core: ObservableObject {
         FINAL,Proxy
         """
 
-    init(defaults: UserDefaults = .standard, profilesDirectory: URL? = nil, attachment: E2ELaunch? = nil) {
+    init(defaults: UserDefaults = .standard, profilesDirectory: URL? = nil, attachment: E2ELaunch? = nil, discoverExisting: Bool = true) {
         self.attachment = attachment
         let defaults = attachment?.preferences() ?? defaults
         self.defaults = defaults
@@ -274,7 +282,7 @@ final class Core: ObservableObject {
             lastActionError = "无法载入配置列表：\(error.localizedDescription)"
         }
         refreshSummary()
-        if attachment == nil {
+        if attachment == nil && discoverExisting {
             // Discovery has its own flag and prevents launching until reconciliation
             // finishes. It is not a start/apply operation: idle profiles remain editable.
             Task { await self.reconcileExistingCore() }
@@ -1035,7 +1043,8 @@ final class Core: ObservableObject {
     private func refreshPolicies(_ api: APIClient) async -> Bool {
         let revision = latencyRevision
         let generation = monitoringID
-        guard let fresh = try? await api.policies(), !Task.isCancelled, generation == monitoringID else { return false }
+        let path = configPath
+        guard let fresh = try? await api.policies(), !Task.isCancelled, generation == monitoringID, configPath == path else { return false }
         updateGroups(fresh, preferTestResults: revision != latencyRevision)
         return true
     }
@@ -1058,10 +1067,7 @@ final class Core: ObservableObject {
         if nodeLatencies != latencies { nodeLatencies = latencies }
         if !policiesLoaded { policiesLoaded = true }
         let next = fresh.map { group in
-            PolicyGroup(group: group.group, type: group.type, selected: group.selected,
-                        options: group.options.map { option in
-                            GroupOption(name: option.name, latencyMs: nodeLatencies[option.name] ?? option.latencyMs)
-                        })
+            group.updated(options: group.options.map(measuredOption))
         }
         if groups != next { groups = next }
     }
@@ -1082,13 +1088,15 @@ final class Core: ObservableObject {
     }
 
     func select(group: String, option: String) {
-        guard state == .running,
+        guard state == .running, !reloading, !restarting,
               groups.contains(where: { $0.group == group && $0.isSelectable && $0.options.contains(where: { $0.name == option }) }) else { return }
         perform("切换到 \(option) ") { try await $0.select(group: group, option: option) }
     }
 
     func test(group: String) {
-        guard state == .running, let api, !testingGroups.contains(group) else { return }
+        guard canTestNodes, testingNodes.isEmpty, !testingGroups.contains(group) else { return }
+        let path = configPath
+        let liveAPI = state == .running ? api : nil
         testingGroups.insert(group)
         testingTotal += 1
         Task {
@@ -1097,43 +1105,123 @@ final class Core: ObservableObject {
                 if testingGroups.isEmpty { testingTotal = 0 }
             }
             do {
-                let result = try await api.test(group: group)
+                let result: GroupTestResult
+                if let liveAPI { result = try await liveAPI.test(group: group) }
+                else {
+                    guard let binary = coreBinary else { throw APIError(message: "找不到 Sluice 内核。") }
+                    result = try await Self.probeGroup(binary: binary, config: path, group: group)
+                }
+                guard configPath == path else { return }
                 latencyRevision += 1
                 for option in result.results {
-                    nodeTests.removeValue(forKey: option.name)
-                    nodeLatencies[option.name] = option.latencyMs ?? -1
+                    recordMeasurement(NodeTestResult(node: option.name, outbound: nil, ok: option.latencyMs != nil && option.latencyMs != -1,
+                                                     connectMs: nil, latencyMs: option.latencyMs, status: nil, error: option.error), for: option.name)
                 }
                 updateGroups(groups.map { current in
-                    PolicyGroup(group: current.group, type: current.type,
-                                selected: current.group == result.tested ? result.selected : current.selected,
-                                options: current.options)
+                    current.updated(selected: current.group == result.tested ? result.selected : current.selected)
                 }, preferTestResults: true)
+                catalogGroups = catalogGroups.map { current in
+                    current.updated(selected: current.group == result.tested ? result.selected : current.selected)
+                }
+                updateCatalogMeasurements()
                 lastActionError = nil
             } catch {
-                lastActionError = "测试 \(group) 失败：\(error.localizedDescription)"
+                if configPath == path { lastActionError = "测试 \(group) 失败：\(error.localizedDescription)" }
             }
         }
     }
 
     func isTesting(node: String) -> Bool {
-        testingNodes.contains(node) || groups.contains { group in
-            testingGroups.contains(group.group) && group.options.contains { $0.name == node }
+        let keys = measurementKeys(for: node)
+        return testingNodes.contains(where: { keys.contains($0) }) || policyGroups.contains { group in
+            testingGroups.contains(group.group) && group.options.contains { keys.contains($0.name) }
         }
     }
 
     func test(node: String) {
-        guard state == .running, let api, !testingNodes.contains(node) else { return }
+        guard canTestNodes, !isTesting(node: node) else { return }
+        let path = configPath
+        let token = UUID()
+        nodeTestTokens[node] = token
+        let liveAPI = state == .running ? api : nil
         testingNodes.insert(node)
         Task {
-            defer { testingNodes.remove(node) }
+            defer {
+                if nodeTestTokens[node] == token { testingNodes.remove(node); nodeTestTokens.removeValue(forKey: node) }
+            }
             do {
-                let result = try await api.test(node: node)
+                let result: NodeTestResult
+                if let liveAPI { result = try await liveAPI.test(node: node) }
+                else {
+                    guard let binary = coreBinary else { throw APIError(message: "找不到 Sluice 内核。") }
+                    result = try await Self.probe(binary: binary, config: path, node: node)
+                }
+                guard configPath == path, nodeTestTokens[node] == token else { return }
                 latencyRevision += 1
-                nodeTests[node] = result
-                nodeLatencies[node] = result.ok ? (result.latencyMs ?? -1) : -1
+                recordMeasurement(result, for: node)
                 updateGroups(groups, preferTestResults: true)
+                updateCatalogMeasurements()
                 lastActionError = nil
-            } catch { lastActionError = "测试 \(node) 失败：\(error.localizedDescription)" }
+            } catch {
+                if configPath == path, nodeTestTokens[node] == token { lastActionError = "测试 \(subscriptionNodeLabel(node)) 失败：\(error.localizedDescription)" }
+            }
+        }
+    }
+
+    var canTestNodes: Bool { state != .starting && !reloading && !restarting && (state == .running || coreBinary != nil) }
+    var policyGroups: [PolicyGroup] { state == .running ? groups : catalogGroups }
+
+    func measurementKeys(for reference: String) -> Set<String> {
+        var keys: Set<String> = [reference]
+        let matching = catalogNodes.filter { $0.id == reference || ($0.aliases ?? []).contains(reference) }
+        for node in matching { keys.insert(node.id); keys.formUnion(node.aliases ?? []) }
+        for node in catalogNodes where !(Set(node.aliases ?? []).isDisjoint(with: keys)) { keys.insert(node.id) }
+        return keys
+    }
+
+    func recordMeasurement(_ result: NodeTestResult, for reference: String) {
+        for key in measurementKeys(for: reference) {
+            nodeTests[key] = result
+            nodeLatencies[key] = result.ok ? (result.latencyMs ?? -1) : -1
+        }
+    }
+
+    private func measuredOption(_ option: GroupOption) -> GroupOption {
+        let error: String?
+        if let measurement = nodeTests[option.name] { error = measurement.error }
+        else { error = option.error }
+        return GroupOption(name: option.name, latencyMs: nodeLatencies[option.name] ?? option.latencyMs, error: error)
+    }
+
+    private func updateCatalogMeasurements() {
+        catalogGroups = catalogGroups.map { group in
+            group.updated(options: group.options.map(measuredOption))
+        }
+    }
+
+    nonisolated static func probeGroup(binary: URL, config: String, group: String) async throws -> GroupTestResult {
+        let (status, output) = await runTool(binary.path, ["probe-group", config, group])
+        guard status == 0 else { throw APIError(message: output.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return try JSONDecoder().decode(GroupTestResult.self, from: Data(output.utf8))
+    }
+
+    nonisolated static func probe(binary: URL, config: String, node: String, url: String? = nil) async throws -> NodeTestResult {
+        let args = ["probe", config, node] + (url.map { [$0] } ?? [])
+        let (status, output) = await runTool(binary.path, args)
+        guard status == 0 else { throw APIError(message: output.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return try JSONDecoder().decode(NodeTestResult.self, from: Data(output.utf8))
+    }
+
+    func testNodes(_ names: [String]) {
+        guard canTestNodes, testingGroups.isEmpty, batchNodeTest == nil else { return }
+        let path = configPath
+        batchNodeTest = Task {
+            defer { batchNodeTest = nil }
+            for name in Array(Set(names)).sorted() {
+                while testingNodes.count >= 4, !Task.isCancelled, configPath == path { try? await Task.sleep(for: .milliseconds(100)) }
+                guard !Task.isCancelled, configPath == path, canTestNodes else { return }
+                test(node: name)
+            }
         }
     }
 
@@ -1162,9 +1250,9 @@ final class Core: ObservableObject {
     }
 
     func testAll() {
-        guard testingGroups.isEmpty else { return }
+        guard canTestNodes, testingNodes.isEmpty, testingGroups.isEmpty else { return }
         // Each test starts its own async request, so groups run concurrently.
-        for g in groups { test(group: g.group) }
+        for g in policyGroups { test(group: g.group) }
     }
 
     func setMode(_ m: String) {
@@ -1275,8 +1363,75 @@ final class Core: ObservableObject {
         catch { lastActionError = "无法刷新配置列表：\(error.localizedDescription)" }
     }
 
+    func profilePolicySnapshot(_ name: String) async throws -> ProfilePolicySnapshot {
+        let store = try profiles()
+        let text = try store.read(name)
+        let path = store.url(for: name).path
+        guard let binary = coreBinary else { throw APIError(message: "找不到 Sluice 内核。") }
+        let (status, output) = await runTool(binary.path, ["catalog", path])
+        guard status == 0 else { throw APIError(message: output.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard try store.read(name) == text else { throw APIError(message: "配置已更新，请重新展开后查看。") }
+        return ProfilePolicySnapshot(name: name, path: path, text: text,
+                                     catalog: try JSONDecoder().decode(SubscriptionCatalog.self, from: Data(output.utf8)))
+    }
+
+    func savePolicyGroup(_ group: StructuredConfig.Group, originalName: String?, usage: PolicyGroupUse,
+                         path: String, expected: String, knownGroups: [PolicyGroup]) async -> String? {
+        guard canChangeProfile, configPath == path else { return "当前配置已切换或正在应用修改，请重新打开编辑器。" }
+        do {
+            let text = try PolicyChanges.upsert(group, originalName: originalName, usage: usage, in: expected, knownGroups: knownGroups)
+            if let error = await saveConfig(text, expected: expected) { return error }
+            await loadNodeCatalog()
+            return nil
+        } catch { return error.localizedDescription }
+    }
+
+    func makeDefaultPolicy(_ name: String, path: String, expected: String) async -> String? {
+        guard canChangeProfile, configPath == path, policyGroups.contains(where: { $0.group == name }) else {
+            return "当前配置或策略组已变化，请刷新后重试。"
+        }
+        if let error = await saveConfig(PolicyChanges.setDefault(name, in: expected), expected: expected) { return error }
+        await loadNodeCatalog()
+        return nil
+    }
+
+    func linkPolicyRule(_ name: String, usage: PolicyGroupUse, path: String, expected: String) async -> String? {
+        guard canChangeProfile, configPath == path, policyGroups.contains(where: { $0.group == name }) else {
+            return "当前配置或策略组已变化，请刷新后重试。"
+        }
+        do {
+            let text = try PolicyChanges.associate(name, usage: usage, in: expected)
+            if let error = await saveConfig(text, expected: expected) { return error }
+            await loadNodeCatalog()
+            return nil
+        } catch { return error.localizedDescription }
+    }
+
     func createProfile(name: String, contents: String) throws {
         try profiles().create(name: name, contents: contents)
+        refreshProfiles()
+    }
+
+    func prepareProfileImport(_ source: String) async throws -> PreparedProfileImport {
+        let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = source.hasPrefix("/") ? URL(fileURLWithPath: source).absoluteString : source
+        guard Self.isSubscriptionURL(address), let binary = coreBinary else { throw APIError(message: "请填写 HTTP/HTTPS、file:// 地址，或选择本地配置文件。") }
+        let path = configPath
+        let (status, output) = await runTool(binary.path, ["import-profile", address, path])
+        guard status == 0 else { throw APIError(message: output.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard configPath == path else { throw APIError(message: "当前配置已切换，请重新准备导入。") }
+        if let error = await validate(output) { throw APIError(message: error) }
+        let catalog = try await subscriptionCatalog(in: output)
+        return PreparedProfileImport(text: output, nodes: catalog.nodes.count + ConfigText.lines(of: "Proxy", in: output).count,
+                                     groups: catalog.groups.count, rules: StructuredConfig(output).rules.count)
+    }
+
+    func importProfile(name: String, text: String) async throws {
+        try requireProfileChange()
+        let store = try profiles()
+        try store.validateAvailableName(name)
+        if let error = await validate(text) { throw APIError(message: error) }
+        try store.create(name: name, contents: text)
         refreshProfiles()
     }
 
@@ -1322,7 +1477,13 @@ final class Core: ObservableObject {
         let wasRunning = state == .running
         reloading = true
         defer { reloading = false }
-        if wasRunning {
+        if wasRunning && needsRestart {
+            if let error = await validate(try store.read(name)) { throw APIError(message: error) }
+            stop()
+            let deadline = ContinuousClock.now + .seconds(20)
+            while isActive, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
+            guard !isActive else { throw APIError(message: "旧内核停止超时，当前配置未切换。") }
+        } else if wasRunning {
             guard let api else { throw APIError(message: "未配置控制 API") }
             // The core validates/builds first; a 400 leaves both selections unchanged.
             try await api.switchProfile(path: path)
@@ -1331,7 +1492,7 @@ final class Core: ObservableObject {
         applyProfilePath(store)
         nodeTests = [:]
         nodeLatencies = [:]
-        if wasRunning && needsRestart { restart() }
+        if wasRunning && needsRestart { start() }
         else if wasRunning {
             runningSummary = next
             if let api { _ = await refreshPolicies(api) }
@@ -1346,6 +1507,10 @@ final class Core: ObservableObject {
         let path = store.url(for: store.activeName).path
         guard configPath != path else { return }
         configPath = path
+        catalogRevision = UUID()
+        catalogNodes = []; catalogGroups = []; catalogError = nil; loadingCatalog = false
+        batchNodeTest?.cancel(); batchNodeTest = nil
+        nodeTestTokens = [:]; testingNodes = []; nodeTests = [:]; nodeLatencies = [:]
         refreshSummary()
     }
 
@@ -1441,28 +1606,71 @@ final class Core: ObservableObject {
     /// and then nothing is changed.
     func removeEntry(_ name: String, isSubscription: Bool) async -> String? {
         let text = readConfig()
-        let updated = ConfigText.remove(name, from: isSubscription ? "Proxy Group" : "Proxy", of: text)
+        let independent = StructuredConfig(text).subscriptionNames.contains(name) && ConfigText.lines(of: "Subscription", in: text).contains {
+            $0.split(separator: "=", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) == name
+        }
+        let updated = ConfigText.remove(name, from: isSubscription ? (independent ? "Subscription" : "Proxy Group") : "Proxy", of: text)
         guard updated != text else { return "配置里找不到「\(name)」。" }
         return Core.explain(await saveConfig(updated, expected: text),
                             as: "「\(name)」没有删除，配置没有改动。如果有规则直接使用它，请先在配置中修改这些规则。")
     }
 
-    /// Adds a subscription as its own `select` group fed by `policy-path`.
-    func addSubscription(name: String, url: String, filter: String, userAgent: String = "") async -> String? {
+    /// Store the source independently; the FINAL select group imports its nodes.
+    func addSubscription(name: String, url: String, filter: String, userAgent: String = "", importGroups: Bool = true) async -> String? {
         let url = url.trimmingCharacters(in: .whitespaces)
         guard Self.isSubscriptionURL(url) else { return "订阅地址需要以 http://、https:// 或 file:// 开头。" }
         var text = readConfig()
         let group = uniqueName(name.trimmingCharacters(in: .whitespaces).isEmpty ? "Subscription" : name, in: text)
-        var line = "\(group) = select, policy-path=\(url)"
-        if !filter.trimmingCharacters(in: .whitespaces).isEmpty { line += ", policy-regex-filter=\(filter)" }
+        guard !group.contains(where: { "|,=\r\n\"".contains($0) }) else { return "订阅名称不能包含 |、逗号、等号、双引号或换行。" }
+        guard !url.contains(where: { "\r\n\"".contains($0) }), !filter.contains(where: { "\r\n\"".contains($0) }) else { return "订阅地址和过滤规则不能包含换行或双引号。" }
+        var line = "\(group) = policy-path=\"\(url)\""
+        line += ", import-groups=\(importGroups ? "true" : "false")"
+        if !filter.trimmingCharacters(in: .whitespaces).isEmpty { line += ", policy-regex-filter=\"\(filter)\"" }
         let userAgent = userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !userAgent.contains("\r"), !userAgent.contains("\n"), !userAgent.contains("\"") else {
             return "User-Agent 不能包含换行或双引号。"
         }
         if !userAgent.isEmpty { line += ", user-agent=\"\(userAgent)\"" }
-        text = ConfigText.insert(line, into: "Proxy Group", of: text)
-        text = ConfigText.addToFinalGroup(group, in: text)
+        text = ConfigText.insert(line, into: "Subscription", of: text)
+        text = ConfigText.addSourceToFinalGroup(group, in: text)
         return Core.explain(await saveConfig(text), as: "订阅没有添加，配置没有改动。请确认地址可以访问，且内容是节点列表。")
+    }
+
+    /// Resolve the draft's sources without starting a proxy or exposing credentials.
+    func subscriptionNodes(in text: String) async throws -> [SubscriptionNode] {
+        try await subscriptionCatalog(in: text).nodes
+    }
+
+    func subscriptionCatalog(in text: String) async throws -> SubscriptionCatalog {
+        guard let binary = coreBinary else { throw APIError(message: "找不到 Sluice 内核。") }
+        let dir = URL(fileURLWithPath: configPath).deletingLastPathComponent()
+        let tmp = dir.appendingPathComponent(".sluice-nodes-\(UUID().uuidString).conf")
+        try text.write(to: tmp, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let (status, out) = await runTool(binary.path, ["catalog", tmp.path])
+        guard status == 0 else { throw APIError(message: out.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return try JSONDecoder().decode(SubscriptionCatalog.self, from: Data(out.utf8))
+    }
+
+    func loadNodeCatalog() async {
+        guard let binary = coreBinary else { catalogError = "找不到 Sluice 内核。"; return }
+        let path = configPath
+        let revision = UUID()
+        catalogRevision = revision
+        loadingCatalog = true
+        defer { if catalogRevision == revision { loadingCatalog = false } }
+        do {
+            let (status, output) = await runTool(binary.path, ["catalog", path])
+            guard status == 0 else { throw APIError(message: output.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let catalog = try JSONDecoder().decode(SubscriptionCatalog.self, from: Data(output.utf8))
+            guard configPath == path, catalogRevision == revision else { return }
+            catalogNodes = catalog.nodes; catalogGroups = catalog.groups
+            for (reference, result) in Array(nodeTests) { recordMeasurement(result, for: reference) }
+            updateCatalogMeasurements()
+            catalogError = catalog.warnings.flatMap { $0.isEmpty ? nil : $0.joined(separator: "\n") }
+        } catch {
+            if configPath == path, catalogRevision == revision { catalogError = error.localizedDescription }
+        }
     }
 
     /// Replaces the generic first line of a check failure with one that fits the action,

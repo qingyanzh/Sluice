@@ -2,6 +2,7 @@ import SwiftUI
 
 /// All modes edit ConfigDraft.text. The Config pane owns validation/save/reload.
 struct StructuredConfigEditors: View {
+    @EnvironmentObject var core: Core
     @Binding var text: String
     var section: String
     @State private var selection: Int?
@@ -47,10 +48,13 @@ struct StructuredConfigEditors: View {
             }
         }
         .sheet(item: $groupEdit) { request in
-            GroupConfigSheet(group: request.group, isNew: request.line == nil, policies: document.policies) { group in
+            GroupConfigSheet(group: request.group, isNew: request.line == nil, policies: document.policies,
+                             sourceNames: StructuredConfig(request.snapshot).subscriptionNames,
+                             loadCatalog: { try await core.subscriptionCatalog(in: request.snapshot) }) { group in
                 guard text == request.snapshot else { return "草稿已更新，请关闭后重新编辑。" }
                 guard !document.groups.contains(where: { $0.id != request.line && $0.value.name == group.name }),
-                      !document.policies.filter({ !document.groups.map { $0.value.name }.contains($0) }).contains(group.name)
+                      !document.policies.filter({ !document.groups.map { $0.value.name }.contains($0) }).contains(group.name),
+                      !ConfigText.lines(of: "Subscription", in: text).contains(where: { $0.split(separator: "=", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) == group.name })
                 else { return "这个名称已被使用，请选择其他名称。" }
                 mutate { $0.setGroup(group, at: request.line) }
                 return nil
@@ -73,6 +77,8 @@ struct StructuredConfigEditors: View {
                     rows: document.groups.map { item in
                         let group = item.value
                         var detail = group.members.joined(separator: ", ")
+                        if !group.sources.isEmpty { detail += (detail.isEmpty ? "" : "\n") + "订阅节点：" + group.sources.joined(separator: "、") }
+                        if !group.nodeFilter.isEmpty { detail += "\n节点过滤：" + group.nodeFilter }
                         // Subscription groups have no fixed members: say where their nodes come from.
                         if let source = group.parameter("policy-path") {
                             let from = "订阅 · \(subscriptionSourceLabel(source))"
@@ -224,10 +230,21 @@ struct GroupConfigSheet: View {
     @State var group: StructuredConfig.Group
     let isNew: Bool
     let policies: [String]
+    var sourceNames: [String] = []
+    var loadCatalog: (() async throws -> SubscriptionCatalog)? = nil
+    var usage: Binding<PolicyGroupUse>? = nil
+    var submitTitle: String? = nil
+    var save: ((StructuredConfig.Group) async -> String?)? = nil
     let apply: (StructuredConfig.Group) -> String?
     @State private var error: String?
+    @State private var nodes: [SubscriptionNode] = []
+    @State private var importedGroups: [PolicyGroup] = []
+    @State private var loadingNodes = false
+    @State private var catalogLoaded = false
+    @State private var nodesError: String?
+    @State private var saving = false
     var title: String { isNew ? "添加策略组" : "编辑策略组" }
-    private var candidates: [String] { policies.filter { $0 != group.name && !group.members.contains($0) } }
+    private var candidates: [String] { (policies + importedGroups.map(\.group)).filter { $0 != group.name && !group.members.contains($0) } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -242,23 +259,83 @@ struct GroupConfigSheet: View {
                     TextField("间隔（秒）", text: $group.interval, prompt: Text("600").foregroundStyle(DS.ink3))
                 }
             }.textFieldStyle(.roundedBorder)
+            if let usage {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("保存后用途", selection: usage.mode) {
+                        ForEach(PolicyGroupUse.Mode.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    if usage.wrappedValue.mode == .rule {
+                        HStack {
+                            Picker("规则类型", selection: usage.ruleType) {
+                                Text("域名及子域名").tag("DOMAIN-SUFFIX")
+                                Text("精确域名").tag("DOMAIN")
+                                Text("进程名称").tag("PROCESS-NAME")
+                            }
+                            TextField(usage.wrappedValue.ruleType == "PROCESS-NAME" ? "例如 Safari" : "例如 example.com", text: usage.value)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                }
+            }
+            if !sourceNames.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("订阅来源").font(DS.heading)
+                    Text("勾选后动态包含该订阅的全部节点；多个订阅会合并，自动组逐个测试节点。")
+                        .font(DS.small).foregroundStyle(DS.ink2)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(sourceNames, id: \.self) { source in
+                                Toggle(source, isOn: Binding(get: { group.sources.contains(source) }, set: { included in
+                                    if included { group.sources.append(source) } else { group.sources.removeAll { $0 == source } }
+                                }))
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(maxHeight: 88)
+                    HStack(spacing: 10) {
+                        Text("名称过滤").font(DS.small).foregroundStyle(DS.ink2)
+                        TextField("正则表达式，可选", text: $group.nodeFilter)
+                            .textFieldStyle(.roundedBorder).disabled(group.sources.isEmpty)
+                    }
+                }
+            }
             HStack {
-                Text("成员（按优先顺序）").font(DS.heading)
+                Text("指定成员（按优先顺序）").font(DS.heading)
                 Spacer()
                 Menu("添加成员") {
-                    ForEach(candidates, id: \.self) { member in Button(member) { group.members.append(member) } }
-                }.disabled(candidates.isEmpty)
+                    ForEach(candidates, id: \.self) { member in Button(subscriptionNodeLabel(member)) { group.members.append(member) } }
+                    if !sourceNames.isEmpty { Divider() }
+                    ForEach(sourceNames, id: \.self) { source in
+                        Menu("\(source) 的节点") {
+                            let available = nodes.filter { $0.source == source }
+                            if available.isEmpty { Text(loadingNodes ? "正在加载…" : "没有可用节点") }
+                            ForEach(available) { node in
+                                Button(node.name) { group.members.append(node.id) }.disabled(group.members.contains(node.id))
+                            }
+                        }
+                    }
+                }.disabled(candidates.isEmpty && sourceNames.isEmpty)
+            }
+            if loadingNodes { ProgressView("正在读取订阅节点…").font(DS.small) }
+            if let nodesError {
+                HStack {
+                    Text(nodesError).font(DS.small).foregroundStyle(DS.warn).lineLimit(3)
+                    Button("重试") { Task { await refreshNodes() } }
+                }
             }
             ScrollView {
                 VStack(spacing: 8) {
                     if group.members.isEmpty {
-                        Text("从节点和策略组中添加成员。订阅组也可以使用原有的 policy-path。")
+                        Text("可勾选上方订阅动态导入，或从「添加成员」挑选单个节点。")
                             .font(DS.small).foregroundStyle(DS.ink2).padding(.vertical, 12)
                     }
                     ForEach(Array(group.members.enumerated()), id: \.offset) { index, member in
                         HStack {
-                            Text(member).lineLimit(1)
+                            Text(subscriptionNodeLabel(member)).lineLimit(1).truncationMode(.middle).help(subscriptionNodeLabel(member))
                             Spacer()
+                            if catalogLoaded && member.hasPrefix("@") && !nodes.contains(where: { $0.id == member }) && !importedGroups.contains(where: { $0.group == member }) {
+                                Text("节点不可用").font(DS.caption).foregroundStyle(DS.warn)
+                                    .help("订阅更新后已找不到这个节点，运行时会跳过此成员。")
+                            }
                             Button { group.members.swapAt(index, index - 1) } label: { Image(systemName: "arrow.up") }
                                 .disabled(index == 0).help("上移成员")
                             Button { group.members.swapAt(index, index + 1) } label: { Image(systemName: "arrow.down") }
@@ -267,16 +344,31 @@ struct GroupConfigSheet: View {
                         }.padding(.vertical, 4)
                     }
                 }
-            }.frame(height: 160)
+            }.frame(height: min(160, max(76, CGFloat(group.members.count) * 44)))
             if let error { Text(error).font(DS.small).foregroundStyle(DS.fail) }
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("更新草稿") { submit() }.keyboardShortcut(.defaultAction).glassButton(prominent: true)
+                Button(saving ? "正在保存…" : submitTitle ?? "更新草稿") { submit() }.keyboardShortcut(.defaultAction).glassButton(prominent: true)
             }
         }
         .font(DS.label).glassButton().padding(28).frame(width: 580)
+        .disabled(saving).interactiveDismissDisabled(saving)
         .onChange(of: group) { error = nil }
+        .task { await refreshNodes() }
+    }
+
+    private func refreshNodes() async {
+        guard let loadCatalog, !sourceNames.isEmpty, !loadingNodes else { return }
+        loadingNodes = true
+        defer { loadingNodes = false }
+        do {
+            let catalog = try await loadCatalog()
+            nodes = catalog.nodes; importedGroups = catalog.groups.filter { $0.group.hasPrefix("@") }
+            catalogLoaded = true
+            nodesError = catalog.warnings.flatMap { $0.isEmpty ? nil : $0.joined(separator: "\n") }
+        }
+        catch { nodesError = error.localizedDescription }
     }
 
     private func submit() {
@@ -287,12 +379,22 @@ struct GroupConfigSheet: View {
               !group.serialised.contains("\r"), !group.serialised.contains("\n"),
               !group.url.contains(","), !group.members.contains(group.name),
               StructuredConfig.Group(line: group.serialised) == group,
-              !group.members.isEmpty || group.parameter("policy-path") != nil
+              !group.members.isEmpty || !group.sources.isEmpty || group.parameter("policy-path") != nil
         else { error = "请填写有效名称，并添加至少一个成员或保留订阅参数。"; return }
         if !group.interval.isEmpty, UInt64(group.interval) == nil {
             error = "间隔需要填写非负整数秒。"; return
         }
-        if let failure = apply(group) { error = failure } else { dismiss() }
+        if !group.nodeFilter.isEmpty, (try? NSRegularExpression(pattern: group.nodeFilter)) == nil {
+            error = "节点名称过滤不是有效的正则表达式。"; return
+        }
+        if let save {
+            saving = true
+            Task {
+                let failure = await save(group)
+                saving = false
+                if let failure { error = failure } else { dismiss() }
+            }
+        } else if let failure = apply(group) { error = failure } else { dismiss() }
     }
 }
 
@@ -308,18 +410,18 @@ func subscriptionSourceLabel(_ source: String) -> String {
     return url.host ?? source
 }
 
-/// The draft's subscriptions (`policy-path` groups): where each one comes from and how
+/// Independent sources and legacy `policy-path` groups in the current draft.
 /// it is filtered. Deleting one edits the draft; nothing is written until it is saved.
 struct SubscriptionsEditor: View {
     @Binding var text: String
     @State private var pendingDelete: NodeRecord?
 
     private var subscriptions: [NodeRecord] {
-        ConfigText.lines(of: "Proxy Group", in: text).compactMap { line in
+        ["Subscription", "Proxy Group"].flatMap { section in ConfigText.lines(of: section, in: text).compactMap { line in
             let name = line.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? line
-            let record = NodeRecord(line: line, id: name)
+            let record = NodeRecord(line: line, id: "\(section):\(name)", section: section)
             return record.isSubscription ? record : nil
-        }
+        } }
     }
 
     var body: some View {
@@ -332,7 +434,7 @@ struct SubscriptionsEditor: View {
             }
             Text("删除会同步到文本草稿；完成后点击下方的保存按钮。").font(DS.small).foregroundStyle(DS.ink2)
             if subscriptions.isEmpty {
-                EmptyState(icon: "link", title: "还没有订阅", detail: "在节点页点击「添加订阅」，订阅会作为策略组出现在这里。")
+                EmptyState(icon: "link", title: "还没有订阅", detail: "在节点页添加订阅，再到策略组中勾选需要的来源。")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -348,12 +450,12 @@ struct SubscriptionsEditor: View {
         .confirmationDialog("删除订阅「\(pendingDelete?.name ?? "")」？", isPresented: Binding(
             get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible) {
             Button("删除订阅", role: .destructive) {
-                if let name = pendingDelete?.name { text = ConfigText.remove(name, from: "Proxy Group", of: text) }
+                if let sub = pendingDelete { text = ConfigText.remove(sub.name, from: sub.section, of: text) }
                 pendingDelete = nil
             }
             Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("订阅组会从草稿中移除，并从其他策略组的成员里删掉。")
+            Text("订阅及其节点引用会从草稿中移除；没有剩余成员的策略组会拒绝连接。")
         }
     }
 
