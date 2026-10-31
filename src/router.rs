@@ -536,6 +536,24 @@ impl Router {
             .collect()
     }
 
+    /// Install saved choices together: applying them one at a time can temporarily
+    /// form a cycle with a default choice even when the complete saved graph is valid.
+    pub fn restore_selections(&self, saved: &std::collections::BTreeMap<String, String>) {
+        let previous = self.selected.read().unwrap().clone();
+        {
+            let mut selected = self.selected.write().unwrap();
+            for group in self.groups.iter().filter(|g| g.kind == GroupKind::Select) {
+                if let Some(option) = saved.get(&group.name).filter(|o| group.options.contains(o)) {
+                    selected.insert(group.name.clone(), option.clone());
+                }
+            }
+        }
+        if self.groups.iter().any(|g| self.resolve(&g.name).is_err()) {
+            *self.selected.write().unwrap() = previous;
+            log::warn!("saved selections form a cycle; keeping prior choices");
+        }
+    }
+
     pub fn select(&self, group: &str, option: &str) -> Result<()> {
         let g = self.group(group).ok_or_else(|| anyhow!("no such group {group:?}"))?;
         if g.kind != GroupKind::Select {

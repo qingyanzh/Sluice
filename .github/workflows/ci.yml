@@ -107,10 +107,11 @@ jobs:
           name: sluice
           path: target/release
       - run: chmod +x target/release/sluice
-      - run: brew install shadowsocks-rust
+      - run: brew install shadowsocks-rust xray
       - name: Network before
         run: netstat -rn -f inet | head -15; scutil --nc list || true
       - run: bash scripts/ci/tun.sh
+      - run: bash scripts/ci/tun_lifecycle.sh
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -128,6 +129,11 @@ jobs:
           name: sluice
           path: target/release
       - run: chmod +x target/release/sluice
+      - name: Select Xcode 26 for helper watcher tests
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+      - run: cd apps/macos && swift test --filter ProcessWatchTests
       - run: cd apps/macos && swift build -c release --product SluiceHelper
       - run: bash scripts/ci/helper.sh
       - if: always()

@@ -96,7 +96,7 @@ scripts/tun-check.sh || fails=$((fails + 1))
 kill "$app"
 for _ in $(seq 30); do pgrep -x sluice > /dev/null || break; sleep 0.5; done
 kill "$watchdog" 2>/dev/null
-check "helper stopped the core when the app died" "! grep -q '^!! watchdog stopped Sluice' '$out'"
+check "helper stopped the core when the app died" "! pgrep -x sluice > /dev/null && ! grep -q '^!! watchdog stopped Sluice' '$out'"
 scripts/tun-check.sh after || fails=$((fails + 1))
 echo "-- core log"; tail -15 /Library/Logs/Sluice/core.log
 

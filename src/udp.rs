@@ -198,6 +198,9 @@ pub enum Framing {
 /// plus, for XUDP, `network(2=UDP) port type addr` and on the New frame an 8-byte GlobalID
 /// (zero: no session resumption across connections).
 pub fn xudp_frame(first: bool, addr: &Target, data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() > u16::MAX as usize {
+        bail!("XUDP packet too large");
+    }
     let mut out = Vec::with_capacity(data.len() + 48);
     out.extend_from_slice(&[0, 0, 0, 0, if first { 1 } else { 2 }, 1, 2]);
     write_port_addr(addr, &mut out)?;
@@ -213,6 +216,9 @@ pub fn xudp_frame(first: bool, addr: &Target, data: &[u8]) -> Result<Vec<u8>> {
 
 impl Framing {
     fn encode(&self, first: bool, p: &Packet) -> Result<Vec<u8>> {
+        if p.data.len() > u16::MAX as usize {
+            bail!("UDP packet too large");
+        }
         match self {
             Framing::Trojan => {
                 let mut out = Vec::with_capacity(p.data.len() + 32);
@@ -223,8 +229,12 @@ impl Framing {
                 Ok(out)
             }
             Framing::Uot(target) => {
-                if p.data.len() > u16::MAX as usize { bail!("UoT packet too large"); }
-                if p.addr.to_string() != target.to_string() { bail!("UoT connect destination changed"); }
+                if p.data.len() > u16::MAX as usize {
+                    bail!("UoT packet too large");
+                }
+                if p.addr.to_string() != target.to_string() {
+                    bail!("UoT connect destination changed");
+                }
                 let mut out = Vec::with_capacity(p.data.len() + 2);
                 out.extend_from_slice(&(p.data.len() as u16).to_be_bytes());
                 out.extend_from_slice(&p.data);
@@ -242,6 +252,9 @@ impl Framing {
                 let len = r.read_u16().await? as usize;
                 let mut crlf = [0u8; 2];
                 r.read_exact(&mut crlf).await?;
+                if crlf != *b"\r\n" {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "trojan: bad packet delimiter"));
+                }
                 let mut data = vec![0u8; len];
                 r.read_exact(&mut data).await?;
                 Ok(Some(Packet { addr, data }))
@@ -252,7 +265,11 @@ impl Framing {
                 Ok(Some(Packet { addr: target.clone(), data }))
             }
             Framing::Xudp(fallback) => loop {
-                let mut meta = vec![0u8; r.read_u16().await? as usize];
+                let len = r.read_u16().await? as usize;
+                if !(4..=512).contains(&len) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "xudp: invalid metadata length"));
+                }
+                let mut meta = vec![0u8; len];
                 r.read_exact(&mut meta).await?;
                 if meta.len() < 4 {
                     return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "xudp: short frame"));
@@ -273,7 +290,9 @@ impl Framing {
                 let Some(data) = data else { continue };
                 // KeepAlive frames carry data only when they also name an address.
                 let addr = match meta.get(4) {
-                    Some(2) => parse_port_addr(&meta[5..]).map(|(t, _)| t),
+                    Some(2) => {
+                        Some(parse_port_addr(&meta[5..]).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "xudp: bad packet address"))?.0)
+                    }
                     _ => None,
                 };
                 match (status, addr) {
@@ -294,9 +313,17 @@ pub fn over_stream(stream: BoxStream, framing: Framing, mut rx: mpsc::Receiver<P
     tokio::spawn(async move {
         let mut first = !first_frame_sent;
         while let Some(p) = rx.recv().await {
-            let Ok(frame) = f.encode(first, &p) else { continue };
+            let Ok(frame) = f.encode(first, &p) else {
+                continue;
+            };
             first = false;
-            if wr.write_all(&frame).await.is_err() {
+            if async {
+                wr.write_all(&frame).await?;
+                wr.flush().await
+            }
+            .await
+            .is_err()
+            {
                 return;
             }
         }
@@ -362,6 +389,37 @@ mod tests {
             let got = f.decode(&mut r).await.unwrap().unwrap();
             assert_eq!((got.addr.to_string(), got.data), (p.addr.to_string(), p.data.clone()));
         }
+    }
+
+    #[tokio::test]
+    async fn domain_ipv6_and_large_datagram_framing() {
+        for target in [Target::new("stun.l.google.com", 19302), Target::new("2001:db8::1", 3478)] {
+            let mut encoded = Vec::new();
+            write_port_addr(&target, &mut encoded).unwrap();
+            let (decoded, used) = parse_port_addr(&encoded).unwrap();
+            assert_eq!(decoded.to_string(), target.to_string());
+            assert_eq!(used, encoded.len());
+            for n in 0..encoded.len() {
+                assert!(parse_port_addr(&encoded[..n]).is_none());
+            }
+            let frame = xudp_frame(true, &target, b"STUN").unwrap();
+            let reply = Framing::Xudp(target.clone()).decode(&mut frame.as_slice()).await.unwrap().unwrap();
+            assert_eq!(reply.addr.to_string(), target.to_string());
+            assert_eq!(reply.data, b"STUN");
+        }
+        assert!(xudp_frame(true, &Target::new("a", 1), &vec![0; 65536]).is_err());
+        let bad_addr = [0, 5, 0, 0, 2, 1, 2, 0, 0];
+        assert!(Framing::Xudp(Target::new("a", 1)).decode(&mut &bad_addr[..]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn buffered_udp_stream_flushes_each_packet() {
+        let (app, mut wire) = tokio::io::duplex(4096);
+        let (client, side) = pipe_pair();
+        over_stream(Box::new(tokio::io::BufStream::new(app)), Framing::Trojan, side.rx, side.tx, false);
+        client.tx.send(Packet { addr: Target::new("stun.example", 19302), data: b"query".to_vec() }).await.unwrap();
+        let packet = tokio::time::timeout(std::time::Duration::from_secs(1), Framing::Trojan.decode(&mut wire)).await.unwrap().unwrap().unwrap();
+        assert_eq!(packet.data, b"query");
     }
 
     #[tokio::test]

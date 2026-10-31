@@ -7,15 +7,47 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 use log::{info, warn};
 
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_shutdown() {
+    STOPPING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn check_startup() -> Result<()> {
+    if STOPPING.load(std::sync::atomic::Ordering::Relaxed) { bail!("shutdown during TUN setup"); }
+    Ok(())
+}
+
 /// Survives a crash so the next start can put the user's DNS settings back.
 const DNS_BACKUP: &str = "/var/tmp/sluice-dns-backup";
 
 fn sh(cmd: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new(cmd).args(args).output().with_context(|| format!("run {cmd}"))?;
-    if !out.status.success() {
-        bail!("{cmd} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    // Network tools occasionally hang during service changes. Never let one prevent
+    // the remaining routes/DNS services from being restored on shutdown.
+    use std::process::Stdio;
+    let mut child = Command::new(cmd).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().with_context(|| format!("run {cmd}"))?;
+    // Drain pipes while waiting: a large route table can exceed the pipe buffer.
+    fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+        std::thread::spawn(move || { let mut data = Vec::new(); pipe.read_to_end(&mut data)?; Ok(data) })
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let stdout = drain(child.stdout.take().unwrap());
+    let stderr = drain(child.stderr.take().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while child.try_wait()?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{cmd} timed out");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let status = child.wait()?;
+    let stdout = stdout.join().map_err(|_| anyhow!("{cmd} stdout reader failed"))??;
+    let stderr = stderr.join().map_err(|_| anyhow!("{cmd} stderr reader failed"))??;
+    if !status.success() {
+        bail!("{cmd} {}: {}", args.join(" "), String::from_utf8_lossy(&stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 pub fn is_root() -> bool {
@@ -227,15 +259,18 @@ impl SystemGuard {
             routes6: Vec::new(),
             scoped_default6: None,
         };
+        check_startup()?;
         if ensure_scoped_default(egress)? {
             guard.scoped_default = Some(egress.to_string());
         }
         // Two /1 routes beat the default route without replacing it.
         for net in ["0.0.0.0/1", "128.0.0.0/1", fake_cidr] {
+            check_startup()?;
             sh("route", &["-n", "add", "-net", net, "-interface", tun])?;
             guard.routes.push(net.to_string());
         }
         // IPv6 only if the machine has it; otherwise there's nothing to leak.
+        check_startup()?;
         match default_gateway6() {
             Some(gw6) => {
                 sh("ifconfig", &[tun, "inet6", TUN_ADDR6, "prefixlen", "64"])?;
@@ -243,6 +278,7 @@ impl SystemGuard {
                     guard.scoped_default6 = Some(egress.to_string());
                 }
                 for net in ["::/1", "8000::/1"] {
+                    check_startup()?;
                     sh("route", &["-n", "add", "-inet6", "-net", net, "-interface", tun])?;
                     guard.routes6.push(net.to_string());
                 }
@@ -250,13 +286,16 @@ impl SystemGuard {
             }
             None => info!("no IPv6 default route; capturing IPv4 only"),
         }
+        check_startup()?;
         let services = network_services()?;
         guard.dns_backup = services.iter().map(|s| (s.clone(), get_dns(s))).collect();
         let text: String = guard.dns_backup.iter().map(|(s, d)| format!("{s}\t{}\n", d.join("\t"))).collect();
         std::fs::write(DNS_BACKUP, text).context("write DNS backup")?;
         for s in &services {
+            check_startup()?;
             set_dns(s, &[dns_ip.to_string()])?;
         }
+        check_startup()?;
         info!("system routes -> {tun}, DNS -> {dns_ip} on {} network services", services.len());
         Ok(guard)
     }

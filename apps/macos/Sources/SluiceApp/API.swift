@@ -61,6 +61,14 @@ struct APIError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+struct CoreStatus: Decodable {
+    let pid: Int32
+    let uid: UInt32
+    let enhancedMode: Bool
+    let config: String
+    enum CodingKeys: String, CodingKey { case pid, uid, config; case enhancedMode = "enhanced_mode" }
+}
+
 /// Client for the core's control API (see src/api.rs).
 struct APIClient {
     let port: Int
@@ -92,6 +100,12 @@ struct APIClient {
     private static func escape(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=+/?#%"))) ?? s
     }
+
+    func status() async throws -> CoreStatus {
+        try JSONDecoder().decode(CoreStatus.self, from: await request("GET", "/v1/status", timeout: 2))
+    }
+
+    func shutdown() async throws { _ = try await request("POST", "/v1/shutdown", timeout: 10) }
 
     func policies() async throws -> [PolicyGroup] {
         try JSONDecoder().decode([PolicyGroup].self, from: await request("GET", "/v1/policies"))

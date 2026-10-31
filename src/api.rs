@@ -5,6 +5,8 @@
 //!   POST /v1/policies/<group>?select=<opt>  switch a select group
 //!   POST /v1/policies/<group>/test          run an automatic group's health check now
 //!   GET  /v1/route?target=<host[:port]>     explain which rule and outbound a target hits
+//!   GET  /v1/status                         pid, uid, actual enhanced mode and startup readiness
+//!   POST /v1/shutdown                       stop and restore system network state
 //!   POST /v1/reload                         reload the config file (and subscriptions)
 //!   GET  /v1/mode                           outbound mode: rule, direct or global
 //!   POST /v1/mode?set=<mode>                switch the outbound mode
@@ -44,7 +46,7 @@
 //! limits the kinds; a comment line every 15 s keeps idle streams open.
 //!
 //! `POST /v1/profile` parses the file and builds its router first; on any error it answers
-//! 400 and the current profile stays active. Listen and enhanced-mode settings still need
+//! 400 and the current profile stays active. Listen and enhanced-mode changes are rejected and need
 //! a restart.
 //!   POST /v1/diag                           write a redacted diagnostics bundle under ~/Library/Logs/Sluice
 //!
@@ -164,6 +166,24 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
     }
 
     let (status, body) = match (method, path) {
+        ("POST", "/v1/shutdown") => {
+            // Let the HTTP response leave before the supervisor drops the listeners.
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                unsafe {
+                    libc::kill(libc::getpid(), libc::SIGTERM);
+                }
+            });
+            ("200 OK", "{\"stopping\":true}".into())
+        }
+        ("GET", "/v1/status") => (
+            "200 OK",
+            serde_json::json!({
+                "pid": std::process::id(), "enhanced_mode": reloader.enhanced_mode(), "ready": reloader.ready(),
+                "config": reloader.path(), "uid": unsafe { libc::geteuid() },
+            })
+            .to_string(),
+        ),
         ("GET", "/v1/subscriptions") => {
             ("200 OK", serde_json::to_string(&*reloader.subscriptions.read().unwrap())?)
         }
@@ -250,7 +270,7 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
         ("POST" | "PUT", p) if p.starts_with("/v1/policies/") => {
             let group = percent_decode(&p["/v1/policies/".len()..]);
             match query_param(query, "select") {
-                Some(opt) => match router.select(&group, &opt) {
+                Some(opt) => match reloader.select(&group, &opt).await {
                     Ok(()) => ("200 OK", format!("{{\"group\":{},\"selected\":{}}}", json_str(&group), json_str(&opt))),
                     Err(e) => ("400 Bad Request", format!("{{\"error\":{}}}", json_str(&e.to_string()))),
                 },
