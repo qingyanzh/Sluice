@@ -36,8 +36,10 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(tcp.policyChain, "Proxy → HK")
 
         let clock = DateFormatter()
+        clock.locale = Locale(identifier: "en_US_POSIX")
         clock.dateFormat = "HH:mm:ss"
-        // 2026-10-29 15:16:02.123 UTC, displayed in the user's local time zone.
+        // 2026-10-29 15:16:02.123 UTC, displayed in the user's local time zone on a
+        // 24-hour clock even when the user prefers 12-hour time.
         let date = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-29T15:16:02Z"))
         XCTAssertEqual(tcp.time, clock.string(from: date))
 

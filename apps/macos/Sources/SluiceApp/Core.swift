@@ -43,6 +43,8 @@ struct Connection: Decodable, Identifiable {
 extension Connection {
     private static let clock: DateFormatter = {
         let clock = DateFormatter()
+        // A fixed 24-hour clock; the user's 12-hour preference would otherwise turn it into "凌晨 h:mm:ss".
+        clock.locale = Locale(identifier: "en_US_POSIX")
         clock.dateFormat = "HH:mm:ss"
         return clock
     }()
@@ -1591,6 +1593,7 @@ final class Core: ObservableObject {
 
     private static let clock: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "HH:mm:ss"
         return f
     }()

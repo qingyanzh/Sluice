@@ -21,7 +21,7 @@ struct UpdateSettingsCard: View {
                 VStack(alignment: .leading, spacing: 8) { checkButton; lastCheck }
             }
         }
-        .frame(minHeight: 170, alignment: .topLeading)
+        .frame(minHeight: DS.settingsCardHeight, alignment: .topLeading)
         .card()
     }
 
@@ -63,7 +63,7 @@ struct HelperSettingsCard: View {
             Button(helper.status.action) { helper.performAction() }
                 .glassButton(prominent: helper.status != .ready)
         }
-        .frame(minHeight: 180, alignment: .topLeading)
+        .frame(minHeight: DS.settingsCardHeight, alignment: .topLeading)
         .card()
         .onAppear { helper.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in helper.refresh() }

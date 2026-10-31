@@ -376,7 +376,7 @@ struct StatusBadge: View {
             Text(text).font(DS.caption).lineLimit(1).truncationMode(.middle)
         }
         .foregroundStyle(tone == .secondary ? DS.ink2 : tone)
-        .padding(.horizontal, 8).padding(.vertical, 3)
+        .padding(.horizontal, 9).frame(height: 22)
         .background(tone.opacity(tone == .secondary ? 0.08 : 0.10), in: Capsule())
     }
 }
@@ -550,6 +550,13 @@ enum DS {
     static let dashboardCardHeight: CGFloat = 224
     static let radius: CGFloat = 14
     static let smallRadius: CGFloat = 10
+    /// Control heights: fields, segmented tabs and buttons share one height per size,
+    /// so controls standing in a row line up and none reads as squashed.
+    static let controlHeight: CGFloat = 32
+    static let compactControlHeight: CGFloat = 28
+    static let largeControlHeight: CGFloat = 36
+    /// Content height of a settings card, so cards side by side end on one line.
+    static let settingsCardHeight: CGFloat = 132
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.82)
     /// Entrance: cards rise into place one after another.
     static let entrance = Animation.spring(response: 0.5, dampingFraction: 0.86)
@@ -649,8 +656,8 @@ struct SearchField: View {
             Button("") { focused = true }.keyboardShortcut("f").hidden().accessibilityHidden(true)
         }
         .font(DS.label)
-        .padding(.horizontal, 12).padding(.vertical, 6)
-        .frame(width: 220)
+        .padding(.horizontal, 12)
+        .frame(width: 240, height: DS.controlHeight)
         .liquidGlass(in: Capsule())
         // While it filters, a blue ring says the list is narrowed.
         .overlay(Capsule().strokeBorder(text.isEmpty ? Color.clear : DS.accent.opacity(0.7), lineWidth: 1.5))
@@ -788,8 +795,8 @@ struct PrimaryCapsuleStyle: ButtonStyle {
             .font(large ? DS.label.weight(.semibold) : DS.small.weight(.medium))
             .lineLimit(1).fixedSize()
             .foregroundStyle(.white)
-            .padding(.horizontal, large ? 18 : 12).padding(.vertical, 4)
-            .frame(minHeight: large ? 36 : 28)
+            .padding(.horizontal, large ? 18 : 14).padding(.vertical, 4)
+            .frame(minHeight: large ? DS.largeControlHeight : DS.controlHeight)
             .background(DS.accent.opacity(enabled ? 1 : 0.4), in: Capsule())
             .opacity(configuration.isPressed ? 0.8 : 1)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
@@ -808,8 +815,8 @@ struct SecondaryCapsuleStyle: ButtonStyle {
             .font(large ? DS.label.weight(.semibold) : DS.small.weight(.medium))
             .lineLimit(1).fixedSize()
             .foregroundStyle(Color.primary)
-            .padding(.horizontal, large ? 18 : 12).padding(.vertical, 4)
-            .frame(minHeight: large ? 36 : 28)
+            .padding(.horizontal, large ? 18 : 14).padding(.vertical, 4)
+            .frame(minHeight: large ? DS.largeControlHeight : DS.controlHeight)
             .background(hovering && enabled ? Color.primary.opacity(0.06) : DS.surface.opacity(0.9), in: Capsule())
             .overlay(Capsule().strokeBorder(DS.stroke, lineWidth: 1))
             .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.55)
@@ -917,20 +924,24 @@ struct SectionTitle: View {
     }
 }
 
+/// A figure with its unit set right after it ("9.3 MB/s"). The pair reserves `width`
+/// so neighbours don't shift as digits change, but the unit always hugs the number.
 struct BigNumber: View {
     let value: String
     var unit: String = ""
-    var numberWidth: CGFloat = 96
+    var width: CGFloat = 120
+    var size: CGFloat = 28
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 3) {
-            Text(value).font(DS.figure(28)).monospacedDigit()
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(value).font(DS.figure(size)).monospacedDigit()
                 .lineLimit(1).minimumScaleFactor(0.65)
-                .frame(width: numberWidth, alignment: .leading)
+                .contentTransition(.numericText())
             if !unit.isEmpty {
-                Text(unit).font(DS.label).foregroundStyle(DS.ink2)
-                    .frame(width: 40, alignment: .leading)
+                Text(unit).font(DS.label.weight(.medium)).foregroundStyle(DS.ink2).fixedSize()
             }
         }
+        .frame(minWidth: width, alignment: .leading)
+        .animation(.easeOut(duration: 0.25), value: value)
     }
 }
 
@@ -977,9 +988,11 @@ struct OverviewView: View {
                             .disabled(core.summary.httpListen == nil && core.summary.socksListen == nil)
                         FeatureCard(icon: "server.rack", title: "HTTP & SOCKS5 代理",
                                     detail: "为其他应用提供本机 HTTP 和 SOCKS5 代理。",
-                                    status: [core.summary.httpListen.map { "HTTP \($0)" }, core.summary.socksListen.map { "SOCKS5 \($0)" }]
-                                        .compactMap { $0 }.joined(separator: "  ").ifEmpty("已禁用"),
-                                    statusOn: core.state == .running && (core.summary.httpListen != nil || core.summary.socksListen != nil))
+                                    status: [core.summary.httpListen.map { "HTTP :\(SystemProxy.split($0).map { String($0.1) } ?? $0)" },
+                                         core.summary.socksListen.map { "SOCKS5 :\(SystemProxy.split($0).map { String($0.1) } ?? $0)" }]
+                                        .compactMap { $0 }.joined(separator: " · ").ifEmpty("已禁用"),
+                                    statusOn: core.state == .running && (core.summary.httpListen != nil || core.summary.socksListen != nil),
+                                    accessory: AnyView(copyAddressButtons))
                     }.entrance(0)
                     SectionTitle(text: "增强模式")
                     LazyVGrid(columns: columns, spacing: DS.gap) {
@@ -993,7 +1006,7 @@ struct OverviewView: View {
                                         }
                                     }),
                                     status: core.privileged ? "增强模式已激活" : core.summary.enhancedMode ? "已启用，启动后生效" : "已禁用",
-                                    statusOn: core.privileged, contentHeight: 180)
+                                    statusOn: core.privileged)
                             .disabled(enhancedBusy)
                         HelperSettingsCard()
                     }.entrance(1)
@@ -1013,21 +1026,8 @@ struct OverviewView: View {
                             Spacer(minLength: 0)
                             Button("显示文件") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
                         }
-                        .frame(minHeight: 120, alignment: .topLeading).card()
+                        .frame(minHeight: DS.settingsCardHeight, alignment: .topLeading).card()
                     }.entrance(2)
-                    HStack(spacing: 8) {
-                        if let listen = core.summary.httpListen, let (host, port) = SystemProxy.split(listen) {
-                            Button { copyText("http://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
-                                Label("复制 HTTP 地址", systemImage: "doc.on.doc")
-                            }.glassButton()
-                        }
-                        if let listen = core.summary.socksListen, let (host, port) = SystemProxy.split(listen) {
-                            Button { copyText("socks5://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
-                                Label("复制 SOCKS5 地址", systemImage: "doc.on.doc")
-                            }.glassButton()
-                        }
-                        Spacer()
-                    }
                     SectionTitle(text: "通用").id("maintenance")
                     LazyVGrid(columns: columns, spacing: DS.gap) {
                         FeatureCard(icon: "power", title: "打开应用时启动",
@@ -1055,6 +1055,24 @@ struct OverviewView: View {
     }
 }
 
+extension OverviewView {
+    /// Icon buttons that copy the proxy addresses for use in other apps.
+    @ViewBuilder var copyAddressButtons: some View {
+        HStack(spacing: 6) {
+            if let listen = core.summary.httpListen, let (host, port) = SystemProxy.split(listen) {
+                Button { copyText("http://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
+                    Label("HTTP", systemImage: "doc.on.doc")
+                }.glassButton().help("复制 HTTP 代理地址")
+            }
+            if let listen = core.summary.socksListen, let (host, port) = SystemProxy.split(listen) {
+                Button { copyText("socks5://\(host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host):\(port)") } label: {
+                    Label("SOCKS5", systemImage: "doc.on.doc")
+                }.glassButton().help("复制 SOCKS5 代理地址")
+            }
+        }
+    }
+}
+
 struct FeatureCard: View {
     var icon: String = "circle"
     let title: String
@@ -1063,7 +1081,9 @@ struct FeatureCard: View {
     let status: String
     let statusOn: Bool
     var statusTone: Color? = nil
-    var contentHeight: CGFloat = 120
+    var contentHeight: CGFloat = DS.settingsCardHeight
+    /// Small actions shown on the status line (e.g. copy buttons).
+    var accessory: AnyView?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1075,7 +1095,11 @@ struct FeatureCard: View {
             }
             Text(detail).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
-            StatusBadge(text: status, tone: statusTone ?? (statusOn ? DS.ok : .secondary))
+            HStack(spacing: 8) {
+                StatusBadge(text: status, tone: statusTone ?? (statusOn ? DS.ok : .secondary))
+                Spacer(minLength: 0)
+                if let accessory { accessory }
+            }
         }
         .frame(height: contentHeight, alignment: .topLeading)
         .card()
@@ -1593,11 +1617,14 @@ struct RequestRow: View {
                         Text("\(connection.proto) · \(connection.rule)")
                             .font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 4)
+                        // Fixed, right-aligned columns: figures line up row after row.
                         ForEach(connection.byteCounts, id: \.0) { label, bytes in
                             Text("\(label.prefix(1)) \(bytes)").font(DS.caption.monospacedDigit())
-                                .foregroundStyle(DS.ink2).fixedSize()
+                                .foregroundStyle(DS.ink2).lineLimit(1)
+                                .frame(width: 72, alignment: .trailing)
                         }
-                        Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3).fixedSize()
+                        Text(connection.time).font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
+                            .lineLimit(1).frame(width: 58, alignment: .trailing)
                     }
                 }
                 if showsProcess {
@@ -1824,10 +1851,10 @@ struct RuleView: View {
             VStack(alignment: .leading, spacing: DS.gap) {
                 routeTest.entrance(0)
                 if let rulesLoadError { ErrorText(raw: rulesLoadError) }
-                HStack {
+                HStack(alignment: .lastTextBaseline) {
                     SectionTitle(text: filter.isEmpty ? "规则 (\(rules.count))" : "规则 (\(rows.count) / \(rules.count))")
                     Spacer()
-                    Text("添加、编辑和排序请在配置中修改").font(DS.caption).foregroundStyle(DS.ink2).padding(.top, 10)
+                    Text("添加、编辑和排序请在配置中修改").font(DS.small).foregroundStyle(DS.ink3)
                 }
                 // The list is only as tall as its rules: a short list stays short.
                 VStack(spacing: 0) {
@@ -1852,6 +1879,7 @@ struct RuleView: View {
             PaneHeader(title: "规则", subtitle: Pane.rule.subtitle) {
                 SearchField(prompt: "搜索规则", text: $filter)
                 Button { draft.editorMode = "规则"; pane = .profile } label: { Label("在配置中编辑", systemImage: "square.and.pencil") }
+                    .glassButton()
             }
         }
         .onAppear(perform: load)
@@ -1866,11 +1894,11 @@ struct RuleView: View {
         return HStack(spacing: 12) {
             Text("\(rule.id)").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
                 .frame(width: 24, alignment: .trailing)
-            Text(rule.type.uppercased()).font(DS.caption.monospaced())
-                .foregroundStyle(DS.ink2)
-                .padding(.horizontal, 7).padding(.vertical, 3)
+            Text(rule.type.uppercased()).font(DS.code.weight(.medium))
+                .foregroundStyle(DS.ink2).lineLimit(1)
+                .padding(.horizontal, 8).frame(height: 22)
                 .background(Color.primary.opacity(0.05), in: Capsule())
-                .frame(width: 150, alignment: .leading)
+                .frame(width: 160, alignment: .leading)
             Text(rule.value.ifEmpty("其余所有请求")).font(DS.label.weight(hit ? .semibold : .regular))
                 .foregroundStyle(rule.value.isEmpty ? DS.ink2 : Color.primary)
                 .lineLimit(1).truncationMode(.middle)
@@ -2126,8 +2154,8 @@ struct ConfigView: View {
         VStack(spacing: 0) {
             let name = URL(fileURLWithPath: core.configPath).lastPathComponent
             PaneHeader(title: "配置", subtitle: draft.text == draft.saved ? "\(name) · 已保存" : "\(name) · 有未保存的修改") {
-                Button("从当前新建…") { profileEdit = .create }.disabled(draft.busy)
-                Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }
+                Button("从当前新建…") { profileEdit = .create }.glassButton().disabled(draft.busy)
+                Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
             }
             if draft.changedOnDisk {
                 Notice(tone: DS.warn, icon: "doc.badge.ellipsis", title: "磁盘上的配置已更新", detail: "当前草稿已保留。载入磁盘版本前，可以复制草稿保留修改。") {
@@ -2135,13 +2163,14 @@ struct ConfigView: View {
                     Button("载入磁盘版本") { confirmRestore = true }.glassButton(prominent: true)
                 }.padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
-            Picker("编辑方式", selection: $draft.editorMode) {
-                Text("文本").tag("文本")
-                Text("规则").tag("规则")
-                Text("策略组").tag("策略组")
+            HStack {
+                GlassSegmented(options: [("文本", "文本", "doc.plaintext"), ("规则", "规则", "list.bullet"),
+                                         ("策略组", "策略组", "square.stack.3d.up")],
+                               selection: $draft.editorMode)
+                    .frame(width: 360)
+                Spacer()
             }
-            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360)
-            .padding(.horizontal, DS.gutter).padding(.bottom, 12)
+            .padding(.horizontal, DS.gutter).padding(.bottom, 14)
             HStack(alignment: .top, spacing: DS.gap) {
                 ConfigProfileList(busy: draft.busy, switchProfile: requestSwitch,
                                   edit: { profileEdit = $0 }, delete: { pendingDelete = $0 })

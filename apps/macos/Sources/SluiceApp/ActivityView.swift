@@ -176,10 +176,7 @@ struct ActivityView: View {
 
     private var connectionsCard: some View {
         DashboardCard(title: "活动连接", icon: "point.3.connected.trianglepath.dotted", note: "实时") {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                BigNumber(value: "\(core.traffic?.active ?? 0)")
-                Text("个连接").font(DS.small).foregroundStyle(DS.ink3)
-            }
+            BigNumber(value: "\(core.traffic?.active ?? 0)", unit: "个连接")
             Spacer(minLength: 12)
             Divider().opacity(0.6)
             HStack(spacing: 12) {
@@ -349,7 +346,7 @@ struct TrafficCard: View {
                         .foregroundStyle(DS.ink2.opacity(0.8)).lineStyle(StrokeStyle(lineWidth: 1)).interpolationMethod(.monotone)
                 }
             }
-            .chartXScale(domain: (history.last?.time ?? Date()).addingTimeInterval(-59)...(history.last?.time ?? Date())).chartYScale(domain: 0...max(peak * 1.2, 1024))
+            .chartXScale(domain: chartStart...(history.last?.time ?? Date())).chartYScale(domain: 0...max(peak * 1.2, 1024))
             .chartXAxis(.hidden).chartYAxis(.hidden)
             .chartBackground { _ in
                 VStack(spacing: 0) {
@@ -372,10 +369,18 @@ struct TrafficCard: View {
         .onChange(of: peak, initial: true) { peakText = peakFormatter.format(peak).text }
     }
 
+    /// Up to the last 60 s; a short history fills the width instead of hugging the right edge.
+    private var chartStart: Date {
+        let last = history.last?.time ?? Date()
+        let window = last.addingTimeInterval(-59)
+        let lower = max(history.first?.time ?? window, window)
+        return lower < last ? lower : window
+    }
+
     private func rate(_ title: String, value: DisplayedRate, color: Color) -> some View {
         let number = value.formatted.number, unit = value.formatted.unit + "/s"
         return VStack(alignment: .leading, spacing: 6) {
-            BigNumber(value: number, unit: unit, numberWidth: 72)
+            BigNumber(value: number, unit: unit, width: 150)
             HStack(spacing: 5) {
                 Circle().fill(color).frame(width: 5, height: 5)
                 Text(title).font(DS.small).foregroundStyle(DS.ink2)
