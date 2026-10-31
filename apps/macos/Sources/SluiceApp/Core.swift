@@ -1606,10 +1606,11 @@ final class Core: ObservableObject {
 }
 
 /// `1536` -> "1.5 KB".
+/// Byte counts start at KB: "0 KB", "0.3 KB", "12 KB", "1.4 MB".
 func formatBytes(_ n: Double) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB"]
-    var v = n
+    let units = ["KB", "MB", "GB", "TB"]
+    var v = max(0, n.isFinite ? n : 0) / 1024
     var i = 0
     while v >= 1024 && i < units.count - 1 { v /= 1024; i += 1 }
-    return i == 0 ? "\(Int(v)) B" : String(format: v < 10 ? "%.1f %@" : "%.0f %@", v, units[i])
+    return String(format: v == 0 || v >= 10 ? "%.0f %@" : "%.1f %@", v, units[i])
 }

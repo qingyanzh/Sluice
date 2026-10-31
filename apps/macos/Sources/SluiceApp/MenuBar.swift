@@ -2,6 +2,10 @@ import AppKit
 import Combine
 import SwiftUI
 
+private extension NSFont {
+    var bold: NSFont { NSFontManager.shared.convert(self, toHaveTrait: .boldFontMask) }
+}
+
 enum MenuBarDisplayMode: String, CaseIterable, Identifiable {
     case iconAndSpeed, iconOnly, speedOnly
 
@@ -36,10 +40,10 @@ struct MenuBarLayout {
     init(mode: MenuBarDisplayMode, font: NSFont) {
         self.mode = mode
         self.font = font
-        speedWidth = ceil(["B", "KB", "MB", "GB", "TB"].map { unit in
-            ("999.9 \(unit)/s" as NSString).size(withAttributes: [.font: font]).width
+        speedWidth = ceil(["KB", "MB", "GB", "TB"].flatMap { unit in ["999 \(unit)/s", "9.9 \(unit)/s"] }.map {
+            ($0 as NSString).size(withAttributes: [.font: font]).width
         }.max() ?? 0)
-        speedX = mode.showsIcon ? 33 : 0
+        speedX = mode.showsIcon ? 25 : 0
         let width = mode.showsSpeed ? speedX + speedWidth : 23
         imageSize = NSSize(width: width, height: 22)
         // NSStatusBarButton's image has six points of horizontal inset per side.
@@ -267,50 +271,59 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Layout after Surge, trimmed: status, outbound mode inline, one row per policy
+    /// group (current choice on the right, options in its submenu), the two takeover
+    /// switches, window and start/stop, then rarely used items under "更多".
     func menuNeedsUpdate(_ menu: NSMenu) {
         // Freeze menu choices during tracking; the fixed-width status label
         // continues receiving live rates independently.
         menuModel.refresh()
         let state = menuModel.value
+        let running = state.state == .running
         menu.removeAllItems()
-        menu.addItem(NSMenuItem(title: "Sluice · \(state.state.label)", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "配置：\(state.profileName)", action: nil, keyEquivalent: ""))
-        if state.state == .running {
-            menu.addItem(NSMenuItem(title: "↓ \(core.displayedRates.down.formatted.text)   ↑ \(core.displayedRates.up.formatted.text)   ·   \(core.traffic?.active ?? 0) 个连接", action: nil, keyEquivalent: ""))
+
+        menu.addItem(info(attributed: statusTitle(state.state.label, profile: state.profileName)))
+        if running {
+            menu.addItem(info("↓ \(core.displayedRates.down.formatted.text)    ↑ \(core.displayedRates.up.formatted.text)    \(core.traffic?.active ?? 0) 个连接"))
         } else if state.systemProxyOn {
-            menu.addItem(NSMenuItem(title: "系统代理已开启，内核未运行", action: nil, keyEquivalent: ""))
+            menu.addItem(info("系统代理已开启，内核未运行"))
         }
-        if let other = state.otherSystemProxy {
-            menu.addItem(NSMenuItem(title: "系统代理：\(other)", action: nil, keyEquivalent: ""))
-        }
+        if let other = state.otherSystemProxy { menu.addItem(info("系统代理：\(other)")) }
+
         menu.addItem(.separator())
-        add(to: menu, state.isActive ? "停止 Sluice" : "启动 Sluice", symbol: state.isActive ? "stop.fill" : "play.fill", enabled: state.state != .starting) { [core] in
-            if core.isActive { core.stop() } else { core.requestStart() }
-        }
-        menu.addItem(.separator())
-        let mode = state.mode
-        let modes = submenu(in: menu, title: "出站模式：\(mode.title)", symbol: mode.icon, enabled: state.state == .running)
+        menu.addItem(.sectionHeader(title: "出站模式"))
         for option in OutboundMode.allCases {
             let rawValue = option.rawValue
-            add(to: modes, option.title, symbol: option.icon, checked: option == mode) { [core, rawValue] in core.setMode(rawValue) }
+            add(to: menu, option.title, enabled: running, checked: option == state.mode) { [core, rawValue] in core.setMode(rawValue) }
         }
-        if !state.groups.isEmpty {
-            menu.addItem(.separator())
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "策略组"))
+        if !running {
+            menu.addItem(info("启动 Sluice 后可切换策略组"))
+        } else if state.groups.isEmpty {
+            menu.addItem(info("配置中没有可手动选择的策略组"))
+        } else {
             for group in state.groups {
                 let groupName = group.group
-                let options = submenu(in: menu, title: "\(groupName)：\(group.selected)", symbol: "point.3.connected.trianglepath.dotted", enabled: state.state == .running)
+                let options = submenu(in: menu, title: groupName)
+                menu.items.last?.attributedTitle = groupTitle(groupName, selected: group.selected)
                 for option in group.options {
                     let optionName = option.name
-                    let item = add(to: options, "\(optionName)    \(latencyText(option.latencyMs))", checked: group.selected == optionName) { [core, groupName, optionName] in
+                    let item = add(to: options, optionName, checked: group.selected == optionName) { [core, groupName, optionName] in
                         core.select(group: groupName, option: optionName)
                     }
+                    item.attributedTitle = groupTitle(optionName, selected: latencyText(option.latencyMs))
                     item.image = latencyIcon(option.latencyMs)
                 }
                 options.addItem(.separator())
                 let testing = state.testingGroups.contains(groupName)
                 add(to: options, testing ? "测试中…" : "测试延迟", symbol: "speedometer", enabled: !testing) { [core, groupName] in core.test(group: groupName) }
             }
+            add(to: menu, state.testingGroups.isEmpty ? "测试全部延迟" : "测试中…", symbol: "speedometer",
+                enabled: state.testingGroups.isEmpty) { [core] in core.testAll() }
         }
+
         menu.addItem(.separator())
         add(to: menu, "设置为系统代理", enabled: state.canSetSystemProxy,
             checked: state.systemProxyOn) { [core, on = !state.systemProxyOn] in core.setSystemProxy(on) }
@@ -319,11 +332,22 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
                 if let error = await core.setEnhancedMode(on) { core.lastActionError = "增强模式：\(error)" }
             }
         }
+
         menu.addItem(.separator())
-        add(to: menu, "重新载入配置", key: "r", symbol: "arrow.triangle.2.circlepath", enabled: state.state == .running && !state.reloading) { [core] in core.reload() }
-        add(to: menu, "重启内核", symbol: "arrow.clockwise", enabled: state.isActive) { [core] in core.restart() }
-        menu.addItem(.separator())
-        let display = submenu(in: menu, title: "菜单栏显示")
+        add(to: menu, "打开 Sluice", key: "0", symbol: "macwindow") { [showWindow] in showWindow(nil) }
+        add(to: menu, state.isActive ? "停止内核" : "启动内核", symbol: state.isActive ? "stop.fill" : "play.fill",
+            enabled: state.state != .starting) { [core] in
+            if core.isActive { core.stop() } else { core.requestStart() }
+        }
+
+        let more = submenu(in: menu, title: "更多", symbol: "ellipsis.circle")
+        add(to: more, "查看请求", symbol: "arrow.up.arrow.down.circle") { [showWindow] in showWindow(.requests) }
+        add(to: more, "编辑当前配置", symbol: "curlybraces.square") { [showWindow] in showWindow(.profile) }
+        more.addItem(.separator())
+        add(to: more, "重新载入配置", key: "r", symbol: "arrow.triangle.2.circlepath", enabled: running && !state.reloading) { [core] in core.reload() }
+        add(to: more, "重启内核", symbol: "arrow.clockwise", enabled: state.isActive) { [core] in core.restart() }
+        more.addItem(.separator())
+        let display = submenu(in: more, title: "菜单栏显示", symbol: "menubar.rectangle")
         for option in MenuBarDisplayMode.allCases {
             let rawValue = option.rawValue
             add(to: display, option.title, checked: state.displayMode == option) { [weak self, core, rawValue] in
@@ -337,12 +361,9 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             core.preferences.set(show, forKey: "menuBarShowOutboundMode")
             refreshSettings()
         }
-        menu.addItem(.separator())
-        add(to: menu, "显示主窗口", key: "0", symbol: "macwindow") { [showWindow] in showWindow(nil) }
-        add(to: menu, "查看请求", symbol: "arrow.up.arrow.down.circle") { [showWindow] in showWindow(.requests) }
-        add(to: menu, "编辑当前配置", symbol: "curlybraces.square") { [showWindow] in showWindow(.profile) }
+        more.addItem(.separator())
         let diagnostics = DiagnosticsExporter.shared
-        add(to: menu, "导出诊断信息…", symbol: "stethoscope", enabled: !state.isExporting) { [core, showWindow] in
+        add(to: more, "导出诊断信息…", symbol: "stethoscope", enabled: !state.isExporting) { [core, showWindow] in
             if core.lastActionError?.hasPrefix("导出诊断信息失败：") == true { core.lastActionError = nil }
             Task {
                 await diagnostics.export(api: core.state == .running ? core.api : nil,
@@ -353,9 +374,43 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
                 }
             }
         }
+        add(to: more, "检查更新…", symbol: "arrow.down.circle", enabled: Updater.shared.canCheck) { Updater.shared.checkForUpdates() }
+
         menu.addItem(.separator())
-        add(to: menu, "检查更新…", symbol: "arrow.down.circle", enabled: Updater.shared.canCheck) { Updater.shared.checkForUpdates() }
-        add(to: menu, "退出 Sluice", key: "q", symbol: "power") { NSApp.terminate(nil) }
+        add(to: menu, "退出 Sluice", key: "q") { NSApp.terminate(nil) }
+    }
+
+    /// A non-interactive line (status, rates, hints).
+    private func info(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    private func info(attributed: NSAttributedString) -> NSMenuItem {
+        let item = info(attributed.string)
+        item.attributedTitle = attributed
+        return item
+    }
+
+    private func statusTitle(_ state: String, profile: String) -> NSAttributedString {
+        let title = NSMutableAttributedString(string: "Sluice  \(state)",
+                                              attributes: [.font: NSFont.menuFont(ofSize: 0).bold])
+        title.append(NSAttributedString(string: "    \(profile)", attributes: [
+            .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        return title
+    }
+
+    /// "Name ············ detail": the detail sits in a right-aligned column.
+    private func groupTitle(_ name: String, selected: String) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: 240)]
+        let title = NSMutableAttributedString(string: name, attributes: [.font: NSFont.menuFont(ofSize: 0), .paragraphStyle: paragraph])
+        title.append(NSAttributedString(string: "\t\(selected)", attributes: [
+            .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph,
+        ]))
+        return title
     }
 
     @discardableResult

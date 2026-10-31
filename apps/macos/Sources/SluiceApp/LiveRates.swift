@@ -54,7 +54,8 @@ struct FormattedRate: Equatable {
 /// Promote at 1.0 of the next unit, demote only below 0.9 of the current unit.
 struct RateUnitFormatter {
     var radix: Double = 1024
-    var minimumUnit = 0
+    /// KB is the smallest unit the app shows (B and B/s are never displayed).
+    var minimumUnit = 1
     var fixedWidth = false
     private(set) var unitIndex = 0
 
@@ -67,12 +68,13 @@ struct RateUnitFormatter {
         let value = bytes / pow(radix, Double(unitIndex))
         let number: String
         if fixedWidth {
-            // Keep five numeric columns, including the decimal point. Capping
-            // before rounding avoids "1000.0" just below a unit transition (and
-            // bounds the last supported unit). Unit selection retains hysteresis.
-            number = String(format: "%5.1f", locale: Locale(identifier: "en_US_POSIX"), min(999.9, value))
+            // At most three digits ("9.9", "999"): the menu bar item stays narrow.
+            // Capping before rounding avoids "1000" just below a unit transition.
+            // The renderer right-aligns it in a fixed box; unit selection keeps hysteresis.
+            let capped = min(999, value)
+            number = String(format: capped < 9.95 ? "%.1f" : "%.0f", locale: Locale(identifier: "en_US_POSIX"), capped)
         } else {
-            number = String(format: unitIndex == 0 || value >= 10 ? "%.0f" : "%.1f", value)
+            number = String(format: value >= 10 || value == 0 ? "%.0f" : "%.1f", value)
         }
         return FormattedRate(number: number, unit: ["B", "KB", "MB", "GB", "TB"][unitIndex])
     }
@@ -84,8 +86,8 @@ struct DisplayedRate {
     private var smoother = RateSmoother()
     private var formatter = RateUnitFormatter()
     private var menuFormatter = RateUnitFormatter.menuBar
-    private(set) var formatted = FormattedRate(number: "0", unit: "B")
-    private(set) var menuText = "  0.0 B/s"
+    private(set) var formatted = FormattedRate(number: "0", unit: "KB")
+    private(set) var menuText: String = { var formatter = RateUnitFormatter.menuBar; return formatter.format(0).text }()
     var value: Double { smoother.value }
 
     mutating func update(_ raw: Double) {

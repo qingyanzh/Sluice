@@ -4,10 +4,12 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var core: Core?
     private var menuBar: MenuBarStatusItem?
+    private var openMainWindow: (() -> Void)?
 
     @MainActor
     func installMenuBar(core: Core, openWindow: OpenWindowAction) {
         self.core = core
+        openMainWindow = { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         guard menuBar == nil else { return }
         menuBar = MenuBarStatusItem(core: core) { pane in
             if let pane { core.requestedPane = pane }
@@ -32,6 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Clicking the Dock icon after the window was closed brings the window back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { MainActor.assumeIsolated { openMainWindow?() } }
+        return true
+    }
 }
 
 @main

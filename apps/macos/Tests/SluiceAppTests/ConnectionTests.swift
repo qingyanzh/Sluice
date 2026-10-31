@@ -76,7 +76,7 @@ extension ConnectionTests {
         XCTAssertEqual(record.up, 0)
         XCTAssertEqual(record.down, UInt64.max)
         XCTAssertEqual(record.byteCounts.map(\.0), ["↑ 上传", "↓ 下载"])
-        XCTAssertEqual(record.byteCounts.first?.1, "0 B")
+        XCTAssertEqual(record.byteCounts.first?.1, "0 KB")
         XCTAssertEqual(try decode(",\"down\":1024").byteCounts.map(\.1), ["1.0 KB"])
     }
 }

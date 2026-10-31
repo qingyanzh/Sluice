@@ -930,14 +930,15 @@ struct BigNumber: View {
     let value: String
     var unit: String = ""
     var width: CGFloat = 120
-    var size: CGFloat = 28
+    var size: CGFloat = 24
     var body: some View {
+        // Figure and unit stay within a 3:2 size ratio so the unit reads as part of the value.
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(value).font(DS.figure(size)).monospacedDigit()
                 .lineLimit(1).minimumScaleFactor(0.65)
                 .contentTransition(.numericText())
             if !unit.isEmpty {
-                Text(unit).font(DS.label.weight(.medium)).foregroundStyle(DS.ink2).fixedSize()
+                Text(unit).font(.system(size: (size * 2 / 3).rounded(), weight: .medium)).foregroundStyle(DS.ink2).fixedSize()
             }
         }
         .frame(minWidth: width, alignment: .leading)
@@ -949,12 +950,12 @@ struct BigNumber: View {
 func splitRate(_ bytes: Double) -> (String, String) {
     let s = formatBytes(bytes)
     let parts = s.split(separator: " ")
-    return (String(parts.first ?? ""), parts.count > 1 ? "\(parts[1])/s" : "B/s")
+    return (String(parts.first ?? ""), parts.count > 1 ? "\(parts[1])/s" : "KB/s")
 }
 
 func splitBytes(_ bytes: Double) -> (String, String) {
     let parts = formatBytes(bytes).split(separator: " ")
-    return (String(parts.first ?? ""), parts.count > 1 ? String(parts[1]) : "B")
+    return (String(parts.first ?? ""), parts.count > 1 ? String(parts[1]) : "KB")
 }
 
 // MARK: activity

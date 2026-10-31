@@ -73,6 +73,12 @@ struct StructuredConfigEditors: View {
                     rows: document.groups.map { item in
                         let group = item.value
                         var detail = group.members.joined(separator: ", ")
+                        // Subscription groups have no fixed members: say where their nodes come from.
+                        if let source = group.parameter("policy-path") {
+                            let from = "订阅 · \(subscriptionSourceLabel(source))"
+                            detail = detail.isEmpty ? from : from + "\n" + detail
+                            if let filter = group.parameter("policy-regex-filter") { detail += "\n过滤：" + filter }
+                        }
                         if !group.url.isEmpty { detail += "\n" + group.url }
                         if !group.interval.isEmpty { detail += "\n每 " + group.interval + " 秒测试" }
                         return (item.id, [group.name, group.type, detail])
@@ -292,4 +298,12 @@ struct GroupConfigSheet: View {
 
 private func choices(_ values: [String], including value: String) -> [String] {
     values.contains(value) ? values : [value] + values
+}
+
+/// Where a subscription's nodes come from, without its token: the host for URLs,
+/// the file name for file:// sources.
+func subscriptionSourceLabel(_ source: String) -> String {
+    guard let url = URL(string: source) else { return source }
+    if url.isFileURL { return url.lastPathComponent }
+    return url.host ?? source
 }

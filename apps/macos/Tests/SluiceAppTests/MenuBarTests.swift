@@ -40,13 +40,13 @@ final class MenuBarTests: XCTestCase {
         let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
         let speed = MenuBarLayout(mode: .speedOnly, font: font)
         let combined = MenuBarLayout(mode: .iconAndSpeed, font: font)
-        XCTAssertEqual(combined.statusItemLength, speed.statusItemLength + 33)
+        XCTAssertEqual(combined.statusItemLength, speed.statusItemLength + 25)
         XCTAssertGreaterThan(speed.statusItemLength, menuBarStatusItemWidth(mode: .iconOnly, font: font))
         XCTAssertGreaterThan(menuBarStatusItemWidth(mode: .speedOnly,
                                                   font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular)),
                              speed.statusItemLength)
-        let widths = ["B", "KB", "MB", "GB", "TB"].map { unit in
-            ("999.9 \(unit)/s" as NSString).size(withAttributes: [.font: font]).width
+        let widths = ["KB", "MB", "GB", "TB"].flatMap { unit in ["999 \(unit)/s", "9.9 \(unit)/s"] }.map {
+            ($0 as NSString).size(withAttributes: [.font: font]).width
         }
         XCTAssertEqual(speed.speedWidth, ceil(widths.max()!))
         XCTAssertEqual(speed.statusItemLength, speed.speedWidth + 12)
@@ -78,10 +78,11 @@ final class MenuBarTests: XCTestCase {
                       1_000_000_000, 1_000_000_000_000, Double.greatestFiniteMagnitude,
                       .nan, .infinity, -1] {
             let number = formatter.format(value).number
-            XCTAssertEqual(number.count, 5, "\(value): \(number)")
-            XCTAssertEqual(number.suffix(2).first, ".")
+            // At most three digits: "9.9" or "999", never "1000".
+            XCTAssertLessThanOrEqual(number.count, 3, "\(value): \(number)")
+            XCTAssertLessThanOrEqual(Double(number) ?? .infinity, 999, "\(value): \(number)")
         }
-        XCTAssertEqual(menuBarSpeed(999_999), "999.9 KB/s")
+        XCTAssertEqual(menuBarSpeed(999_999), "999 KB/s")
     }
 
     private var directory: URL!
