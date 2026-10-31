@@ -3,6 +3,7 @@ import SwiftUI
 
 /// The dashboard uses one column grid and one card shell for all four metrics.
 struct ActivityView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject var core: Core
     @Binding var pane: Pane?
     @Binding var nodesIntent: NodesIntent?
@@ -189,10 +190,9 @@ struct ActivityView: View {
 
     private func statistic(_ value: String, label: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(value).font(DS.figure(20)).monospacedDigit()
-                .contentTransition(.numericText())
-                .animation(.smooth(duration: 0.5), value: value)
-                .frame(width: 80, alignment: .leading)
+            AnimatedMetricNumber(value: Double(value) ?? 0).font(DS.figure(18)).monospacedDigit()
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.5), value: value)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Text(label).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }

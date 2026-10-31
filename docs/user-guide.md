@@ -161,6 +161,8 @@ Spread = load-balance, HK-SS, JP-Trojan
 
 ## 4. 添加和更新订阅
 
+订阅页的“编辑”可修改名称、地址、过滤和更新间隔；“更多”→“修改名称”也可单独重命名。名称修改会同步更新策略组的订阅来源、指定节点、导入组和规则引用，并保留可用的手动选择。导入 Surge / Clash 完整配置时，新订阅默认与填写的配置名称一致；原生 Sluice 配置保留已有订阅名称。
+
 在“节点”→“添加订阅”填写 HTTP/HTTPS 或 `file://` 订阅地址，可选填写名称及名称过滤正则，例如 `香港|HK`。保存前应用会获取订阅内容并检查配置。新订阅保存在 `[Subscription]`，作为独立的节点来源，并自动加入 `FINAL` 所指 `select` 组的订阅来源；不会切换已有的手动选择。
 
 在“配置”→“策略组”添加或编辑策略组：
@@ -275,6 +277,7 @@ FINAL,Proxy
 | 类型 | 条件及限制 |
 | --- | --- |
 | `IP-CIDR6` | IPv6 地址段 |
+| `GEOSITE` | 域名分类，例如 `GEOSITE,category-ads-all,REJECT`；原生读取 `geosite.dat`，支持 `google@cn` 属性筛选及 `!category` 取反 |
 | `GEOIP` / `IP-ASN` | 国家或 ASN；分别需要 `[General]` 的 `geoip-db` / `asn-db` 指向有效 MaxMind 数据库，否则相应规则不会命中 |
 | `PROCESS-NAME` | 客户端进程名；TUN 模式识别其他用户的进程需要 root |
 | `DST-PORT` / `IN-PORT` | 目标端口 / 本地代理入口端口；入口端口条件不适用于 TUN |
@@ -290,6 +293,10 @@ AND,((DOMAIN,a.com),(DST-PORT,443)),Proxy
 ```
 
 ### 外部规则集
+
+`GEOSITE,category-ads-all,REJECT` 可直接放在 `[Rule]` 中、`FINAL` 之前；导入配置会保留原规则和策略。首次使用自动下载 [MetaCubeX 域名库](https://github.com/MetaCubeX/meta-rules-dat)，随后缓存并按 `rule-set-update-interval` 更新。数据库中的精确域名、后缀、关键词及正则均参与匹配。可选的 `[General]` 设置 `geosite-db = /path/to/geosite.dat` 使用本地库，或填写自己的 HTTP(S) 下载地址；相对路径以配置目录为基准。未知分类、属性筛选无结果和无效数据库会报错；更新失败保留已加载数据，下载失败可回退到有效缓存。首次下载失败且无缓存时运行内核会警告，`check` 命令则失败。此时不能认为广告规则已经生效。
+
+规则编辑器提供 `GEOSITE` 类型；停止内核时的离线预览会跳过此类规则，实际命中可通过内核规则测试查看。
 
 以下片段同样放在 `[Rule]` 中、`FINAL` 之前；本地文件需自行提供：
 

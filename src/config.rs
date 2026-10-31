@@ -12,6 +12,8 @@ pub struct General {
     pub socks5_listen: Option<String>,
     pub api_listen: Option<String>,
     pub geoip_db: Option<String>,
+    /// V2Ray geosite.dat file or HTTP(S) URL. Defaults to MetaCubeX's public database.
+    pub geosite_db: Option<String>,
     /// MaxMind ASN database (e.g. GeoLite2-ASN.mmdb) for IP-ASN rules.
     pub asn_db: Option<String>,
     pub loglevel: Option<String>,
@@ -508,6 +510,7 @@ impl Config {
                         "socks5-listen" => g.socks5_listen = Some(listen_addr(v)),
                         "api-listen" => g.api_listen = Some(listen_addr(v)),
                         "geoip-db" => g.geoip_db = Some(v.to_string()),
+                        "geosite-db" => g.geosite_db = Some(v.to_string()),
                         "asn-db" => g.asn_db = Some(v.to_string()),
                         "loglevel" => g.loglevel = Some(v.to_string()),
                         "enhanced-mode" => g.enhanced_mode = matches!(v, "true" | "1"),
@@ -877,7 +880,7 @@ example.com = 1.2.3.4, ::1
         let expected = General {
             http_listen: Some("127.0.0.1:8080".into()), socks5_listen: Some("[::1]:1080".into()),
             api_listen: Some("127.0.0.2:9090".into()), geoip_db: Some("geoip.mmdb".into()),
-            asn_db: Some("asn.mmdb".into()), loglevel: Some("debug".into()), enhanced_mode: true,
+            geosite_db: None, asn_db: Some("asn.mmdb".into()), loglevel: Some("debug".into()), enhanced_mode: true,
             tun_mtu: Some(1500), fake_ip_range: Some("198.18.0.0/15".into()),
             dns_server: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             encrypted_dns_server: vec!["https://dns.example/query".into(), "tls://dns.example".into()],

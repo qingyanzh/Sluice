@@ -150,7 +150,7 @@ struct Sidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
-        .help("\(p.title)  ⌘\((Pane.ordered.firstIndex(of: p) ?? 0) + 1)")
+        .help(p == .overview ? "设置  ⌘," : "\(p.title)  ⌘\((Pane.ordered.firstIndex(of: p) ?? 0) + 1)")
         .onHover { inside in withAnimation(.easeOut(duration: 0.15)) { hovered = inside ? p : (hovered == p ? nil : hovered) } }
     }
 }
@@ -197,11 +197,14 @@ struct MainView: View {
             Sidebar(pane: $pane)
                 .background {
                     // ⌘1…⌘9 jump to panes in sidebar order.
-                    ForEach(Array(Pane.ordered.enumerated()), id: \.element) { i, p in
+                    ForEach(Array(Pane.ordered.prefix(9).enumerated()), id: \.element) { i, p in
                         Button("") { withAnimation(DS.spring) { pane = p } }
                             .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
                             .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
                     }
+                    Button("") { withAnimation(DS.spring) { pane = .overview } }
+                        .keyboardShortcut(",", modifiers: .command)
+                        .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
                 }
             VStack(spacing: 0) {
                 if let err = core.lastActionError {
@@ -442,15 +445,20 @@ struct StatusFooter: View {
     @EnvironmentObject var core: Core
     var body: some View {
         HStack(spacing: 8) {
-            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 28, height: 28)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Sluice").font(DS.label.weight(.semibold))
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 5) {
+                    Text("Sluice").font(DS.label.weight(.semibold)).lineLimit(1)
+                    if core.privileged {
+                        Image(systemName: "shield.lefthalf.filled").font(DS.caption).foregroundStyle(DS.accent)
+                            .help("增强模式 · 内核以 root 运行").accessibilityLabel("增强模式，root")
+                    }
+                }
                 HStack(spacing: 4) {
                     StatusDot(state: core.state)
-                    Text(core.privileged ? "\(core.state.label) · root" : core.state.label).font(DS.caption).foregroundStyle(DS.ink2)
-                }
-            }
-            Spacer()
+                    Text(core.state.label).font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1)
+                }.fixedSize(horizontal: true, vertical: false)
+            }.frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
             StartStopButton(compact: true)
                 .buttonStyle(RoundIconStyle())
         }
@@ -583,11 +591,11 @@ enum DS {
     static let controlRadius: CGFloat = 8
     /// Control heights: fields, segmented tabs and buttons share one height per size,
     /// so controls standing in a row line up and none reads as squashed.
-    static let controlHeight: CGFloat = 28
-    static let compactControlHeight: CGFloat = 24
-    static let largeControlHeight: CGFloat = 32
+    static let controlHeight: CGFloat = 34
+    static let compactControlHeight: CGFloat = 28
+    static let largeControlHeight: CGFloat = 36
     /// Content height of a settings card, so cards side by side end on one line.
-    static let settingsCardHeight: CGFloat = 132
+    static let settingsCardHeight: CGFloat = 148
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.82)
     /// Entrance: cards rise into place one after another.
     static let entrance = Animation.spring(response: 0.5, dampingFraction: 0.86)
@@ -673,13 +681,13 @@ enum DS {
     })
 
     /// Type scale: one face (SF Pro) at a few fixed steps; rounded only for figures.
-    static let title = Font.system(size: 24, weight: .semibold)
-    static let display = Font.system(size: 22, weight: .medium)
-    static let heading = Font.system(size: 14, weight: .semibold)
+    static let title = Font.system(size: 22, weight: .semibold)
+    static let display = Font.system(size: 20, weight: .medium)
+    static let heading = Font.system(size: 15, weight: .semibold)
     static let navigation = Font.system(size: 14)
-    static let label = Font.system(size: 13)
-    static let small = Font.system(size: 12)
-    static let caption = Font.system(size: 11, weight: .medium)
+    static let label = Font.system(size: 14)
+    static let small = Font.system(size: 13)
+    static let caption = Font.system(size: 12, weight: .medium)
     static let code = Font.system(size: 12, design: .monospaced)
     static func figure(_ size: CGFloat) -> Font { .system(size: size, weight: .medium).monospacedDigit() }
 }
@@ -981,15 +989,29 @@ struct BigNumber: View {
     var body: some View {
         // Figure and unit stay within a 3:2 size ratio so the unit reads as part of the value.
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(value).font(DS.figure(size)).monospacedDigit()
+            AnimatedMetricNumber(value: Double(value) ?? 0, decimals: value.split(separator: ".", omittingEmptySubsequences: false).dropFirst().first?.count ?? 0)
+                .id(unit).font(DS.figure(size)).monospacedDigit()
                 .lineLimit(1).minimumScaleFactor(0.65)
-                .contentTransition(.numericText())
             if !unit.isEmpty {
-                Text(unit).font(.system(size: (size * 2 / 3).rounded(), weight: .medium)).foregroundStyle(DS.ink2).fixedSize()
+                Text(unit).font(DS.label.weight(.medium)).foregroundStyle(DS.ink2).fixedSize()
             }
         }
-        .frame(minWidth: width, alignment: .leading)
-        .animation(reduceMotion ? nil : .smooth(duration: 0.7), value: value)
+        .frame(width: width, alignment: .leading)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.65), value: value)
+    }
+}
+
+/// The displayed number interpolates between samples. A unit change starts a new
+/// number view, so KB and MB are never interpolated as if they were the same unit.
+struct AnimatedMetricNumber: View, Animatable {
+    var value: Double
+    var decimals = 0
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+    var body: some View {
+        Text(String(format: "%.*f", max(0, min(decimals, 2)), value.isFinite ? max(0, value) : 0))
     }
 }
 
@@ -1143,13 +1165,19 @@ struct FeatureCard: View {
             }
             Text(detail).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
-            HStack(spacing: 8) {
-                StatusBadge(text: status, tone: statusTone ?? (statusOn ? DS.ok : .secondary))
-                Spacer(minLength: 0)
-                if let accessory { accessory }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    StatusBadge(text: status, tone: statusTone ?? (statusOn ? DS.ok : .secondary)).fixedSize()
+                    Spacer(minLength: 0)
+                    if let accessory { accessory.fixedSize() }
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    StatusBadge(text: status, tone: statusTone ?? (statusOn ? DS.ok : .secondary)).fixedSize()
+                    if let accessory { accessory }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(height: contentHeight, alignment: .topLeading)
+        .frame(minHeight: contentHeight, alignment: .topLeading)
         .card()
     }
 }
@@ -1994,7 +2022,7 @@ struct RuleView: View {
                     .transition(.opacity)
                 }
             if offline {
-                Text("离线预览会跳过 GEOIP、规则集和需要 DNS 解析的规则；实际路由以启动后的内核结果为准")
+                Text("离线预览会跳过 GEOSITE、GEOIP、规则集和需要 DNS 解析的规则；实际路由以启动后的内核结果为准")
                     .font(DS.caption).foregroundStyle(DS.warn).fixedSize(horizontal: false, vertical: true)
             }
             if let error, result == nil { ErrorText(raw: error) }
@@ -2601,7 +2629,7 @@ func ruleTint(_ type: String) -> Color {
     switch type.uppercased() {
     case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-SET", "URL-REGEX": DS.info
     case "IP-CIDR", "IP-CIDR6", "IP-ASN", "SRC-IP": DS.violet
-    case "GEOIP", "PROCESS-NAME", "RULE-SET": DS.accent
+    case "GEOIP", "GEOSITE", "PROCESS-NAME", "RULE-SET": DS.accent
     case "AND", "OR", "NOT", "DST-PORT", "DEST-PORT", "IN-PORT", "PROTOCOL": DS.amber
     default: DS.ink2
     }

@@ -29,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = Updater.shared
     }
 
+    /// The isolated E2E window can exercise the real native menu using UI input.
+    @MainActor func inspectStatusMenu() {
+        guard E2ELaunch.current != nil else { return }
+        menuBar?.inspectMenu()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { core?.stopForQuit() }
     }
@@ -66,6 +72,12 @@ struct SluiceApp: App {
         .defaultSize(width: 1120, height: 860)
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
+            if E2ELaunch.current != nil {
+                CommandMenu("界面检查") {
+                    Button("打开菜单栏菜单") { delegate.inspectStatusMenu() }
+                        .keyboardShortcut("p", modifiers: [.command, .option, .shift])
+                }
+            }
         }
     }
 }

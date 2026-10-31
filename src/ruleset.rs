@@ -30,9 +30,11 @@ pub enum SetKind {
 
 #[derive(Debug, Default)]
 pub struct SetData {
-    exact: HashSet<String>,
-    suffix: HashSet<String>,
-    keyword: Vec<String>,
+    pub(crate) exact: HashSet<String>,
+    pub(crate) suffix: HashSet<String>,
+    pub(crate) keyword: Vec<String>,
+    pub(crate) regex: Vec<regex::Regex>,
+    pub(crate) geosite_loaded: bool,
     cidr: Vec<Cidr>,
     /// Lines of the other types (ports, processes, logical rules...), checked in order.
     others: Arc<Vec<Matcher>>,
@@ -83,15 +85,16 @@ impl SetData {
             },
             // Lines may carry a policy that the set's rule overrides; only `no-resolve` counts.
             _ => match Matcher::parse(kind, raw, &parts[2..], true) {
-                Ok(m) => Arc::make_mut(&mut self.others).push(m),
-                Err(_) => return false,
+                // Dependencies inside external lists cannot be loaded recursively.
+                Ok(m) if !m.needs_external_data() => Arc::make_mut(&mut self.others).push(m),
+                _ => return false,
             },
         }
         true
     }
 
     pub fn len(&self) -> usize {
-        self.exact.len() + self.suffix.len() + self.keyword.len() + self.cidr.len() + self.others.len()
+        self.exact.len() + self.suffix.len() + self.keyword.len() + self.regex.len() + self.cidr.len() + self.others.len()
     }
 
     pub fn others(&self) -> Arc<Vec<Matcher>> {
@@ -103,7 +106,8 @@ impl SetData {
     }
 
     pub fn match_domain(&self, domain: &str) -> bool {
-        if self.exact.contains(domain) || self.keyword.iter().any(|k| domain.contains(k.as_str())) {
+        if self.exact.contains(domain) || self.keyword.iter().any(|k| domain.contains(k.as_str()))
+            || self.regex.iter().any(|re| re.is_match(domain)) {
             return true;
         }
         let mut rest = domain;
@@ -127,12 +131,17 @@ impl SetData {
 pub struct RuleSet {
     pub source: String,
     pub kind: SetKind,
+    pub geosite_tag: Option<String>,
     pub data: RwLock<SetData>,
 }
 
 impl RuleSet {
     pub fn new(source: &str, kind: SetKind) -> Arc<Self> {
-        Arc::new(RuleSet { source: source.to_string(), kind, data: RwLock::new(SetData::default()) })
+        Arc::new(RuleSet { source: source.to_string(), kind, geosite_tag: None, data: RwLock::new(SetData::default()) })
+    }
+
+    pub fn geosite(tag: &str, source: &str) -> Arc<Self> {
+        Arc::new(RuleSet { source: source.into(), kind: SetKind::Domains, geosite_tag: Some(tag.into()), data: RwLock::new(SetData::default()) })
     }
 
     fn is_remote(&self) -> bool {
@@ -254,7 +263,65 @@ async fn fetch_cached(source: &str, max_age: Duration, user_agent: Option<&str>,
     }
 }
 
+/// Binary databases must never pass through the text subscription decoder.
+/// The separate extension keeps existing text caches compatible.
+fn read_binary(path: &Path) -> Result<Vec<u8>> {
+    if std::fs::metadata(path)?.len() > MAX_BODY as u64 { bail!("geosite database too large"); }
+    Ok(std::fs::read(path)?)
+}
+
+async fn fetch_binary<T>(source: &str, base: &Path, max_age: Duration, parse: impl Fn(&[u8]) -> Result<T>) -> Result<T> {
+    if !(source.starts_with("http://") || source.starts_with("https://")) {
+        let path = if source.starts_with("file://") {
+            url::Url::parse(source)?.to_file_path().map_err(|_| anyhow!("invalid local file URL"))?
+        } else { base.join(source) };
+        return parse(&read_binary(&path).with_context(|| format!("read {}", path.display()))?);
+    }
+    fetch_binary_cached(source, max_age, &cache_path(source, None).with_extension("dat"), parse).await
+}
+
+async fn fetch_binary_cached<T>(source: &str, max_age: Duration, cache: &Path, parse: impl Fn(&[u8]) -> Result<T>) -> Result<T> {
+    if age(cache).is_some_and(|a| a < max_age) {
+        if let Ok(data) = read_binary(cache).and_then(|bytes| parse(&bytes)) { return Ok(data); }
+    }
+    let downloaded = async {
+        let result = http_get_bytes(source, None).await?;
+        let data = parse(&result.bytes)?;
+        Ok::<_, anyhow::Error>((result.bytes, data))
+    }.await;
+    match downloaded {
+        Ok((bytes, data)) => {
+            let write = || -> Result<()> {
+                if let Some(parent) = cache.parent() { std::fs::create_dir_all(parent)?; }
+                // Atomic replacement: a helper/app refresh must not expose partial data.
+                let temporary = cache.with_extension(format!("{}.tmp", rand::random::<u64>()));
+                let result = std::fs::write(&temporary, &bytes).and_then(|_| std::fs::rename(&temporary, cache));
+                if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+                result?;
+                Ok(())
+            };
+            if let Err(e) = write() { warn!("{source}: cannot write binary cache: {e:#}"); }
+            Ok(data)
+        }
+        Err(e) => match read_binary(cache).and_then(|bytes| parse(&bytes)) {
+            Ok(data) => {
+                warn!("{source}: download failed ({e:#}); using stale database cache");
+                Ok(data)
+            }
+            Err(_) => Err(e.context(format!("download {source}"))),
+        },
+    }
+}
+
 pub async fn load(set: &RuleSet, base: &Path, max_age: Duration) -> Result<usize> {
+    if let Some(tag) = &set.geosite_tag {
+        let data = fetch_binary(&set.source, base, max_age, |bytes| crate::geosite::parse(bytes, tag)).await
+            .with_context(|| format!("GEOSITE {tag}: database {}", set.source))?;
+        let n = data.len();
+        *set.data.write().unwrap() = data;
+        info!("GEOSITE {tag}: {n} entries from {}", set.source);
+        return Ok(n);
+    }
     let result = fetch(&set.source, base, max_age, None).await.with_context(|| format!("rule set {}", set.source))?;
     Ok(set.install(&result.text, result.from))
 }
@@ -275,7 +342,9 @@ pub fn spawn_refresh(sets: Vec<Arc<RuleSet>>, interval: Duration) {
             }
             for s in &live {
                 // max_age zero forces a download; the cache is still the fallback.
-                if let Err(e) = load(s, Path::new("."), Duration::ZERO).await {
+                // Categories share one binary database; download it once per cycle.
+                let max_age = if s.geosite_tag.is_some() { Duration::from_secs(60) } else { Duration::ZERO };
+                if let Err(e) = load(s, Path::new("."), max_age).await {
                     warn!("{e:#}");
                 }
             }
@@ -307,6 +376,16 @@ fn decode_body(body: Vec<u8>, encoding: Option<&str>) -> Result<Vec<u8>> {
 
 /// HTTP/1.1 GET over the egress path, following at most five redirects.
 pub async fn http_get(source: &str, user_agent: Option<&str>) -> Result<FetchResult> {
+    let result = http_get_bytes(source, user_agent).await?;
+    Ok(FetchResult { text: String::from_utf8_lossy(&result.bytes).into_owned(), from: "network", metadata: result.metadata, last_error: None })
+}
+
+struct BinaryDownload {
+    bytes: Vec<u8>,
+    metadata: FetchMetadata,
+}
+
+async fn http_get_bytes(source: &str, user_agent: Option<&str>) -> Result<BinaryDownload> {
     let user_agent = user_agent.unwrap_or(DEFAULT_USER_AGENT);
     http::HeaderValue::from_str(user_agent).context("bad user-agent")?;
     let mut url = url::Url::parse(source)?;
@@ -357,7 +436,7 @@ pub async fn http_get(source: &str, user_agent: Option<&str>) -> Result<FetchRes
         }
         let mut metadata = FetchMetadata::from_headers(header("subscription-userinfo"), header("profile-update-interval"));
         metadata.last_fetch = Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs());
-        return Ok(FetchResult { text: String::from_utf8_lossy(&body).into_owned(), from: "network", metadata, last_error: None });
+        return Ok(BinaryDownload { bytes: body, metadata });
     }
     unreachable!()
 }
@@ -421,6 +500,49 @@ mod tests {
         raw.write_all(original).unwrap();
         assert_eq!(decode_body(raw.finish().unwrap(), Some("deflate")).unwrap(), original);
         assert!(decode_body(b"truncated".to_vec(), Some("gzip")).is_err());
+    }
+
+    #[tokio::test]
+    async fn binary_database_cache_preserves_bytes_and_rejects_invalid_updates() {
+        let bytes = crate::geosite::tests::fixture();
+        let replies = vec![response("200 OK", "", &bytes), response("200 OK", "", b"<html>not a database</html>")];
+        let (url, server) = mock_http(replies).await;
+        let cache = std::env::temp_dir().join(format!("sluice-geosite-{}.dat", rand::random::<u64>()));
+        let parse = |b: &[u8]| crate::geosite::parse(b, "category-ads-all");
+        assert_eq!(fetch_binary_cached(&url, Duration::ZERO, &cache, parse).await.unwrap().len(), 4);
+        assert_eq!(std::fs::read(&cache).unwrap(), bytes);
+        // A fresh category view is read without a second network request.
+        assert_eq!(fetch_binary_cached(&url, Duration::from_secs(3600), &cache, parse).await.unwrap().len(), 4);
+        // HTTP 200 with corrupt data must leave the previous valid cache intact.
+        assert_eq!(fetch_binary_cached(&url, Duration::ZERO, &cache, parse).await.unwrap().len(), 4);
+        assert_eq!(std::fs::read(&cache).unwrap(), bytes);
+        server.await.unwrap();
+        // Offline refresh still uses the valid database, including non-UTF-8 fields.
+        assert_eq!(fetch_binary_cached(&url, Duration::ZERO, &cache, parse).await.unwrap().len(), 4);
+        std::fs::remove_file(cache).unwrap();
+    }
+
+    #[tokio::test]
+    async fn geosite_loads_relative_binary_file_and_retains_live_data_on_error() {
+        let root = std::env::temp_dir().join(format!("sluice-geosite-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fixture.dat");
+        std::fs::write(&path, crate::geosite::tests::fixture()).unwrap();
+        let set = RuleSet::geosite("category-ads-all", "fixture.dat");
+        assert_eq!(load(&set, &root, Duration::ZERO).await.unwrap(), 4);
+        assert!(set.data.read().unwrap().match_domain("sub.ads.example"));
+        std::fs::write(&path, b"bad database").unwrap();
+        assert!(load(&set, &root, Duration::ZERO).await.is_err());
+        assert!(set.data.read().unwrap().match_domain("sub.ads.example"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn external_lists_report_unloadable_nested_geosite_rules() {
+        let (data, skipped) = SetData::parse("GEOSITE,ads\nNOT,((GEOSITE,ads))\nDOMAIN,ads.example", SetKind::Rules);
+        assert_eq!(skipped, 2);
+        assert_eq!(data.len(), 1);
+        assert!(data.match_domain("ads.example"));
     }
 
     #[tokio::test]

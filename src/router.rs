@@ -237,7 +237,7 @@ impl Router {
         }
 
         let router = Router {
-            rules: cfg.rules.clone(),
+            rules: crate::geosite::configure_rules(&cfg.rules, cfg.general.geosite_db.as_deref()),
             outbounds,
             groups: cfg.groups.clone(),
             selected: RwLock::new(selected),
@@ -310,6 +310,11 @@ impl Router {
                     Some(ip) => self.country(ip).as_deref() == Some(country.as_str()),
                     None => false,
                 },
+                Matcher::GeoSite { tag, set } => {
+                    let data = set.data.read().unwrap();
+                    data.geosite_loaded && matches!(&target.host, Host::Domain(d)
+                        if data.match_domain(d) != tag.starts_with('!'))
+                }
                 Matcher::IpAsn { asn, no_resolve } => match Self::ip_of(target, *no_resolve, resolved).await {
                     Some(ip) => self.asn_of(ip) == Some(*asn),
                     None => false,
@@ -543,13 +548,19 @@ impl Router {
     }
 
     pub fn rule_sets(&self) -> Vec<Arc<crate::ruleset::RuleSet>> {
-        self.rules
-            .iter()
-            .filter_map(|r| match &r.matcher {
-                Matcher::RuleSet { set, .. } => Some(set.clone()),
-                _ => None,
-            })
-            .collect()
+        fn collect(m: &Matcher, sets: &mut Vec<Arc<crate::ruleset::RuleSet>>) {
+            match m {
+                Matcher::RuleSet { set, .. } | Matcher::GeoSite { set, .. } => {
+                    if !sets.iter().any(|s| Arc::ptr_eq(s, set)) { sets.push(set.clone()); }
+                }
+                Matcher::And(v) | Matcher::Or(v) => v.iter().for_each(|m| collect(m, sets)),
+                Matcher::Not(m) => collect(m, sets),
+                _ => {}
+            }
+        }
+        let mut sets = Vec::new();
+        for rule in &self.rules { collect(&rule.matcher, &mut sets); }
+        sets
     }
 
     pub fn groups(&self) -> Vec<GroupStatus> {
@@ -1011,6 +1022,29 @@ FINAL,DIRECT
         assert_eq!(decide_ctx(&r, "x.org:22", other).await, "RULE-SET,inline.list");
         let other = ConnInfo::new(Proto::Tcp, None, None, 0).with_process("wget");
         assert_eq!(decide_ctx(&r, "x.org", other).await, "FINAL");
+    }
+
+    #[tokio::test]
+    async fn native_geosite_routes_domains_and_combinations() {
+        let r = router("[General]\ngeosite-db = local.dat\n[Rule]\nAND,((GEOSITE,category-ads-all),(DST-PORT,443)),REJECT\nGEOSITE,category-ads-all,REJECT\nFINAL,DIRECT\n");
+        let sets = r.rule_sets();
+        assert_eq!(sets.len(), 1, "repeated categories share a loaded database view");
+        assert_eq!(sets[0].source, "local.dat");
+        *sets[0].data.write().unwrap() = crate::geosite::parse(&crate::geosite::tests::fixture(), "category-ads-all").unwrap();
+        for domain in ["x.ads.example", "exact.example", "ad12.example.org", "ad-keyword.test"] {
+            let (rule, outbound) = decide(&r, domain).await;
+            assert!(rule.starts_with("AND,((GEOSITE,category-ads-all)"));
+            assert_eq!(outbound, "REJECT");
+        }
+        assert_eq!(decide(&r, "x.ads.example:80").await, ("GEOSITE,category-ads-all".into(), "REJECT".into()));
+        assert_eq!(decide(&r, "badads.example").await, ("FINAL".into(), "DIRECT".into()));
+        assert_eq!(decide(&r, "1.1.1.1").await.1, "DIRECT");
+        let inverted = router("[Rule]\nGEOSITE,!category-ads-all,REJECT\nFINAL,DIRECT\n");
+        assert_eq!(decide(&inverted, "normal.example").await.1, "DIRECT", "unloaded negated sets never match");
+        *inverted.rule_sets()[0].data.write().unwrap() = crate::geosite::parse(&crate::geosite::tests::fixture(), "!category-ads-all").unwrap();
+        assert_eq!(decide(&inverted, "normal.example").await.1, "REJECT");
+        assert_eq!(decide(&inverted, "ads.example").await.1, "DIRECT");
+        assert_eq!(decide(&inverted, "1.1.1.1").await.1, "DIRECT");
     }
 
     #[test]

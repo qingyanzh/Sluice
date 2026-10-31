@@ -208,6 +208,7 @@ pub enum Matcher {
     DomainKeyword(String),
     IpCidr { cidr: Cidr, raw: String, no_resolve: bool },
     GeoIp { country: String, no_resolve: bool },
+    GeoSite { tag: String, set: Arc<RuleSet> },
     IpAsn { asn: u32, no_resolve: bool },
     /// Contents are filled in by `ruleset::load` after parsing.
     RuleSet { set: Arc<RuleSet>, no_resolve: bool },
@@ -259,7 +260,7 @@ fn unwrap_parens(s: &str) -> Option<&str> {
 
 impl Matcher {
     /// Parses `TYPE`, `VALUE` and trailing options such as `no-resolve`. `nested` is set for
-    /// sub-rules of AND/OR/NOT and lines of a RULE-SET, where rule sets cannot appear.
+    /// sub-rules of AND/OR/NOT and lines of a RULE-SET, where RULE-SET/DOMAIN-SET cannot appear.
     pub fn parse(kind: &str, value: &str, opts: &[&str], nested: bool) -> Result<Self> {
         let kind = kind.to_ascii_uppercase();
         if value.is_empty() {
@@ -272,6 +273,10 @@ impl Matcher {
             "DOMAIN-KEYWORD" => Matcher::DomainKeyword(value.to_ascii_lowercase()),
             "IP-CIDR" | "IP-CIDR6" => Matcher::IpCidr { cidr: Cidr::parse(value)?, raw: value.to_string(), no_resolve },
             "GEOIP" => Matcher::GeoIp { country: value.to_ascii_uppercase(), no_resolve },
+            "GEOSITE" => {
+                let tag = crate::geosite::normalize_tag(value)?;
+                Matcher::GeoSite { set: RuleSet::geosite(&tag, crate::geosite::DEFAULT_DATABASE), tag }
+            }
             "IP-ASN" => {
                 let n = value.trim_start_matches(['A', 'S', 'a', 's']);
                 Matcher::IpAsn { asn: n.parse().map_err(|_| anyhow!("bad ASN {value:?}"))?, no_resolve }
@@ -330,6 +335,15 @@ impl Matcher {
         }
     }
 
+    pub fn needs_external_data(&self) -> bool {
+        match self {
+            Matcher::RuleSet { .. } | Matcher::GeoSite { .. } => true,
+            Matcher::And(v) | Matcher::Or(v) => v.iter().any(Matcher::needs_external_data),
+            Matcher::Not(m) => m.needs_external_data(),
+            _ => false,
+        }
+    }
+
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +381,7 @@ impl fmt::Display for Matcher {
             Matcher::IpCidr { raw, .. } if raw.contains(':') => write!(f, "IP-CIDR6,{raw}"),
             Matcher::IpCidr { raw, .. } => write!(f, "IP-CIDR,{raw}"),
             Matcher::GeoIp { country, .. } => write!(f, "GEOIP,{country}"),
+            Matcher::GeoSite { tag, .. } => write!(f, "GEOSITE,{tag}"),
             Matcher::IpAsn { asn, .. } => write!(f, "IP-ASN,{asn}"),
             Matcher::RuleSet { set, .. } => {
                 let kind = if set.kind == SetKind::Rules { "RULE-SET" } else { "DOMAIN-SET" };

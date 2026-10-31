@@ -308,6 +308,9 @@ final class Core: ObservableObject {
             // There is no child stdout/log file in attach mode. Subscribe immediately;
             // the shared monitor reconnects this stream and consumes its log events.
             pollTask = Task { await self.poll() }
+            Task {
+                if let api, let status = try? await api.status() { privileged = status.uid == 0 }
+            }
         }
     }
 
@@ -1422,12 +1425,13 @@ final class Core: ObservableObject {
         refreshProfiles()
     }
 
-    func prepareProfileImport(_ source: String) async throws -> PreparedProfileImport {
+    func prepareProfileImport(_ source: String, name: String? = nil) async throws -> PreparedProfileImport {
         let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
         let address = source.hasPrefix("/") ? URL(fileURLWithPath: source).absoluteString : source
         guard Self.isSubscriptionURL(address), let binary = coreBinary else { throw APIError(message: "请填写 HTTP/HTTPS、file:// 地址，或选择本地配置文件。") }
         let path = configPath
-        let (status, output) = await runTool(binary.path, ["import-profile", address, path])
+        if let name { try SubscriptionChanges.validateName(name) }
+        let (status, output) = await runTool(binary.path, ["import-profile", address, path] + (name.map { [$0] } ?? []))
         guard status == 0 else { throw APIError(message: output.trimmingCharacters(in: .whitespacesAndNewlines)) }
         guard configPath == path else { throw APIError(message: "当前配置已切换，请重新准备导入。") }
         if let error = await validate(output) { throw APIError(message: error) }

@@ -27,13 +27,20 @@ medium weight so card labels remain easy to scan.
 
 | Token | Size and weight | Use |
 |-------|-----------------|-----|
-| `title` | 24 semibold | Page titles |
-| `display` | 22 medium | Main state |
-| `heading` | 14 semibold | Card titles |
+| `title` | 22 semibold | Page titles |
+| `display` | 20 medium | Main state |
+| `heading` | 15 semibold | Card titles |
 | `navigation` | 14 regular | Sidebar |
-| `label` | 13 regular | Body and controls |
-| `small` | 12 regular | Descriptions |
-| `caption` | 11 medium | Metadata |
+| `label` | 14 regular | Body and controls |
+| `small` | 13 regular | Descriptions |
+| `caption` | 12 medium | Metadata |
+
+Regular controls are 34 pt high, compact controls 28 pt, and primary controls
+36 pt. Live dashboard values interpolate between samples with a fixed display
+width; unit changes reset interpolation. Reduce Motion disables this animation.
+Keep the sidebar state on one line, using a shield icon for root operation.
+Subscription usage occupies the full card width; secondary facts wrap into an
+adaptive grid below it.
 
 `DS.ink2` is for descriptions and labels. `DS.ink3` is for timestamps,
 secondary metadata, and hints. Both are opaque dynamic colours selected for

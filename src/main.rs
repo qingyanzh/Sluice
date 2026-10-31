@@ -18,6 +18,7 @@ mod rewrite;
 mod router;
 mod rule;
 mod ruleset;
+mod geosite;
 mod salamander;
 mod ss;
 mod stats;
@@ -54,7 +55,7 @@ usage:
   sluice convert <share-link>                print a share link as a [Proxy] line
   sluice nodes <config.conf>                 list subscription node references as JSON
   sluice catalog <config.conf>               inspect nodes and groups without listeners
-  sluice import-profile <source> <base.conf> convert a complete source into a new profile
+  sluice import-profile <source> <base.conf> [name] convert a complete source into a new profile
   sluice probe <config.conf> <node> [url]     test one outbound without starting the proxy
   sluice probe-group <config.conf> <group>   test group members without starting the proxy
   sluice mitm gen-ca [--force]               create the HTTPS decryption CA (not installed)
@@ -224,11 +225,15 @@ async fn run() -> Result<()> {
             subscription::expand(&mut cfg, base, true).await?;
             println!("{}", serde_json::to_string(&cfg.subscription_nodes)?);
         }
-        ["import-profile", source, base] => {
+        ["import-profile", source, base, names @ ..] if names.len() <= 1 => {
             let base_text = std::fs::read_to_string(base)?;
             let parent = std::path::Path::new(base).parent().unwrap_or(std::path::Path::new("."));
             let result = ruleset::fetch(source, parent, std::time::Duration::ZERO, None).await?;
-            print!("{}", profile_import::convert(&result.text, source, &base_text)?);
+            let converted = match names.first() {
+                Some(name) => profile_import::convert_named(&result.text, source, &base_text, name)?,
+                None => profile_import::convert(&result.text, source, &base_text)?,
+            };
+            print!("{converted}");
         }
         ["catalog", path, rest @ ..] if rest.is_empty() || rest == ["--refresh"] => {
             if rest == ["--refresh"] { subscription::REFRESH_NOW.store(true, std::sync::atomic::Ordering::Release); }

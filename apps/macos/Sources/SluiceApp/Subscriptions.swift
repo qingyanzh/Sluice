@@ -112,6 +112,7 @@ struct SubscriptionsView: View {
     @State private var text = ""
     @State private var adding = false
     @State private var editing: SubscriptionSource?
+    @State private var renaming: SubscriptionSource?
     @State private var deleting: SubscriptionSource?
     @State private var error: String?
 
@@ -139,7 +140,7 @@ struct SubscriptionsView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                     ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
-                        SubscriptionCard(source: source, edit: { editing = source }, delete: { deleting = source })
+                        SubscriptionCard(source: source, edit: { editing = source }, rename: { renaming = source }, delete: { deleting = source })
                             .modifier(Entrance(index: index))
                     }
                 }
@@ -155,6 +156,7 @@ struct SubscriptionsView: View {
         }
         .sheet(isPresented: $adding, onDismiss: refresh) { AddSubscriptionSheet() }
         .sheet(item: $editing, onDismiss: refresh) { SubscriptionEditSheet(source: $0) }
+        .sheet(item: $renaming, onDismiss: refresh) { SubscriptionRenameSheet(source: $0) }
         .confirmationDialog("删除订阅「\(deleting?.name ?? "")」？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible) {
             Button("删除订阅", role: .destructive) {
@@ -230,6 +232,7 @@ private struct SubscriptionCard: View {
     @EnvironmentObject var core: Core
     let source: SubscriptionSource
     let edit: () -> Void
+    let rename: () -> Void
     let delete: () -> Void
     @State private var hovering = false
 
@@ -261,16 +264,11 @@ private struct SubscriptionCard: View {
                     .help(source.isLegacy ? "旧式订阅请在配置文本中修改" : "修改地址、过滤条件和更新间隔")
                 menu
             }
-            Grid(horizontalSpacing: 12) { GridRow {
-                trafficTile(status).gridCellColumns(1)
-                tile("到期时间", value: status?.expiryDate.map { $0.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits)) } ?? "未提供",
-                     note: status?.expiryDate.map(daysLeft) ?? "服务商未提供到期信息",
-                     tone: expiryTone(status?.expiryDate))
-                tile("节点", value: status.map { "\($0.nodeCount) 个" } ?? "—",
-                     note: source.filter.isEmpty ? "未设置过滤" : "按「\(source.filter)」过滤")
-                tile("自动更新", value: "每 \(humanInterval(source.intervalSeconds))",
-                     note: status?.lastFetchDate.map { "上次 " + SubscriptionFormat.relative($0) } ?? "尚未下载")
-            } }
+            trafficTile(status)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 12) { detailTiles(status) }.frame(minWidth: 540)
+                VStack(spacing: 12) { detailTiles(status) }
+            }
             if let raw = status?.lastError {
                 let error = FriendlyError.explain(raw)
                 HStack(alignment: .top, spacing: 8) {
@@ -293,6 +291,7 @@ private struct SubscriptionCard: View {
         .animation(DS.spring, value: hovering)
         .onHover { hovering = $0 }
         .contextMenu {
+            Button("修改名称…", action: rename)
             Button("编辑…", action: edit).disabled(source.isLegacy)
             Button("复制订阅地址") { copyText(source.url) }
             Button("删除订阅", role: .destructive, action: delete)
@@ -301,6 +300,7 @@ private struct SubscriptionCard: View {
 
     private var menu: some View {
         Menu {
+            Button("修改名称…", action: rename).disabled(!core.canChangeProfile)
             Button("复制订阅地址") { copyText(source.url) }
             Divider()
             Button("删除订阅", role: .destructive, action: delete)
@@ -314,6 +314,13 @@ private struct SubscriptionCard: View {
         return days < 0 ? "已过期 \(-days) 天" : days == 0 ? "今天到期" : "剩余 \(days) 天"
     }
 
+    @ViewBuilder private func detailTiles(_ status: SubscriptionStatus?) -> some View {
+        tile("到期时间", value: status?.expiryDate.map { $0.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits)) } ?? "未提供",
+             note: status?.expiryDate.map(daysLeft) ?? "服务商未提供到期信息", tone: expiryTone(status?.expiryDate))
+        tile("节点", value: status.map { "\($0.nodeCount) 个" } ?? "—", note: source.filter.isEmpty ? "未设置过滤" : "按「\(source.filter)」过滤")
+        tile("自动更新", value: "每 \(humanInterval(source.intervalSeconds))", note: status?.lastFetchDate.map { "上次 " + SubscriptionFormat.relative($0) } ?? "尚未下载")
+    }
+
     private func expiryTone(_ date: Date?) -> Color {
         guard let date else { return .primary }
         return date < Date() ? DS.fail : date.timeIntervalSinceNow < 7 * 86400 ? DS.warn : .primary
@@ -323,26 +330,40 @@ private struct SubscriptionCard: View {
         let fraction = status?.usedFraction
         let tone: Color = (fraction ?? 0) > 0.9 ? DS.fail : (fraction ?? 0) > 0.75 ? DS.warn : DS.accent
         return VStack(alignment: .leading, spacing: 6) {
-            Text("已用流量").font(DS.caption).foregroundStyle(DS.ink3)
-            Text(status?.used.map(SubscriptionFormat.bytes) ?? "未提供").font(DS.heading.monospacedDigit()).lineLimit(1)
+            HStack {
+                Text("已用流量").font(DS.small.weight(.medium)).foregroundStyle(DS.ink2)
+                Spacer()
+                if let fraction { Text("\(Int((fraction * 100).rounded()))% 已用").font(DS.small.monospacedDigit()).foregroundStyle(tone) }
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(status?.used.map(SubscriptionFormat.bytes) ?? "未提供").font(DS.figure(22)).lineLimit(1)
+                if let total = status?.total, total > 0 {
+                    Text("/ \(SubscriptionFormat.bytes(total))").font(DS.label.monospacedDigit()).foregroundStyle(DS.ink2).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }.padding(.vertical, 4)
             ProgressView(value: fraction ?? 0).progressViewStyle(.linear).tint(tone).opacity(fraction == nil ? 0.3 : 1)
-            Text(status?.total.flatMap { $0 > 0 ? "共 \(SubscriptionFormat.bytes($0)) · \(Int(((fraction ?? 0) * 100).rounded()))%" : nil } ?? "服务商未提供总量")
-                .font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1)
+            if let total = status?.total, total > 0, let used = status?.used {
+                Text(used >= total ? "本期流量已用完" : "剩余 \(SubscriptionFormat.bytes(total - used))")
+                    .font(DS.small).foregroundStyle(DS.ink2)
+            } else {
+                Text("服务商未提供完整流量信息").font(DS.small).foregroundStyle(DS.ink2)
+            }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-        .background(DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(DS.accentWash, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
     }
 
     private func tile(_ title: String, value: String, note: String, tone: Color = .primary) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(DS.caption).foregroundStyle(DS.ink3)
+            Text(title).font(DS.small).foregroundStyle(DS.ink2)
             Text(value).font(DS.heading.monospacedDigit()).foregroundStyle(tone).lineLimit(1).minimumScaleFactor(0.85)
             Spacer(minLength: 0)
             Text(note).font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.tail)
         }
         .padding(12)
-        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 98, alignment: .topLeading)
         .background(DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
     }
 }
@@ -369,6 +390,8 @@ private struct SubscriptionEditSheet: View {
     @EnvironmentObject var core: Core
     @Environment(\.dismiss) private var dismiss
     let source: SubscriptionSource
+    @State private var name = ""
+    @State private var path = ""
     @State private var url = ""
     @State private var filter = ""
     @State private var userAgent = ""
@@ -379,6 +402,7 @@ private struct SubscriptionEditSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SheetHeader(icon: "link", title: source.name, detail: "修改后会立即重新下载订阅")
+            SheetField(label: "订阅名称", prompt: "例如 工作、旅行", text: $name)
             SheetField(label: "订阅地址", prompt: "https://…", text: $url)
             HStack(alignment: .top, spacing: 12) {
                 SheetField(label: "节点过滤（正则，可选）", prompt: "例如 香港|HK", text: $filter)
@@ -388,23 +412,59 @@ private struct SubscriptionEditSheet: View {
             SheetFooter(error: error, primary: busy ? "正在保存…" : "保存", enabled: !busy && !url.isEmpty, cancel: { dismiss() }) {
                 busy = true
                 Task {
-                    error = await core.editSubscription(source, url: url, filter: filter, userAgent: userAgent, intervalHours: hours)
+                    error = await core.editSubscription(source, url: url, filter: filter, userAgent: userAgent, intervalHours: hours, name: name, expectedPath: path)
                     busy = false
                     if error == nil { dismiss() }
                 }
             }
         }
-        .padding(28).frame(width: 560)
+        .padding(28).frame(width: 600).disabled(busy).interactiveDismissDisabled(busy)
         .onAppear {
+            name = source.name
+            path = core.configPath
             url = source.url; filter = source.filter; userAgent = source.userAgent
             hours = max(1, source.intervalSeconds / 3600)
         }
     }
 }
 
+private struct SubscriptionRenameSheet: View {
+    @EnvironmentObject var core: Core
+    @Environment(\.dismiss) private var dismiss
+    let source: SubscriptionSource
+    @State private var name = ""
+    @State private var path = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SheetHeader(icon: "pencil", title: "修改订阅名称", detail: "同步更新策略组和规则中的引用，订阅地址保持不变。")
+            SheetField(label: "订阅名称", prompt: source.name, text: $name)
+            SheetFooter(error: error, primary: busy ? "正在保存…" : "保存名称", enabled: !busy && !name.isEmpty && name != source.name,
+                        cancel: { dismiss() }) {
+                busy = true
+                Task {
+                    error = await core.renameSubscription(source, to: name, expectedPath: path)
+                    busy = false
+                    if error == nil { dismiss() }
+                }
+            }
+        }.padding(28).frame(width: 540).disabled(busy).interactiveDismissDisabled(busy)
+            .onAppear { name = source.name; path = core.configPath }
+    }
+}
+
 extension Core {
-    /// Rewrites one `[Subscription]` line, keeping its name so group references stay valid.
-    func editSubscription(_ source: SubscriptionSource, url: String, filter: String, userAgent: String, intervalHours: Int) async -> String? {
+    func renameSubscription(_ source: SubscriptionSource, to name: String, expectedPath: String? = nil) async -> String? {
+        await editSubscription(source, url: source.url, filter: source.filter, userAgent: source.userAgent,
+                               intervalHours: max(1, source.intervalSeconds / 3600), name: name, expectedPath: expectedPath)
+    }
+
+    /// Edit the source and all namespace references as one validated config save.
+    func editSubscription(_ source: SubscriptionSource, url: String, filter: String, userAgent: String, intervalHours: Int, name: String? = nil, expectedPath: String? = nil) async -> String? {
+        guard canChangeProfile else { return "内核正在应用配置，请稍后再试。" }
+        guard expectedPath == nil || expectedPath == configPath else { return "当前配置已切换，请关闭表单并重新打开。" }
         let url = url.trimmingCharacters(in: .whitespaces)
         let filter = filter.trimmingCharacters(in: .whitespaces)
         let userAgent = userAgent.trimmingCharacters(in: .whitespaces)
@@ -414,11 +474,53 @@ extension Core {
         }
         if !filter.isEmpty, (try? NSRegularExpression(pattern: filter)) == nil { return "节点过滤不是有效的正则表达式" }
         let text = readConfig()
-        let line = source.line(url: url, filter: filter, userAgent: userAgent, intervalHours: intervalHours)
-        guard let updated = ConfigText.replace(source.name, in: "Subscription", with: line, of: text) else {
-            return "配置里找不到订阅「\(source.name)」"
+        let path = configPath
+        let name = name ?? source.name
+        do {
+            let section = source.isLegacy ? "Proxy Group" : "Subscription"
+            guard let current = SubscriptionSource.all(in: text, statuses: []).first(where: { $0.name == source.name }),
+                  current.url == source.url, current.filter == source.filter, current.userAgent == source.userAgent,
+                  current.intervalSeconds == source.intervalSeconds,
+                  let line = ConfigText.lines(of: section, in: text).first(where: { $0.split(separator: "=", maxSplits: 1).first.map { StructuredConfig.trim(String($0)) } == source.name }),
+                  let equal = line.firstIndex(of: "="),
+                  var definition = StructuredConfig.Group(line: source.isLegacy ? line : "\(source.name) = select," + line[line.index(after: equal)...]) else {
+                return "订阅已被修改，请关闭表单并重新打开。"
+            }
+            if url != source.url { definition.setParameter("policy-path", to: "\"\(url)\"") }
+            if filter != source.filter { definition.setParameter("policy-regex-filter", to: filter.isEmpty ? "" : "\"\(filter)\"") }
+            if userAgent != source.userAgent { definition.setParameter("user-agent", to: userAgent.isEmpty ? "" : "\"\(userAgent)\"") }
+            if intervalHours != max(1, source.intervalSeconds / 3600) { definition.setParameter("update-interval", to: String(max(1, intervalHours) * 3600)) }
+            let replacement = source.isLegacy ? definition.serialised : "\(source.name) = " + definition.parameters.joined(separator: ", ")
+            let settings = ConfigText.replace(source.name, in: section, with: replacement, of: text)!
+            let updated = try SubscriptionChanges.rename(source.name, to: name, in: settings)
+            let selected = groups.filter(\.isSelectable).map { ($0.group, $0.selected) }
+            if let error = await saveConfig(updated, expected: text) { return Core.explain(error, as: "订阅没有保存") }
+            guard configPath == path else { return "当前配置已切换，请检查订阅名称。" }
+            if name != source.name {
+                let map = { (value: String) in SubscriptionChanges.reference(value, from: source.name, to: name, legacy: source.isLegacy) }
+                if state == .running, let api {
+                    // Restore manually selected nodes after the namespace changed.
+                    for (group, option) in selected where map(group) != group || map(option) != option {
+                        if groups.contains(where: { $0.group == map(group) && $0.options.contains(where: { $0.name == map(option) }) }) {
+                            try await api.select(group: map(group), option: map(option))
+                        }
+                    }
+                    updateGroups(try await api.policies())
+                } else {
+                    let file = URL(fileURLWithPath: path).appendingPathExtension("selections.json")
+                    if let data = try? Data(contentsOf: file), let selections = try? JSONDecoder().decode([String: String].self, from: data) {
+                        let renamed = Dictionary(selections.map { (map($0.key), map($0.value)) }, uniquingKeysWith: { _, last in last })
+                        try JSONEncoder().encode(renamed).write(to: file, options: .atomic)
+                    }
+                }
+            }
+            if state == .running, let api { receiveSubscriptions(try await api.subscriptions()) }
+            await loadNodeCatalog()
+            return nil
+        } catch {
+            if readConfig() != text { return "订阅已保存，但部分选择未能恢复。\n\(error.localizedDescription)" }
+            return error.localizedDescription
         }
-        return Core.explain(await saveConfig(updated, expected: text), as: "订阅没有保存，配置没有改动")
     }
 }
 

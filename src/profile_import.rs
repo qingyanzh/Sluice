@@ -34,13 +34,20 @@ fn absolute_reference(source: &str, reference: &str) -> Result<String> {
 }
 
 pub fn convert(body: &str, source: &str, local: &str) -> Result<String> {
+    convert_named(body, source, local, "导入来源")
+}
+
+pub fn convert_named(body: &str, source: &str, local: &str, source_name: &str) -> Result<String> {
     let body = decoded(body);
     if body.lines().any(|line| line.trim() == "[Subscription]") || section(&body, "[General]").iter().any(|l| l.split('=').next().is_some_and(|k| k.trim() == "api-listen")) {
         Config::parse(&body)?;
         return Ok(body);
     }
     if source.contains(['"', '\r', '\n']) { bail!("source address contains unsupported quotes or newlines"); }
-    let source_name = "导入来源";
+    if source_name.trim().is_empty() || source_name != source_name.trim() || source_name.contains(['|', ',', '=', '"', '\r', '\n'])
+        || source_name.starts_with(['#', ';', '[', '@']) || source_name.starts_with("//") || matches!(source_name, "DIRECT" | "REJECT") {
+        bail!("invalid subscription name");
+    }
     let (nodes, _, _) = crate::subscription::parse_with_metadata(&body, source);
     let node_names: HashSet<_> = nodes.iter().map(|(name, _)| name.as_str()).collect();
     let mut topology = Config { subscription_nodes: nodes.iter().map(|(name, _)| crate::subscription::SubscriptionNode {
@@ -170,12 +177,37 @@ mod tests {
     }
 
     #[test]
+    fn profile_name_becomes_the_converted_subscription_identity() {
+        let imported = convert_named(SOURCE, "https://example.test/config", BASE, "工作 A").unwrap();
+        let cfg = Config::parse(&imported).unwrap();
+        assert_eq!(cfg.providers[0].name, "工作 A");
+        assert_eq!(cfg.groups[0].options, ["@工作%20A/HK", "DIRECT"]);
+        assert_eq!(cfg.rules[0].policy, "Main");
+        for invalid in ["", "A|B", "A,B", "#comment", "DIRECT"] {
+            assert!(convert_named(SOURCE, "https://example.test/config", BASE, invalid).is_err());
+        }
+        assert_eq!(convert_named(BASE, "file:///tmp/original.conf", "", "工作 A").unwrap(), BASE);
+    }
+
+    #[test]
     fn native_profiles_keep_their_own_rules_and_settings() {
         assert_eq!(convert(BASE, "file:///tmp/original.conf", "").unwrap(), BASE);
         let invalid = SOURCE.replace("DOMAIN-SUFFIX,office.test,Main", "UNSUPPORTED,office.test,Main");
         assert!(convert(&invalid, "https://example.test/config", BASE).is_err());
         let missing = SOURCE.replace("MATCH,Main", "MATCH,Unknown");
         assert!(convert(&missing, "https://example.test/config", BASE).is_err());
+    }
+
+    #[test]
+    fn imports_native_geosite_without_rewriting_or_dropping_rules() {
+        let source = SOURCE.replace("  - MATCH,Main", "  - GEOSITE,category-ads-all,REJECT\n  - GEOSITE,google@cn,Main\n  - MATCH,Main");
+        let imported = convert_named(&source, "https://example.test/config", BASE, "工作").unwrap();
+        assert!(imported.contains("GEOSITE,category-ads-all,REJECT\n"));
+        assert!(imported.contains("GEOSITE,google@cn,Main\n"));
+        let cfg = Config::parse(&imported).unwrap();
+        assert_eq!(cfg.rules.len(), 5);
+        assert!(matches!(&cfg.rules[2].matcher, crate::rule::Matcher::GeoSite { tag, .. } if tag == "category-ads-all"));
+        assert_eq!(cfg.rules[2].policy, "REJECT");
     }
 
     #[test]

@@ -215,6 +215,17 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 
     deinit { NSStatusBar.system.removeStatusItem(statusItem) }
 
+    func inspectMenu() {
+        guard E2ELaunch.current != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let view = NSApp.keyWindow?.contentView else { return }
+            let menu = NSMenu()
+            menu.delegate = self
+            menu.autoenablesItems = false
+            menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.width - 20, y: view.bounds.height - 30), in: view)
+        }
+    }
+
     private static func font(in defaults: UserDefaults) -> NSFont {
         let size = defaults.double(forKey: "menuBarSpeedFontSize")
         return .monospacedDigitSystemFont(ofSize: size.isFinite && size > 0 ? size : 9, weight: .regular)
@@ -320,10 +331,10 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
                                                   color: NSColor(latencyStyle(option.latencyMs).1)))
                     item.image = latencyIcon(option.latencyMs)
                 }
-                alignRightColumn(of: options, optionRows)
                 options.addItem(.separator())
                 let testing = state.testingGroups.contains(groupName)
                 add(to: options, testing ? "测试中…" : "测试延迟", symbol: "speedometer", enabled: !testing) { [core, groupName] in core.test(group: groupName) }
+                Self.alignRightColumn(of: options, optionRows)
             }
         } else {
             menu.addItem(info(running ? "配置中没有策略组 · 可在「策略」页新建" : "启动内核后可在此切换节点"))
@@ -437,7 +448,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         add(to: menu, "退出", key: "q") { NSApp.terminate(nil) }
-        alignRightColumn(of: menu, rows)
+        Self.alignRightColumn(of: menu, rows)
     }
 
     /// Direct green, reject red, any proxy or group indigo: the same grammar as the window.
@@ -519,7 +530,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
     }
 
     /// A row whose detail (text or a small tag) sits flush with the menu's right edge.
-    private struct RightColumn {
+    struct RightColumn {
         let item: NSMenuItem
         let name: String
         var detail: String? = nil
@@ -528,11 +539,12 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         var dimmed = false
     }
 
-    /// Names stay left; details align right at the end of the title area, which is as
-    /// wide as the widest title in this menu (plain titles included). The shortcut and
-    /// submenu-arrow column follows, so details line up with it.
-    private func alignRightColumn(of menu: NSMenu, _ rows: [RightColumn]) {
+    /// Reserve enough intrinsic space, then align detail drawing to AppKit's actual
+    /// title field width. Parent menus reserve their native arrow column; option
+    /// menus without arrows keep an additional eight-point inner margin.
+    static func alignRightColumn(of menu: NSMenu, _ rows: [RightColumn]) {
         let font = NSFont.menuFont(ofSize: 0)
+        let detailFont = NSFont.monospacedDigitSystemFont(ofSize: font.pointSize, weight: .regular)
         var rows = rows
         let listed = Set(rows.map { ObjectIdentifier($0.item) })
         for item in menu.items {
@@ -544,28 +556,35 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         func width(_ text: String) -> CGFloat { (text as NSString).size(withAttributes: [.font: font]).width }
         let special = Set(rows.map { ObjectIdentifier($0.item) })
         let plain = menu.items.filter { !$0.isSeparatorItem && !special.contains(ObjectIdentifier($0)) }.map { width($0.title) }
-        let needed = rows.map { width($0.name) + 24 + ($0.image?.size.width ?? $0.detail.map(width) ?? 0) }
+        let needed = rows.map { row in width(row.name) + 24 + (row.image?.size.width ?? row.detail.map { ($0 as NSString).size(withAttributes: [.font: detailFont]).width } ?? 0) }
         let tab = ceil((plain + needed).max() ?? 0)
         let paragraph = NSMutableParagraphStyle()
         paragraph.tabStops = [NSTextTab(textAlignment: .right, location: tab)]
+        let trailingInset: CGFloat = menu.items.contains(where: { $0.submenu != nil }) ? 0 : 8
         for row in rows {
             let title = NSMutableAttributedString(string: row.name, attributes: [
                 .font: font, .paragraphStyle: paragraph,
                 .foregroundColor: row.dimmed || !row.item.isEnabled ? NSColor.secondaryLabelColor : NSColor.labelColor,
             ])
-            if let detail = row.detail {
-                title.append(NSAttributedString(string: "\t\(detail)", attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: font.pointSize, weight: .regular),
-                    .foregroundColor: row.item.isEnabled ? row.color : NSColor.tertiaryLabelColor, .paragraphStyle: paragraph,
-                ]))
-            } else if let image = row.image {
+            let detailImage = row.image ?? row.detail.map { detail in
+                let text = NSAttributedString(string: detail, attributes: [
+                    .font: detailFont,
+                    .foregroundColor: row.item.isEnabled ? row.color : NSColor.tertiaryLabelColor,
+                ])
+                let size = NSSize(width: ceil(text.size().width), height: ceil(text.size().height))
+                return NSImage(size: size, flipped: false) { _ in text.draw(at: .zero); return true }
+            }
+            if let image = detailImage {
                 let attachment = NSTextAttachment()
-                attachment.image = image
                 attachment.bounds = NSRect(x: 0, y: -3, width: image.size.width, height: image.size.height)
+                let cell = TrailingMenuDetailCell(imageCell: image)
+                cell.trailingInset = trailingInset
+                attachment.attachmentCell = cell
                 title.append(NSAttributedString(string: "\t", attributes: [.paragraphStyle: paragraph]))
                 title.append(NSAttributedString(attachment: attachment))
             }
             row.item.attributedTitle = title
+            row.item.setAccessibilityLabel([row.name, row.detail].compactMap { $0 }.joined(separator: "，"))
         }
     }
 
@@ -598,6 +617,21 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             NSBezierPath(ovalIn: NSRect(x: 3, y: 3, width: 6, height: 6)).fill()
             return true
         }
+    }
+}
+
+/// AppKit can widen the title field beyond its attributed string's tab stop.
+/// Align against the actual field bounds; option menus also need an inner margin.
+final class TrailingMenuDetailCell: NSTextAttachmentCell {
+    var trailingInset: CGFloat = 0
+    func drawingFrame(_ frame: NSRect, in bounds: NSRect?) -> NSRect {
+        guard let bounds else { return frame }
+        var result = frame
+        result.origin.x = bounds.maxX - trailingInset - frame.width
+        return result
+    }
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
+        image?.draw(in: drawingFrame(cellFrame, in: controlView?.bounds))
     }
 }
 

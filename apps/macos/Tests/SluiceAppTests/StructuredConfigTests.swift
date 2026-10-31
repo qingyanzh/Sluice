@@ -32,7 +32,7 @@ final class StructuredConfigTests: XCTestCase {
         let values: [String: String] = [
             "DOMAIN": "example.com", "DOMAIN-SUFFIX": "example.com", "DOMAIN-KEYWORD": "ads",
             "IP-CIDR": "10.0.0.0/8", "IP-CIDR6": "2001:db8::/32", "GEOIP": "CN", "IP-ASN": "AS13335",
-            "RULE-SET": "rules/local.list", "DOMAIN-SET": "https://example.com/domains.txt",
+            "GEOSITE": "category-ads-all", "RULE-SET": "rules/local.list", "DOMAIN-SET": "https://example.com/domains.txt",
             "DST-PORT": "443", "DEST-PORT": "80-90", "IN-PORT": "6252", "SRC-IP": "192.168.1.2",
             "PROTOCOL": "TCP", "PROCESS-NAME": "Safari", "URL-REGEX": "^https://(a|b).example/(foo,bar)$",
             "AND": "((DOMAIN,example.com),(OR,((DST-PORT,443),(DST-PORT,80))))",

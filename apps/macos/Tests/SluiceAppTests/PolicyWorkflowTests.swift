@@ -53,5 +53,12 @@ final class PolicyWorkflowTests: XCTestCase {
         XCTAssertEqual(core.activeProfileName, "Default")
         XCTAssertEqual(core.state, .stopped)
         XCTAssertFalse(core.isActive)
+        let upstream = root.appendingPathComponent("upstream.yaml")
+        try "proxies:\n  - {name: HK, type: trojan, server: hk.example, port: 443, password: fixture}\nproxy-groups:\n  - {name: Main, type: select, proxies: [HK]}\nrules:\n  - MATCH,Main\n".write(to: upstream, atomically: true, encoding: .utf8)
+        let named = try await core.prepareProfileImport(upstream.absoluteString, name: "旅行")
+        XCTAssertEqual(StructuredConfig(named.text).subscriptionNames, ["旅行"])
+        XCTAssertEqual(StructuredConfig(named.text).groups[0].value.members, ["@旅行/HK"])
+        try await core.importProfile(name: "旅行", text: named.text)
+        XCTAssertEqual(core.configPath, path)
     }
 }

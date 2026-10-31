@@ -14,7 +14,7 @@ struct StructuredConfig {
     }
 
     struct Rule: Equatable {
-        static let types = ["DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "GEOIP", "IP-ASN", "RULE-SET", "DOMAIN-SET", "DST-PORT", "DEST-PORT", "IN-PORT", "SRC-IP", "PROTOCOL", "PROCESS-NAME", "URL-REGEX", "AND", "OR", "NOT", "FINAL"]
+        static let types = ["DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "GEOSITE", "IP-CIDR", "IP-CIDR6", "GEOIP", "IP-ASN", "RULE-SET", "DOMAIN-SET", "DST-PORT", "DEST-PORT", "IN-PORT", "SRC-IP", "PROTOCOL", "PROCESS-NAME", "URL-REGEX", "AND", "OR", "NOT", "FINAL"]
         var type = "DOMAIN-SUFFIX"
         var value = ""
         var policy = "DIRECT"
@@ -104,7 +104,7 @@ struct StructuredConfig {
         private static func key(_ parameter: String) -> String {
             StructuredConfig.trim(String(parameter.prefix { $0 != "=" })).lowercased()
         }
-        private mutating func setParameter(_ key: String, to value: String) {
+        mutating func setParameter(_ key: String, to value: String) {
             guard parameter(key) != (value.isEmpty ? nil : value) else { return }
             if let index = parameters.lastIndex(where: { Self.key($0) == key }) {
                 parameters[index] = "\(key)=\(value)"

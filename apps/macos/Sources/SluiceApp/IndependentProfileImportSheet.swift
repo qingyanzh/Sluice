@@ -21,6 +21,8 @@ struct IndependentProfileImportSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             SheetHeader(icon: "doc.badge.plus", title: "导入配置", detail: "导入节点、策略组和规则，生成一份新配置，当前配置保持不变")
             SheetField(label: "配置名称", prompt: "例如 工作、旅行", text: $name)
+            Text("导入的订阅默认使用相同名称；之后可在订阅页修改。原生配置保留已有订阅名称。")
+                .font(DS.small).foregroundStyle(DS.ink2)
             HStack(alignment: .bottom) {
                 SheetField(label: "订阅或配置地址", prompt: "https://… 或 file://…", text: $source)
                 Button("选择文件…", action: chooseFile).glassButton()
@@ -43,6 +45,7 @@ struct IndependentProfileImportSheet: View {
         }
         .padding(28).frame(width: 600).disabled(busy).interactiveDismissDisabled(busy)
         .onChange(of: source) { prepared = nil; error = nil }
+        .onChange(of: name) { prepared = nil; error = nil }
     }
 
     private func importPoint(_ icon: String, _ text: String) -> some View {
@@ -66,7 +69,7 @@ struct IndependentProfileImportSheet: View {
             do {
                 try ProfileStore.validateName(name)
                 if let prepared { try await core.importProfile(name: name, text: prepared.text); dismiss() }
-                else { prepared = try await core.prepareProfileImport(source) }
+                else { prepared = try await core.prepareProfileImport(source, name: name) }
             } catch { self.error = error.localizedDescription }
         }
     }
