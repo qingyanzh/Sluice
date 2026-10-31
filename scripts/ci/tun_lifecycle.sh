@@ -52,6 +52,9 @@ wait_ready() {
         if curl -fsS -m 1 "$api/v1/status" > "$work/status.json" 2>/dev/null; then
             local reported
             reported=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$work/status.json")
+            # sudo forks the core as a child, so the pid file may be written
+            # after the top-of-loop read; re-read it before comparing.
+            if [[ -s ${core_pid_file:-} ]]; then read -r pid < "$core_pid_file"; fi
             if [[ $reported != "$pid" ]]; then
                 echo "FAIL API belongs to pid $reported, expected core $pid (launcher $launcher)"
                 lifecycle_diagnostics
