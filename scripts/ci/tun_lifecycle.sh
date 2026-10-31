@@ -31,13 +31,18 @@ uuid=b831381d-6324-4d53-ad4f-8cda48b30811
 iface=$(route -n get default | awk '/interface:/{print $2}')
 local_ip=$(ipconfig getifaddr "$iface")
 conf=$work/lifecycle.conf
-api=http://127.0.0.1:6170
+# Keep lifecycle listeners separate from tun.sh and the other CI scripts.
+api_port=16470
+http_port=16452
+socks_port=16453
+api=http://127.0.0.1:$api_port
 write_config() {
     cat > "$conf" <<EOF
 [General]
 loglevel = debug
-http-listen = 127.0.0.1:16252
-api-listen = 127.0.0.1:6170
+http-listen = 127.0.0.1:$http_port
+socks5-listen = 127.0.0.1:$socks_port
+api-listen = 127.0.0.1:$api_port
 enhanced-mode = $1
 [Proxy]
 VMess = vmess, 127.0.0.1, 19001, username=$uuid
@@ -49,14 +54,22 @@ FINAL,Proxy
 EOF
 }
 wait_ready() {
+    local launcher=$1 log=$2
     for _ in $(seq 600); do
-        if curl -fsS -m 1 "$api/v1/status" > "$work/status.json"; then
+        if ! kill -0 "$launcher" 2>/dev/null; then
+            wait "$launcher" || true
+            pid=0
+            echo 'FAIL core exited before becoming ready'
+            cat "$log"
+            exit 1
+        fi
+        if curl -fsS -m 1 "$api/v1/status" > "$work/status.json" 2>/dev/null; then
             pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$work/status.json")
             if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["ready"] else 1)' "$work/status.json"; then return; fi
         fi
         sleep 0.1
     done
-    echo 'FAIL core did not start'; exit 1
+    echo 'FAIL core did not start'; cat "$log"; exit 1
 }
 assert_clean() {
     # Dynamic DNS propagation can lag a completed networksetup call slightly.
@@ -86,15 +99,23 @@ stop_core() {
     echo 'FAIL core did not exit within 7 seconds'; exit 1
 }
 start_core() {
+    local log=ci-logs/tun-lifecycle-$2.log port
+    for port in "$api_port" "$http_port" "$socks_port"; do
+        if sudo lsof -nP -iTCP:"$port" -sTCP:LISTEN > "$work/listeners.txt"; then
+            echo "FAIL lifecycle port $port is already in use"
+            cat "$work/listeners.txt"
+            exit 1
+        fi
+    done
     if [[ $1 == true ]]; then
-        sudo "$core" run "$conf" > "ci-logs/tun-lifecycle-$2.log" 2>&1 &
+        sudo "$core" run "$conf" > "$log" 2>&1 &
     else
-        "$core" run "$conf" > "ci-logs/tun-lifecycle-$2.log" 2>&1 &
+        "$core" run "$conf" > "$log" 2>&1 &
     fi
     pid=$!
     # Independent rescue even if a client/test hangs while GitHub is routed via utun.
     (sleep 90; sudo kill -TERM "$pid" 2>/dev/null || true) & watchdog=$!
-    wait_ready
+    wait_ready "$pid" "$log"
     python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["enhanced_mode"] == (sys.argv[2] == "true")' "$work/status.json" "$1"
 }
 restart_mode() {
