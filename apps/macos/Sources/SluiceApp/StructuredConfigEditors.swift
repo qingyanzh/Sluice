@@ -126,7 +126,7 @@ struct StructuredConfigEditors: View {
                             }
                             .padding(.vertical, 9).padding(.horizontal, 8)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(selection == row.id ? DS.accent.opacity(0.10) : Color.clear,
+                            .background(selection == row.id ? DS.accentFill : Color.clear,
                                         in: RoundedRectangle(cornerRadius: DS.smallRadius))
                             .contentShape(Rectangle())
                             .onTapGesture(count: 2) { selection = row.id; edit(row.id) }
@@ -206,7 +206,7 @@ struct RuleConfigSheet: View {
                         .font(DS.small).foregroundStyle(DS.ink2)
                 }
             }.textFieldStyle(.roundedBorder)
-            if let error { Text(error).font(DS.small).foregroundStyle(DS.fail) }
+            if let error { ErrorText(raw: error) }
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -240,6 +240,7 @@ func subscriptionSourceLabel(_ source: String) -> String {
 /// Independent sources and legacy `policy-path` groups in the current draft.
 /// it is filtered. Deleting one edits the draft; nothing is written until it is saved.
 struct SubscriptionsEditor: View {
+    @EnvironmentObject var core: Core
     @Binding var text: String
     @State private var pendingDelete: NodeRecord?
 
@@ -257,11 +258,12 @@ struct SubscriptionsEditor: View {
                 Text("订阅").font(DS.heading)
                 Text("\(subscriptions.count)").font(DS.small.monospacedDigit()).foregroundStyle(DS.ink3)
                 Spacer()
-                Text("添加订阅请在节点页操作").font(DS.small).foregroundStyle(DS.ink3)
+                Button("在订阅页管理") { core.requestedPane = .subscriptions }.buttonStyle(.link).font(DS.small)
             }
             Text("删除会同步到文本草稿；完成后点击下方的保存按钮").font(DS.small).foregroundStyle(DS.ink2)
             if subscriptions.isEmpty {
-                EmptyState(icon: "link", title: "还没有订阅", detail: "在节点页添加订阅，再到策略组中勾选需要的来源")
+                EmptyState(icon: "link", title: "还没有订阅", detail: "在订阅页添加订阅，再到策略页编写策略组",
+                           action: ("前往订阅", { core.requestedPane = .subscriptions }))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -299,6 +301,6 @@ struct SubscriptionsEditor: View {
                 .glassButton()
         }
         .padding(12)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+        .background(DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
     }
 }

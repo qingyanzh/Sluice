@@ -101,6 +101,9 @@ struct NodesView: View {
                 SearchField(prompt: "名称、协议或服务器", text: $search)
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, 12)
+            GuideStrip(icon: "info.circle", text: "节点来自订阅或手动添加，加入策略组后才会承载流量；无需启动代理也能测速",
+                       action: ("编写策略组", { core.requestedPane = .policy }))
+                .padding(.horizontal, DS.gutter).padding(.bottom, 12)
             if core.loadingCatalog { ProgressView("正在读取订阅节点…").font(DS.small).padding(.bottom, 8) }
             if let loadError = loadError ?? core.catalogError {
                 ErrorText(raw: loadError).padding(.horizontal, DS.gutter).padding(.bottom, 12)
@@ -204,13 +207,13 @@ struct NodeBrowserRow: View {
             Spacer(minLength: 8)
             // Protocol and latency sit in fixed columns so badges line up down the list.
             Text(node.kind).font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1)
-                .padding(.horizontal, 8).frame(height: 22).background(Color.primary.opacity(0.045), in: Capsule())
+                .padding(.horizontal, 8).frame(height: 22).background(DS.well, in: Capsule())
                 .frame(width: 96, alignment: .trailing)
             if !node.isSubscription { LatencyBadge(latency: latency, testing: testing) }
             Image(systemName: "chevron.right").font(DS.caption).foregroundStyle(DS.ink3)
         }
         .padding(.horizontal, DS.cardPadding).padding(.vertical, 14)
-        .background(hovering ? Color.primary.opacity(0.035) : .clear)
+        .background(hovering ? DS.well : .clear)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .accessibilityElement(children: .combine)
@@ -252,14 +255,14 @@ struct NodeDetailSheet: View {
                     if let outbound = result.outbound { row("实际出站", outbound) }
                     if let status = result.status { row("HTTP 状态", String(status)) }
                     if let error = result.error {
-                        Text(error).font(DS.small).foregroundStyle(DS.fail).textSelection(.enabled)
+                        ErrorText(raw: error)
                     }
                 }
             }
             .padding(DS.cardPadding).glass()
             Text(node.canDelete ? "连接参数可在配置页编辑，切换节点请前往策略页" : "此节点由订阅「\(node.transport)」管理，随订阅自动更新")
                 .font(DS.small).foregroundStyle(DS.ink2)
-            if let error { Text(error).font(DS.small).foregroundStyle(DS.fail).textSelection(.enabled) }
+            if let error { ErrorText(raw: error) }
             HStack {
                 if node.canDelete {
                     Button(role: .destructive) { confirmDelete = true } label: { Label("删除", systemImage: "trash") }

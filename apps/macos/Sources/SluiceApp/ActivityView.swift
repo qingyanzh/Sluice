@@ -211,7 +211,7 @@ struct ActivityView: View {
             GeometryReader { geometry in
                 let fraction = up + down > 0 ? up / (up + down) : 0
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.06))
+                    Capsule().fill(DS.wellStrong)
                     if up + down > 0 {
                         Capsule().fill(DS.accent.opacity(0.7))
                         Capsule().fill(Color.primary.opacity(0.24)).frame(width: geometry.size.width * fraction)
@@ -270,7 +270,7 @@ struct ActivityView: View {
                             }
                             GeometryReader { geometry in
                                 ZStack(alignment: .leading) {
-                                    Capsule().fill(Color.primary.opacity(0.05))
+                                    Capsule().fill(DS.well)
                                     Capsule().fill(DS.accent.opacity(0.55))
                                         .frame(width: max(3, geometry.size.width * CGFloat(count) / CGFloat(highest)))
                                 }
@@ -288,7 +288,7 @@ struct ActivityView: View {
             Text(title).font(DS.small.weight(topBy == value ? .semibold : .regular))
                 .foregroundStyle(topBy == value ? DS.accent : DS.ink3)
                 .padding(.horizontal, 8).frame(height: 22)
-                .background(topBy == value ? DS.accent.opacity(0.10) : .clear,
+                .background(topBy == value ? DS.accentFill : .clear,
                             in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -341,7 +341,7 @@ struct TrafficCard: View {
                 ForEach(history) { value in
                     let position = value.time
                     AreaMark(x: .value("采样", position), y: .value("速率", value.down), series: .value("方向", "下载"))
-                        .foregroundStyle(DS.accent.opacity(0.08)).interpolationMethod(.monotone)
+                        .foregroundStyle(DS.accentWash).interpolationMethod(.monotone)
                     LineMark(x: .value("采样", position), y: .value("速率", value.down), series: .value("方向", "下载"))
                         .foregroundStyle(DS.accent).lineStyle(StrokeStyle(lineWidth: 1.5)).interpolationMethod(.monotone)
                     LineMark(x: .value("采样", position), y: .value("速率", value.up), series: .value("方向", "上传"))
@@ -354,7 +354,7 @@ struct TrafficCard: View {
                 VStack(spacing: 0) {
                     ForEach(0..<3) { _ in
                         Spacer()
-                        Rectangle().fill(Color.primary.opacity(0.045)).frame(height: 0.5)
+                        Rectangle().fill(DS.well).frame(height: 0.5)
                     }
                 }
             }

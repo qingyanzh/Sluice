@@ -129,6 +129,10 @@ struct SubscriptionsView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: DS.gap) {
+                    if !sources.isEmpty {
+                        GuideStrip(icon: "info.circle", text: "订阅只提供节点，并按设定间隔自动更新；要决定流量使用哪些节点，请在「策略」页编写策略组",
+                                   action: ("前往策略", { core.requestedPane = .policy }))
+                    }
                     if let error { ErrorText(raw: error).transition(.opacity) }
                     ForEach(core.subscriptionNotices) { notice in
                         SubscriptionNoticeBanner(notice: notice) { withAnimation(DS.spring) { core.dismissSubscriptionNotice(notice) } }
@@ -207,7 +211,7 @@ private struct SubscriptionNoticeBanner: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(DS.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+        .background(DS.accentWash, in: RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(DS.accent.opacity(0.25), lineWidth: 0.5))
     }
 
@@ -229,29 +233,63 @@ private struct SubscriptionCard: View {
     let delete: () -> Void
     @State private var hovering = false
 
+    /// One state, one colour: failure red, attention orange, healthy green.
+    private var health: (String, Color) {
+        guard let status = source.status else { return ("等待更新", DS.off) }
+        if status.lastError != nil { return ("更新失败", DS.fail) }
+        if let date = status.expiryDate, date < Date() { return ("已过期", DS.fail) }
+        if let fraction = status.usedFraction, fraction >= 1 { return ("流量已用完", DS.fail) }
+        if let date = status.expiryDate, date.timeIntervalSinceNow < 7 * 86400 { return ("即将到期", DS.warn) }
+        if let fraction = status.usedFraction, fraction > 0.9 { return ("流量即将用完", DS.warn) }
+        return ("正常", DS.ok)
+    }
+
     var body: some View {
         let status = source.status
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 24) {
-                identity.frame(width: 220, alignment: .leading)
-                usage(status).frame(maxWidth: .infinity)
-                HStack(spacing: 20) {
-                    metric("节点", status.map { "\($0.nodeCount)" } ?? "—")
-                    metric("自动更新", humanInterval(source.intervalSeconds))
-                    metric("上次更新", status?.lastFetchDate.map(SubscriptionFormat.relative) ?? "—")
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                IconTile(symbol: "link", on: true, size: 32, tone: health.1 == DS.ok ? DS.accent : health.1)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text(source.name).font(DS.heading).lineLimit(1)
+                        StatusBadge(text: health.0, tone: health.1)
+                    }
+                    Text(source.host).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
                 }
-                .frame(width: 280)
+                Spacer(minLength: 12)
+                Button("编辑", action: edit).glassButton().disabled(source.isLegacy)
+                    .help(source.isLegacy ? "旧式订阅请在配置文本中修改" : "修改地址、过滤条件和更新间隔")
                 menu
             }
-            if let error = status?.lastError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(DS.small).foregroundStyle(DS.warn).lineLimit(2).help(error)
+            Grid(horizontalSpacing: 12) { GridRow {
+                trafficTile(status).gridCellColumns(1)
+                tile("到期时间", value: status?.expiryDate.map { $0.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits)) } ?? "未提供",
+                     note: status?.expiryDate.map(daysLeft) ?? "服务商未提供到期信息",
+                     tone: expiryTone(status?.expiryDate))
+                tile("节点", value: status.map { "\($0.nodeCount) 个" } ?? "—",
+                     note: source.filter.isEmpty ? "未设置过滤" : "按「\(source.filter)」过滤")
+                tile("自动更新", value: "每 \(humanInterval(source.intervalSeconds))",
+                     note: status?.lastFetchDate.map { "上次 " + SubscriptionFormat.relative($0) } ?? "尚未下载")
+            } }
+            if let raw = status?.lastError {
+                let error = FriendlyError.explain(raw)
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DS.fail)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(error.headline).font(DS.small.weight(.medium))
+                        Text((error.hint ?? "") + (status?.nodeCount ?? 0 > 0 ? "；当前继续使用上次下载的节点" : ""))
+                            .font(DS.small).foregroundStyle(DS.ink2)
+                    }
+                    Spacer()
+                    Button("复制详情") { copyText(raw) }.buttonStyle(.link).font(DS.small)
+                }
+                .padding(10)
+                .background(DS.fail.opacity(0.06), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
             }
         }
         .padding(DS.cardPadding)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .glass(highlighted: hovering)
-        .scaleEffect(hovering ? 1.005 : 1)
         .animation(DS.spring, value: hovering)
         .onHover { hovering = $0 }
         .contextMenu {
@@ -261,62 +299,51 @@ private struct SubscriptionCard: View {
         }
     }
 
-    private var identity: some View {
-        HStack(spacing: 12) {
-            IconTile(symbol: "link", on: source.status?.lastError == nil, size: 32)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(source.name).font(DS.heading).lineLimit(1)
-                Text(source.host).font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
-            }
-        }
-    }
-
     private var menu: some View {
         Menu {
-            Button("编辑…", action: edit).disabled(source.isLegacy)
             Button("复制订阅地址") { copyText(source.url) }
             Divider()
             Button("删除订阅", role: .destructive, action: delete)
-        } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
+        } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("更多操作")
     }
 
-    @ViewBuilder private func usage(_ status: SubscriptionStatus?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("流量").font(DS.caption).foregroundStyle(DS.ink2)
-                Spacer()
-                if let used = status?.used, let total = status?.total, total > 0 {
-                    Text("\(SubscriptionFormat.bytes(used)) / \(SubscriptionFormat.bytes(total))").font(DS.small.monospacedDigit())
-                } else if let used = status?.used {
-                    Text("已用 \(SubscriptionFormat.bytes(used))").font(DS.small.monospacedDigit())
-                } else {
-                    Text("未提供").font(DS.small).foregroundStyle(DS.ink3)
-                }
-            }
-            ProgressView(value: status?.usedFraction ?? 0)
-                .progressViewStyle(.linear)
-                .tint((status?.usedFraction ?? 0) > 0.9 ? DS.fail : (status?.usedFraction ?? 0) > 0.75 ? DS.warn : DS.accent)
-                .opacity(status?.usedFraction == nil ? 0.35 : 1)
-            HStack(alignment: .firstTextBaseline) {
-                Text("到期").font(DS.caption).foregroundStyle(DS.ink2)
-                Spacer()
-                if let date = status?.expiryDate {
-                    let expired = date < Date()
-                    Text(SubscriptionFormat.expiry(date)).font(DS.small.monospacedDigit())
-                        .foregroundStyle(expired ? DS.fail : date.timeIntervalSinceNow < 7 * 86400 ? DS.warn : .primary)
-                } else {
-                    Text("未提供").font(DS.small).foregroundStyle(DS.ink3)
-                }
-            }
+    private func daysLeft(_ date: Date) -> String {
+        let days = Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: Calendar.current.startOfDay(for: date)).day ?? 0
+        return days < 0 ? "已过期 \(-days) 天" : days == 0 ? "今天到期" : "剩余 \(days) 天"
+    }
+
+    private func expiryTone(_ date: Date?) -> Color {
+        guard let date else { return .primary }
+        return date < Date() ? DS.fail : date.timeIntervalSinceNow < 7 * 86400 ? DS.warn : .primary
+    }
+
+    private func trafficTile(_ status: SubscriptionStatus?) -> some View {
+        let fraction = status?.usedFraction
+        let tone: Color = (fraction ?? 0) > 0.9 ? DS.fail : (fraction ?? 0) > 0.75 ? DS.warn : DS.accent
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("已用流量").font(DS.caption).foregroundStyle(DS.ink3)
+            Text(status?.used.map(SubscriptionFormat.bytes) ?? "未提供").font(DS.heading.monospacedDigit()).lineLimit(1)
+            ProgressView(value: fraction ?? 0).progressViewStyle(.linear).tint(tone).opacity(fraction == nil ? 0.3 : 1)
+            Text(status?.total.flatMap { $0 > 0 ? "共 \(SubscriptionFormat.bytes($0)) · \(Int(((fraction ?? 0) * 100).rounded()))%" : nil } ?? "服务商未提供总量")
+                .font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1)
         }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+        .background(DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
     }
 
-    private func metric(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func tile(_ title: String, value: String, note: String, tone: Color = .primary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             Text(title).font(DS.caption).foregroundStyle(DS.ink3)
-            Text(value).font(DS.label.monospacedDigit()).lineLimit(1)
-        }.frame(maxWidth: .infinity, alignment: .leading)
+            Text(value).font(DS.heading.monospacedDigit()).foregroundStyle(tone).lineLimit(1).minimumScaleFactor(0.85)
+            Spacer(minLength: 0)
+            Text(note).font(DS.caption).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.tail)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+        .background(DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
     }
 }
 
@@ -409,5 +436,22 @@ extension ConfigText {
             return line
         }
         return found ? lines.joined(separator: "\n") : nil
+    }
+}
+
+/// One line of orientation at the top of a page: what this page is for and where to go next.
+struct GuideStrip: View {
+    let icon: String
+    let text: String
+    var action: (String, () -> Void)? = nil
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(DS.accent)
+            Text(text).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            if let action { Button(action.0, action: action.1).buttonStyle(.link).font(DS.small.weight(.medium)) }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(DS.accentWash, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
     }
 }

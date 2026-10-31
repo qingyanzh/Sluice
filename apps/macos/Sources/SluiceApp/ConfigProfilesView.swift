@@ -88,7 +88,7 @@ struct ConfigProfileList: View {
                             .accessibilityLabel("\(name) 的操作")
                         }
                         .padding(.horizontal, 10).padding(.vertical, 12)
-                        .background(active ? DS.accent.opacity(0.08) : .clear,
+                        .background(active ? DS.accentWash : .clear,
                                     in: RoundedRectangle(cornerRadius: DS.smallRadius))
                     }
                 }

@@ -179,7 +179,7 @@ struct GroupConfigSheet: View {
             }
         }
         .padding(16)
-        .background(Color.primary.opacity(0.025))
+        .background(DS.well)
     }
 
     private func dynamicToggle(_ name: String) -> some View {
@@ -223,7 +223,7 @@ struct GroupConfigSheet: View {
                     }
                 }
                 .padding(10)
-                .background(DS.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+                .background(DS.accentWash, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
                 .transition(.opacity)
             }
             List {
@@ -355,7 +355,7 @@ private struct FlowChips: View {
                     }
                     .padding(.horizontal, 8).frame(height: 22)
                     .foregroundStyle(DS.accent)
-                    .background(DS.accent.opacity(0.12), in: Capsule())
+                    .background(DS.accentFill, in: Capsule())
                 }
             }
         }

@@ -144,7 +144,7 @@ struct Sidebar: View {
                         .shadow(color: .black.opacity(0.035), radius: 2, y: 1)
                         .matchedGeometryEffect(id: "selection", in: ns)
                 } else if hovered == p {
-                    RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).fill(Color.primary.opacity(0.035))
+                    RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).fill(DS.well)
                 }
             }
             .contentShape(Rectangle())
@@ -209,7 +209,7 @@ struct MainView: View {
                 }
                 if let other = core.otherSystemProxy {
                     Text("系统代理：\(other)")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(DS.small).foregroundStyle(DS.ink2)
                         .padding(.horizontal, DS.gutter).padding(.top, 8)
                 }
                 if (core.systemProxyOn || core.settingSystemProxy) && core.state != .running && core.state != .starting {
@@ -243,9 +243,9 @@ struct MainView: View {
                 .id(pane)
                 .frame(maxWidth: DS.maxContentWidth)
                 .frame(maxWidth: .infinity)
-                .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 8)), removal: .opacity))
+                .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 6)), removal: .identity))
             }
-            .animation(.smooth(duration: 0.25), value: pane)
+            .animation(.smooth(duration: 0.2), value: pane)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(.top, 40)
             .background(Backdrop())
@@ -355,7 +355,7 @@ struct IconTile: View {
     var tone: Color = DS.accent
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-            .fill(on ? AnyShapeStyle(tone) : AnyShapeStyle(Color.primary.opacity(0.075)))
+            .fill(on ? AnyShapeStyle(tone) : AnyShapeStyle(DS.wellStrong))
             .overlay {
                 Image(systemName: symbol)
                     .symbolVariant(on ? .fill : .none)
@@ -429,7 +429,7 @@ struct EnhancedModePill: View {
         TogglePill(title: "增强模式", icon: "shield.lefthalf.filled", on: core.summary.enhancedMode && (core.privileged || !core.isActive)) {
             busy = true
             Task {
-                if let err = await core.setEnhancedMode(!core.summary.enhancedMode) { core.lastActionError = "增强模式: \(err)" }
+                if let err = await core.setEnhancedMode(!core.summary.enhancedMode) { core.lastActionError = "增强模式没有切换\n\(err)" }
                 busy = false
             }
         }
@@ -491,20 +491,28 @@ struct ErrorBanner: View {
     let message: String
     let dismiss: () -> Void
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        let error = FriendlyError.explain(message)
+        HStack(alignment: .top, spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 28, height: 28)
-                .background(Color.red.gradient, in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
-            Text(message).font(DS.label).textSelection(.enabled).lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(DS.fail.gradient, in: RoundedRectangle(cornerRadius: 8.4, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(error.headline).font(DS.label.weight(.medium))
+                if let hint = error.hint { Text(hint).font(DS.small).foregroundStyle(DS.ink2) }
+            }
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .help(error.detail ?? "")
+            if let detail = error.detail {
+                Button("复制详情") { copyText(detail) }.buttonStyle(.link).font(DS.small)
+            }
             Button(action: dismiss) { Image(systemName: "xmark") }
                 .buttonStyle(RoundIconStyle())
                 .accessibilityLabel("关闭")
         }
         .padding(10)
-        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5))
+        .background(DS.fail.opacity(0.08), in: RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(DS.fail.opacity(0.25), lineWidth: 0.5))
         .padding(.horizontal, DS.gutter).padding(.top, 8)
         .transition(.move(edge: .top).combined(with: .opacity))
     }
@@ -624,6 +632,12 @@ enum DS {
             : NSColor(red: 0.72, green: 0.17, blue: 0.20, alpha: 1)
     })
     static let off = ink2
+    /// Inset fills: one quiet well for tiles and fields, one stronger for hover and pressed.
+    static let well = Color.primary.opacity(0.04)
+    static let wellStrong = Color.primary.opacity(0.07)
+    /// Accent backgrounds: a wash behind guidance and selection, a fill behind icons and chips.
+    static let accentWash = accent.opacity(0.07)
+    static let accentFill = accent.opacity(0.12)
     /// Proxy traffic and informational accents: a calm indigo, distinct from the jade action colour
     /// and from green (direct / working).
     static let info = Color(nsColor: NSColor(name: nil) { a in
@@ -739,7 +753,7 @@ struct GlassSegmented<T: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
+        .background(DS.wellStrong, in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
     }
 }
 
@@ -753,7 +767,7 @@ extension View {
     func glass(radius: CGFloat = DS.radius, highlighted: Bool = false) -> some View {
         background(DS.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(highlighted ? DS.accent.opacity(0.8) : Color.primary.opacity(0.08),
+                .strokeBorder(highlighted ? DS.accent.opacity(0.8) : DS.wellStrong,
                               lineWidth: highlighted ? 1.5 : 0.5))
             .shadow(color: .black.opacity(0.025), radius: 3, y: 1)
     }
@@ -848,7 +862,7 @@ struct SecondaryCapsuleStyle: ButtonStyle {
             .foregroundStyle(Color.primary)
             .padding(.horizontal, large ? 18 : 14).padding(.vertical, 4)
             .frame(minHeight: large ? DS.largeControlHeight : DS.controlHeight)
-            .background(hovering && enabled ? Color.primary.opacity(0.06) : DS.surface.opacity(0.9),
+            .background(hovering && enabled ? DS.wellStrong : DS.surface.opacity(0.9),
                         in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous).strokeBorder(DS.stroke, lineWidth: 1))
             .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.55)
@@ -1035,7 +1049,7 @@ struct OverviewView: View {
                                     isOn: Binding(get: { core.summary.enhancedMode }, set: { on in
                                         enhancedBusy = true
                                         Task {
-                                            if let err = await core.setEnhancedMode(on) { core.lastActionError = "增强模式: \(err)" }
+                                            if let err = await core.setEnhancedMode(on) { core.lastActionError = "增强模式没有切换\n\(err)" }
                                             enhancedBusy = false
                                         }
                                     }),
@@ -1262,7 +1276,7 @@ struct GroupSection: View {
                         if let source = PolicyOrganization.importedSource(of: group.group) {
                             Text(source).font(DS.caption).foregroundStyle(DS.ink2)
                                 .padding(.horizontal, 7).frame(height: 18)
-                                .background(Color.primary.opacity(0.06), in: Capsule())
+                                .background(DS.wellStrong, in: Capsule())
                         }
                     }
                     Text(group.isSelectable ? "\(Self.kindLabel(group.type)) · \(!interactive ? "只读预览" : core.state == .running ? "点击选项切换" : "点击选项测速")" : "\(Self.kindLabel(group.type)) · 当前：\(subscriptionShortLabel(group.selected))")
@@ -1344,7 +1358,7 @@ struct OptionChip: View {
             LatencyBadge(latency: option.latencyMs, testing: interactive && (core.testingGroups.contains(group.group) || core.testingNodes.contains(option.name)))
         }
         .padding(.horizontal, 12).frame(height: 36)
-        .background(chosen ? DS.accent.opacity(0.08) : hovering && group.isSelectable ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035),
+        .background(chosen ? DS.accentWash : hovering && group.isSelectable ? DS.wellStrong : DS.well,
                     in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
         .overlay {
             if chosen {
@@ -1401,8 +1415,8 @@ struct SheetField: View {
             .textFieldStyle(.plain)
             .font(DS.label)
             .padding(.horizontal, 12).padding(.vertical, 9)
-            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .background(DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(DS.wellStrong, lineWidth: 0.5))
         }
     }
 }
@@ -1664,7 +1678,7 @@ struct RequestRow: View {
             .padding(.horizontal, 12).padding(.vertical, 12)
             .background {
                 RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous)
-                    .fill(selected ? DS.accent.opacity(0.08) : hovering ? Color.primary.opacity(0.035) : .clear)
+                    .fill(selected ? DS.accentWash : hovering ? DS.well : .clear)
             }
             .overlay {
                 if selected {
@@ -1724,11 +1738,15 @@ struct ErrorText: View {
     var example: String?
     @State private var open = false
     var body: some View {
-        let parts = raw.split(separator: "\n", maxSplits: 1).map(String.init)
+        let error = FriendlyError.explain(raw)
         VStack(alignment: .leading, spacing: 6) {
-            Label(parts.first ?? raw, systemImage: "exclamationmark.triangle.fill")
+            Label(error.headline, systemImage: "exclamationmark.triangle.fill")
                 .font(DS.small.weight(.medium)).foregroundStyle(DS.fail)
                 .fixedSize(horizontal: false, vertical: true)
+            if let hint = error.hint {
+                Text(hint).font(DS.small).foregroundStyle(DS.ink2).padding(.leading, 22)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let example, raw.contains("格式不正确") {
                 HStack(spacing: 8) {
                     Text(example).font(DS.code).textSelection(.enabled)
@@ -1741,14 +1759,14 @@ struct ErrorText: View {
                         .buttonStyle(RoundIconStyle()).help("复制示例").accessibilityLabel("复制示例")
                 }
                 .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(DS.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            if parts.count > 1 {
+            if let detail = error.detail, detail != error.headline {
                 DisclosureGroup("详细信息", isExpanded: $open) {
-                    Text(parts[1]).font(DS.code).foregroundStyle(DS.ink2)
+                    Text(detail).font(DS.code).foregroundStyle(DS.ink2)
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .font(DS.caption).foregroundStyle(DS.ink2)
+                .font(DS.caption).foregroundStyle(DS.ink2).padding(.leading, 22)
             }
         }
     }
@@ -1766,7 +1784,7 @@ struct EmptyState: View {
     var body: some View {
         VStack(spacing: 8) {
             ZStack {
-                Circle().fill(Color.primary.opacity(0.04)).frame(width: 56, height: 56)
+                Circle().fill(DS.well).frame(width: 56, height: 56)
                 Image(systemName: icon).font(.system(size: 22, weight: .regular)).foregroundStyle(DS.ink3)
             }
             .padding(.bottom, 6)
@@ -1838,7 +1856,7 @@ struct RequestDetail: View {
                 }
             }
             .padding(.horizontal, 12)
-            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+            .background(DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
         }
     }
 }
@@ -1938,7 +1956,7 @@ struct RuleView: View {
             OutboundTag(name: rule.policy)
         }
         .padding(.horizontal, 16).padding(.vertical, 11)
-        .background(hit ? DS.accent.opacity(0.08) : .clear)
+        .background(hit ? DS.accentWash : .clear)
 
         .animation(DS.spring, value: hit)
     }
@@ -2173,6 +2191,62 @@ struct LogsView: View {
 
 // MARK: profile
 
+/// The config's structure as the path traffic takes: subscriptions supply nodes,
+/// groups choose among them, rules hand traffic to groups, FINAL catches the rest.
+/// Each step opens its editor below; 文本 is the whole file.
+struct ConfigFlow: View {
+    let document: StructuredConfig
+    @Binding var selection: String
+
+    var body: some View {
+        let rules = document.rules.filter { !$0.value.isFinal }.count
+        let fallback = document.rules.first { $0.value.isFinal }?.value.policy
+        HStack(spacing: 6) {
+            step("订阅", icon: "link", value: "\(document.subscriptionNames.count) 个", note: "提供节点", tab: "订阅")
+            arrow
+            step("策略组", icon: "square.stack.3d.up", value: "\(document.groups.count) 个", note: "挑选节点", tab: "策略组")
+            arrow
+            step("规则", icon: "list.bullet", value: "\(rules) 条", note: "分配流量", tab: "规则")
+            arrow
+            step("默认出口", icon: "flag.checkered", value: fallback.map(subscriptionShortLabel) ?? "未设置", note: "未命中规则时", tab: "规则")
+            Spacer(minLength: 12)
+            Button { withAnimation(DS.spring) { selection = "文本" } } label: {
+                Label("文本", systemImage: "doc.plaintext")
+            }
+            .glassButton(prominent: false)
+            .overlay(RoundedRectangle(cornerRadius: DS.controlRadius).strokeBorder(selection == "文本" ? DS.accent : .clear, lineWidth: 1.5))
+            .help("直接编辑整个配置文件")
+        }
+    }
+
+    private var arrow: some View {
+        Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(DS.ink3)
+    }
+
+    private func step(_ title: String, icon: String, value: String, note: String, tab: String) -> some View {
+        let on = selection == tab && (title != "默认出口")
+        return Button { withAnimation(DS.spring) { selection = tab } } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(on ? .white : DS.accent)
+                    .frame(width: 28, height: 28)
+                    .background(on ? DS.accent : DS.accentFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(DS.caption).foregroundStyle(DS.ink2)
+                    Text(value).font(DS.label.weight(.semibold).monospacedDigit()).lineLimit(1).truncationMode(.middle)
+                }
+            }
+            .padding(.horizontal, 10).frame(height: 44)
+            .frame(minWidth: 118, alignment: .leading)
+            .background(on ? DS.accentWash : DS.well, in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous).strokeBorder(on ? DS.accent.opacity(0.4) : .clear, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(title)：\(note)")
+    }
+}
+
 struct ConfigView: View {
     @EnvironmentObject var core: Core
     @ObservedObject var draft: ConfigDraft
@@ -2186,8 +2260,8 @@ struct ConfigView: View {
         VStack(spacing: 0) {
             let name = URL(fileURLWithPath: core.configPath).lastPathComponent
             PaneHeader(title: "配置", subtitle: draft.text == draft.saved ? "\(name) · 已保存" : "\(name) · 有未保存的修改") {
-                Button("导入独立配置…") { importingProfile = true }.glassButton().disabled(draft.busy)
-                Button("从当前新建…") { profileEdit = .create }.glassButton().disabled(draft.busy)
+                Button("新建配置…") { profileEdit = .create }.glassButton().disabled(draft.busy)
+                    .help("复制当前配置为一份新配置，便于分场景切换")
                 Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: core.configPath)]) }.glassButton()
             }
             if draft.changedOnDisk {
@@ -2196,14 +2270,8 @@ struct ConfigView: View {
                     Button("载入磁盘版本") { confirmRestore = true }.glassButton(prominent: true)
                 }.padding(.horizontal, DS.gutter).padding(.bottom, 12)
             }
-            HStack {
-                GlassSegmented(options: [("文本", "文本", "doc.plaintext"), ("规则", "规则", "list.bullet"),
-                                         ("策略组", "策略组", "square.stack.3d.up"), ("订阅", "订阅", "link")],
-                               selection: $draft.editorMode)
-                    .frame(width: 460)
-                Spacer()
-            }
-            .padding(.horizontal, DS.gutter).padding(.bottom, 14)
+            ConfigFlow(document: StructuredConfig(draft.text), selection: $draft.editorMode)
+                .padding(.horizontal, DS.gutter).padding(.bottom, 14)
             HStack(alignment: .top, spacing: DS.gap) {
                 ConfigProfileList(busy: draft.busy, switchProfile: requestSwitch,
                                   edit: { profileEdit = $0 }, delete: { pendingDelete = $0 })
@@ -2405,7 +2473,7 @@ final class LineNumberRuler: NSRulerView {
             let label = "\(marker.number)" as NSString
             var a = attrs
             if marker.number == errorLine {
-                a[.foregroundColor] = NSColor.systemRed
+                a[.foregroundColor] = NSColor(DS.fail)
                 a[.font] = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .bold)
             }
             let size = label.size(withAttributes: a)
@@ -2479,7 +2547,7 @@ struct ConfigEditor: NSViewRepresentable {
             }
             guard n == line, location <= s.length else { return }
             let range = s.lineRange(for: NSRange(location: location, length: 0))
-            lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemRed.withAlphaComponent(0.16), forCharacterRange: range)
+            lm.addTemporaryAttribute(.backgroundColor, value: NSColor(DS.fail).withAlphaComponent(0.16), forCharacterRange: range)
             tv.setSelectedRange(NSRange(location: range.location, length: 0))
             tv.scrollRangeToVisible(range)
         }

@@ -3,7 +3,7 @@ import Foundation
 /// Owned by the window, so navigating away never discards an editor draft.
 @MainActor
 final class ConfigDraft: ObservableObject {
-    @Published var editorMode = E2ELaunch.current?.editorMode ?? "文本"
+    @Published var editorMode = E2ELaunch.current?.editorMode ?? "订阅"
     @Published var text = ""
     @Published var saved = ""
     @Published var path = ""

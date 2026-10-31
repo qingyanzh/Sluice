@@ -23,7 +23,7 @@ struct ActiveRequestsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if let error = core.activeConnectionsError {
-                Text(error).font(DS.small).foregroundStyle(DS.warn)
+                Text(FriendlyError.explain(error).headline).font(DS.small).foregroundStyle(DS.warn).help(error)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(alignment: .top, spacing: DS.gap) {
@@ -56,7 +56,7 @@ struct ActiveRequestsView: View {
                                                detail: "启动后可查看活动 TCP 连接", action: ("启动 Sluice", { core.requestStart() }))
                                 } else if !core.activeConnectionsLoaded {
                                     if let error = core.activeConnectionsError {
-                                        EmptyState(icon: "exclamationmark.triangle", title: "无法读取活动连接", detail: error)
+                                        EmptyState(icon: "exclamationmark.triangle", title: "无法读取活动连接", detail: FriendlyError.explain(error).hint ?? "请稍后重试")
                                     } else {
                                         ProgressView("正在加载活动连接…").font(DS.small)
                                     }
@@ -209,7 +209,7 @@ struct ActiveConnectionRow: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? DS.accent.opacity(0.08) : hovering ? Color.primary.opacity(0.035) : .clear,
+            .background(selected ? DS.accentWash : hovering ? DS.well : .clear,
                         in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
             .overlay {
                 if selected {

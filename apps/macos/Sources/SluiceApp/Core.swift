@@ -1561,7 +1561,7 @@ final class Core: ObservableObject {
     }
 
     /// The line a `sluice check` message points at ("line 17: …"), if any.
-    static func errorLine(in message: String) -> Int? {
+    nonisolated static func errorLine(in message: String) -> Int? {
         guard let r = message.range(of: #"line (\d+)"#, options: .regularExpression) else { return nil }
         return Int(message[r].dropFirst(5))
     }

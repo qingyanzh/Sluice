@@ -64,7 +64,7 @@ struct TrafficStatsView: View {
                     }
                     if let error = core.statsError {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(error).foregroundStyle(DS.fail)
+                            Text(FriendlyError.explain(error).headline).foregroundStyle(DS.fail).help(error)
                             Text("每 5 秒自动重试；已有数据保留至下次刷新成功")
                                 .foregroundStyle(DS.ink2)
                         }.font(DS.small)

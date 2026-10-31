@@ -247,7 +247,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         let dark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let dimmed = dimWhenNotProxying && !core.systemProxyOn && !core.summary.enhancedMode
-        let ink = (core.state.isFailed ? NSColor.systemRed : dark ? NSColor.white : NSColor.black)
+        let ink = (core.state.isFailed ? NSColor(DS.fail) : dark ? NSColor.white : NSColor.black)
             .withAlphaComponent(dimmed ? 0.55 : 1)
         let mode = OutboundMode(rawValue: core.mode) ?? .rule
         let mark: String = switch mode {
@@ -304,18 +304,19 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         if running, !state.groups.isEmpty {
+            menu.addItem(.sectionHeader(title: "策略组"))
             for group in state.groups {
                 let groupName = group.group
-                let options = submenu(in: menu, title: subscriptionNodeLabel(groupName))
-                rows.append(RightColumn(item: menu.items.last!, name: subscriptionNodeLabel(groupName), detail: subscriptionNodeLabel(group.selected),
+                let options = submenu(in: menu, title: subscriptionShortLabel(groupName))
+                rows.append(RightColumn(item: menu.items.last!, name: subscriptionShortLabel(groupName), detail: subscriptionShortLabel(group.selected),
                                         color: outboundColor(group.selected)))
                 var optionRows: [RightColumn] = []
                 for option in group.options {
                     let optionName = option.name
-                    let item = add(to: options, subscriptionNodeLabel(optionName), checked: group.selected == optionName) { [core, groupName, optionName] in
+                    let item = add(to: options, subscriptionShortLabel(optionName), checked: group.selected == optionName) { [core, groupName, optionName] in
                         core.select(group: groupName, option: optionName)
                     }
-                    optionRows.append(RightColumn(item: item, name: subscriptionNodeLabel(optionName), detail: latencyText(option.latencyMs),
+                    optionRows.append(RightColumn(item: item, name: subscriptionShortLabel(optionName), detail: latencyText(option.latencyMs),
                                                   color: NSColor(latencyStyle(option.latencyMs).1)))
                     item.image = latencyIcon(option.latencyMs)
                 }
@@ -325,8 +326,32 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
                 add(to: options, testing ? "测试中…" : "测试延迟", symbol: "speedometer", enabled: !testing) { [core, groupName] in core.test(group: groupName) }
             }
         } else {
-            menu.addItem(info(running ? "配置中没有可手动选择的策略组" : "启动内核后可切换策略组"))
+            menu.addItem(info(running ? "配置中没有策略组 · 可在「策略」页新建" : "启动内核后可在此切换节点"))
         }
+
+        menu.addItem(.separator())
+        let subscriptions = submenu(in: menu, title: core.subscriptionNotices.isEmpty ? "订阅" : "订阅 · 有更新")
+        if core.subscriptions.isEmpty {
+            subscriptions.addItem(info("尚未添加订阅"))
+        }
+        for status in core.subscriptions {
+            let used = status.used.map(SubscriptionFormat.bytes)
+            let total = status.total.flatMap { $0 > 0 ? SubscriptionFormat.bytes($0) : nil }
+            let traffic = used.map { u in total.map { "\(u) / \($0)" } ?? "已用 \(u)" } ?? "流量未提供"
+            let expiry = status.expiryDate.map { "到期 " + $0.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits)) }
+            subscriptions.addItem(.sectionHeader(title: status.group))
+            subscriptions.addItem(info([traffic, expiry, "\(status.nodeCount) 个节点"].compactMap { $0 }.joined(separator: " · ")))
+            if status.lastError != nil { subscriptions.addItem(info("上次更新失败：" + FriendlyError.explain(status.lastError ?? "").headline)) }
+        }
+        for notice in core.subscriptionNotices.prefix(3) {
+            subscriptions.addItem(info("「\(notice.source)」\(notice.summary)"))
+        }
+        subscriptions.addItem(.separator())
+        add(to: subscriptions, core.updatingSubscriptions ? "正在更新…" : "全部更新", symbol: "arrow.triangle.2.circlepath",
+            enabled: !core.subscriptions.isEmpty && !core.updatingSubscriptions) { [core] in
+            Task { if let error = await core.updateSubscriptions() { core.lastActionError = "订阅没有更新\n\(error)" } }
+        }
+        add(to: subscriptions, "管理订阅…", symbol: "link") { [showWindow] in showWindow(.subscriptions) }
 
         menu.addItem(.separator())
         let quality = add(to: menu, "网络质量", enabled: running && state.testingGroups.isEmpty) { [core] in core.testAll() }
@@ -350,7 +375,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             checked: state.systemProxyOn) { [core, on = !state.systemProxyOn] in core.setSystemProxy(on) }
         add(to: menu, "增强模式", key: "e", checked: state.enhancedMode) { [core, on = !state.enhancedMode] in
             Task {
-                if let error = await core.setEnhancedMode(on) { core.lastActionError = "增强模式：\(error)" }
+                if let error = await core.setEnhancedMode(on) { core.lastActionError = "增强模式没有切换\n\(error)" }
             }
         }
         add(to: menu, "复制终端代理命令", key: "c", enabled: terminalProxyCommand != nil) { [weak self] in
@@ -360,6 +385,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         let features = submenu(in: menu, title: "功能")
         add(to: features, "查看请求", symbol: "arrow.up.arrow.down.circle") { [showWindow] in showWindow(.requests) }
+        add(to: features, "编辑策略组", symbol: "square.stack.3d.up") { [showWindow] in showWindow(.policy) }
         add(to: features, "编辑当前配置", symbol: "curlybraces.square") { [showWindow] in showWindow(.profile) }
         features.addItem(.separator())
         add(to: features, state.isActive ? "停止内核" : "启动内核", symbol: state.isActive ? "stop.fill" : "play.fill",
@@ -403,7 +429,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             add(to: profiles, name, checked: name == state.profileName) { [core, name] in
                 Task {
                     do { try await core.switchProfile(to: name) }
-                    catch { core.lastActionError = "切换配置失败：\(error.localizedDescription)" }
+                    catch { core.lastActionError = "配置没有切换\n\(error.localizedDescription)" }
                 }
             }
         }

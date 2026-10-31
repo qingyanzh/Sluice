@@ -68,6 +68,8 @@ struct DNSView: View {
                 .width(min: 85, ideal: 100)
             }
             .scrollContentBackground(.hidden)
+            .alternatingRowBackgrounds(rows.isEmpty ? .disabled : .enabled)
+            .opacity(rows.isEmpty ? 0 : 1)
             .overlay {
                 if core.state != .running {
                     if core.state == .starting {
@@ -82,7 +84,7 @@ struct DNSView: View {
                 } else if rows.isEmpty {
                     if let loadError {
                         EmptyState(icon: "exclamationmark.triangle", title: "无法读取 DNS 缓存",
-                                   detail: loadError, action: ("重试", { requestID = UUID() }))
+                                   detail: FriendlyError.explain(loadError).hint ?? "请稍后重试", action: ("重试", { requestID = UUID() }))
                     } else if !query.isEmpty {
                         EmptyState(icon: "magnifyingglass", title: "没有匹配的缓存",
                                    detail: "试试其他域名、类型或解析结果", action: ("清除筛选", { search = "" }))

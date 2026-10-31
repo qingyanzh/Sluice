@@ -39,6 +39,8 @@ struct PolicyView: View {
         let unused = groups.filter { organization.usage(of: $0.group) == "未引用" }
         ScrollView {
             VStack(alignment: .leading, spacing: DS.gap) {
+                GuideStrip(icon: "info.circle", text: "规则把流量交给策略组，策略组决定使用哪个节点；未命中规则的流量走默认出口",
+                           action: ("查看规则", { core.requestedPane = .rule }))
                 executionCard(organization)
                 if let error = core.catalogError { ErrorText(raw: error) }
                 if core.loadingCatalog && core.policyGroups.isEmpty {
