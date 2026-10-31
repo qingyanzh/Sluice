@@ -24,6 +24,8 @@ pub struct SubscriptionInfo {
     pub metadata: crate::ruleset::FetchMetadata,
     pub last_error: Option<String>,
     pub node_count: usize,
+    /// Informational entries supplied as pseudo-nodes by the provider.
+    pub notices: Vec<String>,
 }
 
 fn b64(s: &str) -> Option<Vec<u8>> {
@@ -297,22 +299,43 @@ pub fn parse_link(line: &str) -> Result<(Option<String>, ProxyDef)> {
     }
 }
 
+/// Provider notices sometimes masquerade as working proxies.
+pub fn is_metadata(name: &str, server: &str, port: u16) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(
+        r"(?i)剩余流量|套餐到期|到期时间|流量重置|官网|重置|流量|有效期|到期|\b(?:traffic|expire|expiry|expiration|reset|website)\b|official\s*(?:site|website)|\d+(?:\.\d+)?\s*[KMGT]B\s*[|/丨]\s*\d+(?:\.\d+)?\s*[KMGT]B"
+    ).unwrap());
+    let server = server.trim_matches(['[', ']']).trim_end_matches('.');
+    port <= 1 || matches!(server, "127.0.0.1" | "0.0.0.0" | "1.1.1.1") || re.is_match(name)
+}
+
+fn node_is_metadata(name: &str, def: &ProxyDef) -> bool {
+    let line = def.to_line("node");
+    let parts: Vec<_> = line.split(',').map(str::trim).collect();
+    is_metadata(name, parts[1], parts[2].parse().unwrap_or(0))
+}
+
 /// Parses a subscription body; returns named nodes and a list of skip reasons.
 pub fn parse(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>) {
-    if crate::clash::looks_like(text) {
-        return crate::clash::parse(text).unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")]));
-    }
+    let (nodes, skipped, _) = parse_with_metadata(text);
+    (nodes, skipped)
+}
+
+fn parse_with_metadata(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>, Vec<String>) {
     let decoded;
     let text = text.trim_start_matches('\u{feff}');
-    let text = if text.contains("://") || text.contains(',') || text.trim_start().starts_with("#!MANAGED-CONFIG") || text.lines().any(|l| l.trim().eq_ignore_ascii_case("[Proxy]")) {
+    let text = if text.contains("://") || text.contains(',') || crate::clash::looks_like(text) || text.trim_start().starts_with("#!MANAGED-CONFIG") || text.lines().any(|l| l.trim().eq_ignore_ascii_case("[Proxy]")) {
         text
     } else {
         decoded = b64_str(text).unwrap_or_default();
         &decoded
     };
+    if crate::clash::looks_like(text) {
+        return crate::clash::parse_with_metadata(text).unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")], Vec::new()));
+    }
     let profile = text.starts_with("#!MANAGED-CONFIG") || text.lines().any(|l| l.trim().eq_ignore_ascii_case("[Proxy]"));
     let mut in_proxy = !profile;
-    let (mut nodes, mut skipped) = (Vec::new(), Vec::new());
+    let (mut nodes, mut skipped, mut notices) = (Vec::new(), Vec::new(), Vec::new());
     for line in text.lines().map(str::trim) {
         if profile && line.starts_with('[') && line.ends_with(']') {
             in_proxy = line.eq_ignore_ascii_case("[Proxy]");
@@ -329,6 +352,7 @@ pub fn parse(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>) {
             parse_proxy(line)
         };
         match parsed {
+            Ok((name, def)) if node_is_metadata(&name, &def) => notices.push(name),
             Ok(n) => nodes.push(n),
             Err(e) => {
                 warn!("subscription entry skipped: {e:#}");
@@ -336,7 +360,7 @@ pub fn parse(text: &str) -> (Vec<(String, ProxyDef)>, Vec<String>) {
             }
         }
     }
-    (nodes, skipped)
+    (nodes, skipped, notices)
 }
 
 /// Downloads each group's `policy-path`, adds its nodes as proxies and group options.
@@ -363,7 +387,7 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
                     (String::new(), Default::default(), Some(format!("{e:#}")))
                 }
             };
-            let (nodes, skipped) = parse(&text);
+            let (nodes, skipped, notices) = parse_with_metadata(&text);
             note = summarize(&skipped);
             let mut names = Vec::new();
             for (name, def) in nodes {
@@ -376,15 +400,15 @@ pub async fn expand(cfg: &mut Config, base: &Path, strict: bool) -> Result<()> {
                 cfg.proxies.push((unique.clone(), def));
                 names.push(unique);
             }
-            imported.insert(key.clone(), (names, metadata, last_error));
+            imported.insert(key.clone(), (names, metadata, last_error, notices));
         }
         let filter = cfg.groups[gi].policy_filter.as_deref().map(regex::Regex::new).transpose()?;
-        let (names, metadata, last_error) = &imported[&key];
+        let (names, metadata, last_error, notices) = &imported[&key];
         let picked: Vec<String> = names.iter().filter(|n| filter.as_ref().is_none_or(|re| re.is_match(n))).cloned().collect();
         let g = &mut cfg.groups[gi];
         info!("{}", expansion_summary(&g.name, picked.len(), &source, &note));
         cfg.subscriptions.push(SubscriptionInfo {
-            group: g.name.clone(), url: source.clone(), metadata: metadata.clone(), last_error: last_error.clone(), node_count: picked.len(),
+            group: g.name.clone(), url: source.clone(), metadata: metadata.clone(), last_error: last_error.clone(), node_count: picked.len(), notices: notices.clone(),
         });
         g.options.extend(picked);
         if g.options.is_empty() {
@@ -419,12 +443,68 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
 
+    const NOTICES: &[&str] = &[
+        "剩余流量：254.46 GB", "套餐到期：长期有效", "9.2 GB | 150 GB", "Expire Date：2026-12-22",
+        "官网", "重置", "Traffic: 254 GB", "Expire: never", "Placeholder", "Zero", "DNS", "Port one", "Port zero",
+    ];
+
+    fn pseudo_nodes() -> Vec<(&'static str, &'static str, u16)> {
+        NOTICES.iter().enumerate().map(|(i, name)| (*name,
+            match i { 8 => "127.0.0.1", 9 => "0.0.0.0", 10 => "1.1.1.1", _ => "node.example.com" },
+            match i { 11 => 1, 12 => 0, _ => 443 },
+        )).collect()
+    }
+
+    #[test]
+    fn notices_are_metadata_in_every_subscription_format() {
+        let mut surge = String::from("[Proxy]\n");
+        let mut yaml = String::from("proxies:\n");
+        let mut links = String::new();
+        let mut vmess = String::new();
+        for (name, server, port) in pseudo_nodes().into_iter().chain([("🇭🇰 Hong Kong丨01", "hk.example.com", 443)]) {
+            surge.push_str(&format!("{name} = trojan, {server}, {port}, password=p\n"));
+            yaml.push_str(&format!("- {{name: '{name}', type: trojan, server: {server}, port: {port}, password: p}}\n"));
+            links.push_str(&format!("trojan://p@{server}:{port}#{name}\n"));
+            let json = serde_json::json!({"ps":name, "add":server, "port":port, "id":"test"});
+            vmess.push_str(&format!("vmess://{}\n", STANDARD.encode(json.to_string())));
+        }
+        for body in [surge, yaml, links, vmess] {
+            for body in [body.clone(), STANDARD.encode(&body)] {
+                let (nodes, skipped, notices) = parse_with_metadata(&body);
+                assert!(skipped.is_empty(), "{skipped:?}");
+                assert_eq!(nodes.iter().map(|n| n.0.as_str()).collect::<Vec<_>>(), ["🇭🇰 Hong Kong丨01"]);
+                assert_eq!(notices, NOTICES);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn notices_never_become_selections_or_health_check_options() {
+        let dir = std::env::temp_dir().join(format!("sluice-notices-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nodes"), "剩余流量：254.46 GB = trojan, node.example.com, 443, password=p\nHK = trojan, hk.example.com, 443, password=p\n").unwrap();
+        let mut cfg = Config::parse("[Proxy Group]\nS = select, policy-path=nodes\nT = url-test, policy-path=nodes\n[Rule]\nFINAL,S\n").unwrap();
+        expand(&mut cfg, &dir, true).await.unwrap();
+        let router = crate::router::Router::new(&cfg).unwrap();
+        for group in router.groups() {
+            assert_eq!(group.options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["HK"]);
+            assert_eq!(group.selected, "HK");
+        }
+        for info in cfg.subscriptions { assert_eq!(info.notices, [NOTICES[0]]); }
+        std::fs::write(dir.join("nodes"), "套餐到期：长期有效 = trojan, node.example.com, 443, password=p\n").unwrap();
+        let mut cfg = Config::parse("[Proxy Group]\nS = select, policy-path=nodes\n").unwrap();
+        expand(&mut cfg, &dir, true).await.unwrap();
+        assert!(cfg.proxies.is_empty());
+        assert_eq!(cfg.groups[0].options, ["REJECT"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn expansion_log_redacts_subscription_secrets() {
         let message = expansion_summary("Subscription", 30,
             "https://user:secret@host/api/v1/client/subscribe?token=private-token&format=clash", "");
         assert!(message.starts_with("group Subscription: 30 nodes from https://"));
-        assert!(message.contains("host/api/v1/client/subscribe?[REDACTED]"));
+        assert!(message.contains("/api/v1/client/subscribe?[REDACTED]"));
         for secret in ["user", "secret", "private-token", "format=clash"] {
             assert!(!message.contains(secret), "{message}");
         }
@@ -436,12 +516,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("节点 # % ?.txt");
         let source = url::Url::from_file_path(&path).unwrap();
-        let links = include_str!("../tests/fixtures/local-check/links.txt");
+        // The local-check fixtures deliberately use placeholder servers; give this
+        // format/import test real-looking endpoints without changing those fixtures.
+        let links = include_str!("../tests/fixtures/local-check/links.txt").lines().map(|line| {
+            if let Some(body) = line.strip_prefix("vmess://") {
+                format!("vmess://{}", STANDARD.encode(b64_str(body).unwrap().replace("127.0.0.1", "node.example.com")))
+            } else {
+                line.replace("127.0.0.1", "node.example.com")
+            }
+        }).collect::<Vec<_>>().join("\n");
         for (body, count) in [
             (links.to_string(), 8),
-            (STANDARD.encode(links), 8),
-            (include_str!("../tests/fixtures/local-check/clash.yaml").to_string(), 2),
-            (include_str!("../tests/fixtures/local-check/surge.conf").to_string(), 2),
+            (STANDARD.encode(&links), 8),
+            (include_str!("../tests/fixtures/local-check/clash.yaml").replace("127.0.0.1", "node.example.com"), 2),
+            (include_str!("../tests/fixtures/local-check/surge.conf").replace("127.0.0.1", "node.example.com"), 2),
         ] {
             std::fs::write(&path, &body).unwrap();
             let expected: Vec<String> = parse(&body).0.into_iter().map(|(name, _)| name).collect();

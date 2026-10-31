@@ -2,10 +2,17 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const KEEP: usize = 500;
+
+/// Shared with the live stream so totals remain available after it closes.
+#[derive(Debug, Default)]
+pub struct Traffic {
+    pub up: Arc<AtomicU64>,
+    pub down: Arc<AtomicU64>,
+}
 
 #[derive(Clone, Debug)]
 pub struct ConnRecord {
@@ -18,12 +25,13 @@ pub struct ConnRecord {
     pub rule: String,
     pub policy: String,
     pub outbound: String,
-    /// Owning process, when a PROCESS-NAME rule looked it up.
+    /// Owning process, when the local socket owner can be identified.
     pub process: Option<String>,
     /// Request URL when known: plain HTTP, CONNECT (`https://host/`), or a decrypted request.
     pub url: Option<String>,
     /// Whether this was a request decrypted by MITM.
     pub mitm: bool,
+    pub traffic: Arc<Traffic>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);

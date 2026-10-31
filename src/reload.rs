@@ -23,7 +23,74 @@ impl RouterHandle {
 
 pub fn read_config(path: &str) -> Result<Config> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
-    Config::parse(&text)
+    let cfg = Config::parse(&text)?;
+    if let Some(migrated) = migrate_app_config(&text, &cfg) {
+        let cfg = Config::parse(&migrated)?;
+        std::fs::write(path, migrated).with_context(|| format!("migrate {path}"))?;
+        info!("migrated app config {path}: listener ports 6152/6153 -> 6252/6253 and default direct rules");
+        return Ok(cfg);
+    }
+    Ok(cfg)
+}
+
+const APP_DIRECT_RULES: &[&str] = &[
+    "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+    "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+    "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+    "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+    "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+    "GEOIP,CN,DIRECT",
+];
+
+/// Only the app's old port pair identifies this migration; custom profiles stay intact.
+fn migrate_app_config(text: &str, cfg: &Config) -> Option<String> {
+    let old_port = |value: &Option<String>, port: u16| {
+        value.as_deref().is_some_and(|v| v.parse::<std::net::SocketAddr>().is_ok_and(|a| a.port() == port))
+    };
+    if !text.lines().any(|l| l.trim().starts_with("# Sluice config created by the app"))
+        || !old_port(&cfg.general.http_listen, 6152) || !old_port(&cfg.general.socks5_listen, 6153) {
+        return None;
+    }
+    let mut section = String::new();
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed.to_ascii_lowercase();
+        }
+        if section == "[general]" {
+            if let Some((key, _)) = line.split_once('=') {
+                let port = match key.trim().to_ascii_lowercase().as_str() {
+                    "http-listen" => Some(6252),
+                    "socks5-listen" => Some(6253),
+                    _ => None,
+                };
+                if let Some(port) = port {
+                    let current = if port == 6252 { &cfg.general.http_listen } else { &cfg.general.socks5_listen };
+                    let mut addr: std::net::SocketAddr = current.as_deref()?.parse().ok()?;
+                    addr.set_port(port);
+                    out.push_str(&format!("{key}= {addr}\n"));
+                    continue;
+                }
+            }
+        }
+        if section == "[rule]" && trimmed.split(',').next().is_some_and(|v| v.trim().eq_ignore_ascii_case("FINAL")) {
+            for rule in APP_DIRECT_RULES {
+                if !cfg.rules.iter().any(|r| format!("{r},{}", r.policy).eq_ignore_ascii_case(rule.trim_end_matches(",no-resolve"))) {
+                    out.push_str(rule);
+                    out.push('\n');
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+        if trimmed.eq_ignore_ascii_case("[General]") && cfg.general.geoip_db.is_none() {
+            out.push_str("geoip-db = builtin:cn\n");
+        }
+    }
+    Some(out)
 }
 
 fn config_dir(path: &str) -> &Path {
@@ -227,6 +294,52 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, text).unwrap();
         std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn app_config_migration_is_persisted_and_scoped() {
+        let dir = std::env::temp_dir().join(format!("sluice-migrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = "[General]\nhttp-listen = 6152\nsocks5-listen = 127.0.0.1:6153\napi-listen = 127.0.0.1:6170\n[Proxy Group]\nProxy = select, DIRECT\n[Rule]\nDOMAIN-SUFFIX,local,DIRECT\nIP-CIDR,10.0.0.0/8,DIRECT,no-resolve\nFINAL,Proxy\n";
+        let app = format!("# Sluice config created by the app. Edit it, then press Reload.\n{body}");
+        let path = write(&dir, "app.conf", &app);
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.general.http_listen.as_deref(), Some("127.0.0.1:6252"));
+        assert_eq!(cfg.general.socks5_listen.as_deref(), Some("127.0.0.1:6253"));
+        assert_eq!(cfg.general.api_listen.as_deref(), Some("127.0.0.1:6170"));
+        assert_eq!(cfg.general.geoip_db.as_deref(), Some("builtin:cn"));
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        for rule in APP_DIRECT_RULES {
+            assert_eq!(migrated.matches(rule).count(), 1, "{rule}: {migrated}");
+            assert!(migrated.find(rule).unwrap() < migrated.find("FINAL,Proxy").unwrap());
+        }
+        let router = Router::new(&cfg).unwrap();
+        assert!(router.groups().iter().any(|g| g.name == "Proxy"));
+        read_config(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated);
+        for (i, text) in [body.to_string(), app.replace("6153", "7000"), app.replace("6152", "6252").replace("6153", "6253")].into_iter().enumerate() {
+            let path = write(&dir, &format!("custom{i}.conf"), &text);
+            read_config(&path).unwrap();
+            assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn starter_config_has_working_private_and_cn_rules() {
+        let swift = include_str!("../apps/macos/Sources/SluiceApp/Core.swift");
+        let text = swift.split("static let starterConfig = \"\"\"").nth(1).unwrap().split("\"\"\"").next().unwrap();
+        let cfg = Config::parse(text).unwrap();
+        let router = Router::new(&cfg).unwrap();
+        for ip in ["10.1.2.3:80", "172.16.1.1:80", "192.168.1.1:80", "127.0.0.1:80", "169.254.1.1:80", "[fc00::1]:80", "[fe80::1]:80", "114.114.114.114:80", "[240e::1]:80"] {
+            let d = router.decide(&crate::util::Target::parse_authority(ip, 80).unwrap()).await.unwrap();
+            assert_eq!(d.policy, "DIRECT", "{ip}");
+            assert_ne!(d.rule, "FINAL", "{ip}");
+        }
+        let d = router.decide(&crate::util::Target::parse_authority("8.8.8.8:80", 80).unwrap()).await.unwrap();
+        assert_eq!(d.rule, "FINAL");
+        assert_eq!(d.policy, "Proxy");
+        assert!(text.contains("# RULE-SET,"));
     }
 
     #[tokio::test]

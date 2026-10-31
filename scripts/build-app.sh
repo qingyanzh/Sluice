@@ -52,6 +52,8 @@ for entry in Autoupdate Sparkle Headers Modules PrivateHeaders Resources Updater
   ln -s "Versions/Current/$entry" "$framework/$entry"
 done
 cp "$core" "$app/Contents/Resources/sluice"
+cp resources/geoip-LICENSE "$app/Contents/Resources/geoip-LICENSE"
+cp resources/README.md "$app/Contents/Resources/geoip-NOTICE.md"
 cp apps/macos/Icon/Sluice.icns "$app/Contents/Resources/Sluice.icns"
 cp apps/macos/Icon/SluiceMenuBarIcon.png "$app/Contents/Resources/SluiceMenuBarIcon.png"
 public_key=""

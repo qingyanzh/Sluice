@@ -267,9 +267,13 @@ fn redact_url(scheme: &str, rest: &str) -> String {
         Some(i) => rest.split_at(i),
         None => (rest, ""),
     };
-    let host = match authority.rsplit_once('@') {
-        Some((_, h)) => format!("{MASK}@{h}"),
-        None => authority.to_string(),
+    let host = match url::Url::parse(&format!("{scheme}://{authority}/")) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or_default();
+            let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{}{port}", private_host(host))
+        }
+        Err(_) => MASK.to_string(),
     };
     let (path, extra) = match tail.find(['?', '#']) {
         Some(i) => tail.split_at(i),
@@ -278,6 +282,101 @@ fn redact_url(scheme: &str, rest: &str) -> String {
     let path = if path.split('/').all(harmless_segment) { path.to_string() } else { format!("/{MASK}") };
     let extra = if extra.is_empty() { String::new() } else { format!("{}{MASK}", &extra[..1]) };
     format!("{scheme}://{host}{path}{extra}")
+}
+
+/// Keep a stable short identifier and only the final public DNS label. Keeping less
+/// than a full multi-label public suffix also avoids exposing private suffix tenants.
+fn private_host(host: &str) -> String {
+    use sha2::{Digest, Sha256};
+    static MASKED: OnceLock<Regex> = OnceLock::new();
+    if MASKED.get_or_init(|| Regex::new(r"^host-[0-9a-f]{8}\.[a-z]+$").unwrap()).is_match(host) {
+        return host.to_string();
+    }
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    let hash = hex::encode(Sha256::digest(host.as_bytes()));
+    if host.parse::<std::net::IpAddr>().is_ok() || !host.contains('.') {
+        format!("host-{}.invalid", &hash[..8])
+    } else {
+        format!("host-{}.{}", &hash[..8], host.rsplit('.').next().unwrap())
+    }
+}
+
+fn proxy_servers(text: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // Surge lines and Clash/JSON server fields, even in incomplete configs.
+    let re = RE.get_or_init(|| Regex::new(
+        r#"(?im)^\s*[^\n=]+?=\s*(?:ss|trojan|vmess|vless|hysteria2|hy2|anytls)\s*,\s*([^,\s]+)|["']?\bserver["']?\s*:\s*["']?([^\s,"'}]+)"#
+    ).unwrap());
+    re.captures_iter(text).filter_map(|c| c.get(1).or_else(|| c.get(2))).map(|m| m.as_str().to_string()).collect()
+}
+
+fn redact_servers(text: &str, servers: &[String]) -> String {
+    let mut servers = servers.to_vec();
+    servers.sort_unstable();
+    servers.dedup();
+    servers.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let mut out = text.to_string();
+    for server in servers.into_iter().filter(|s| !s.is_empty()) {
+        // Literal matching also removes occurrences in SNI, error messages and bare log endpoints.
+        let re = Regex::new(&format!("(?i){}", regex::escape(&server))).unwrap();
+        let replacement = private_host(&server);
+        let host_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+        out = re.replace_all(&out, |c: &Captures| {
+            let m = c.get(0).unwrap();
+            let before = out[..m.start()].chars().next_back();
+            let after = out[m.end()..].chars().next();
+            if before.is_some_and(host_char) || after.is_some_and(host_char) {
+                m.as_str().to_string()
+            } else {
+                replacement.clone()
+            }
+        }).into_owned();
+    }
+    out
+}
+
+/// All hosts known from the profile and locally cached subscriptions. Never fetches.
+fn bundle_servers(config: Option<&str>) -> Vec<String> {
+    let Some(path) = config else { return Vec::new() };
+    let Ok(bytes) = read_nofollow(Path::new(path)) else { return Vec::new() };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut servers = proxy_servers(&text);
+    if let Ok(cfg) = crate::config::Config::parse(&text) {
+        let base = Path::new(path).parent().unwrap_or(Path::new("."));
+        for group in &cfg.groups {
+            let Some(source) = &group.policy_path else { continue };
+            let source_path = if source.starts_with("https://") || source.starts_with("http://") {
+                if let Ok(url) = url::Url::parse(source) {
+                    if let Some(host) = url.host_str() { servers.push(host.to_string()); }
+                }
+                crate::ruleset::cache_path(source, group.user_agent.as_deref())
+            } else if source.starts_with("file://") {
+                let Some(path) = url::Url::parse(source).ok().and_then(|u| u.to_file_path().ok()) else { continue };
+                path
+            } else {
+                base.join(source)
+            };
+            if let Ok(bytes) = read_nofollow(&source_path) {
+                for (_, def) in crate::subscription::parse(&String::from_utf8_lossy(&bytes)).0 {
+                    servers.extend(proxy_servers(&def.to_line("node")));
+                }
+            }
+        }
+    }
+    servers
+}
+
+fn redact_bundle(root: &Path, servers: &[String]) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            redact_bundle(&entry.path(), servers)?;
+        } else if entry.file_type()?.is_file() {
+            let text = fs::read_to_string(entry.path())?;
+            fs::write(entry.path(), redact_servers(&text, servers))?;
+        }
+    }
+    Ok(())
 }
 
 /// Masks secrets in config text, logs and command output.
@@ -296,7 +395,8 @@ pub fn redact(text: &str) -> String {
             format!("{}{}{MASK}", &c[1], &c[2])
         }
     });
-    uuid_re().replace_all(&t, "[REDACTED-UUID]").into_owned()
+    let t = uuid_re().replace_all(&t, "[REDACTED-UUID]");
+    redact_servers(&t, &proxy_servers(text))
 }
 
 // MARK: export
@@ -431,7 +531,7 @@ fn fill(root: &Path, config: Option<&str>) -> Result<()> {
     for (file, prog, args) in cmds {
         write_redacted(&net.join(file), &capture(prog, args, short))?;
     }
-    Ok(())
+    redact_bundle(root, &bundle_servers(config))
 }
 
 fn zip(root: &Path, out: &Path) -> Result<()> {
@@ -479,11 +579,38 @@ mod tests {
              HY = hysteria2, h.example.com, 443, password=hy-pass-4, obfs=salamander, obfs-password=obfs-secret-5, port-hopping=443;20000-50000\n"
         );
         let out = redact(&cfg);
-        assert_clean(&out, &["ss-pass-1", "tj-pass-2", UUID, "tok-3", "PubKeyXyz123", "0123abcd", "hy-pass-4", "obfs-secret-5"]);
+        assert_clean(&out, &["ss-pass-1", "tj-pass-2", UUID, "tok-3", "PubKeyXyz123", "0123abcd", "hy-pass-4", "obfs-secret-5", "1.2.3.4", "t.example.com", "v.example.com", "l.example.com", "h.example.com"]);
         // Non-secret structure survives for debugging.
-        for keep in ["encrypt-method=aes-256-gcm", "sni=t.example.com", "skip-cert-verify=true", "ws-path=/ray", "flow=xtls-rprx-vision", "port-hopping=443;20000-50000", "1.2.3.4, 8388"] {
+        for keep in ["encrypt-method=aes-256-gcm", "skip-cert-verify=true", "ws-path=/ray", "flow=xtls-rprx-vision", "port-hopping=443;20000-50000"] {
             assert!(out.contains(keep), "{keep:?} lost in:\n{out}");
         }
+    }
+
+    #[test]
+    fn subscription_node_hosts_are_removed_from_config_and_bundle_logs() {
+        let dir = std::env::temp_dir().join(format!("sluice-diag-servers-{}", std::process::id()));
+        fs::create_dir_all(dir.join("bundle/logs")).unwrap();
+        let subscription = "trojan://secret@edge.private.example:443#HK\nvless://test@203.0.113.19:443#JP\ntrojan://p@[2001:db8::19]:443#SG\n";
+        fs::write(dir.join("nodes.txt"), subscription).unwrap();
+        let config = "[Proxy]\nNode = trojan, inline.private.example, 443, password=secret\n[Proxy Group]\nSub = select, policy-path=nodes.txt\nRemote = select, policy-path=https://subscriptions.private.example/link/token\n[Rule]\nFINAL,Sub\n";
+        let path = dir.join("profile.conf");
+        fs::write(&path, config).unwrap();
+        let log = "connect to edge.private.example:443 failed; server 203.0.113.19; [2001:db8::19]:443; resolving inline.private.example; subscriptions.private.example\n";
+        write_redacted(&dir.join("bundle/config.conf"), config).unwrap();
+        write_redacted(&dir.join("bundle/logs/core.log"), log).unwrap();
+        let servers = bundle_servers(path.to_str());
+        redact_bundle(&dir.join("bundle"), &servers).unwrap();
+        for file in ["config.conf", "logs/core.log"] {
+            let text = fs::read_to_string(dir.join("bundle").join(file)).unwrap();
+            assert_clean(&text, &["secret", "edge.private.example", "203.0.113.19", "2001:db8::19", "inline.private.example", "subscriptions.private.example"]);
+        }
+        // Verify the actual exported ZIP payload, rather than only the source strings.
+        let out = dir.join("bundle.zip");
+        zip(&dir.join("bundle"), &out).unwrap();
+        let bytes = Command::new("/usr/bin/unzip").arg("-p").arg(out).output().unwrap();
+        assert!(bytes.status.success());
+        assert_clean(&String::from_utf8(bytes.stdout).unwrap(), &["private.example", "203.0.113.19", "2001:db8::19", "secret"]);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -516,12 +643,12 @@ mod tests {
         ];
         for (input, secret) in cases {
             let out = redact(input);
-            assert_clean(&out, &[secret]);
-            assert!(out.contains("sub.example.com") || out.contains("example.com"), "{out}");
+            assert_clean(&out, &[secret, "sub.example.com", "example.com"]);
+            assert!(out.contains("host-") && out.contains(".com"), "{out}");
         }
-        // Public, token-free URLs stay readable.
-        assert_eq!(redact("https://1.1.1.1/dns-query"), "https://1.1.1.1/dns-query");
-        assert_eq!(redact("http://www.gstatic.com/generate_204"), "http://www.gstatic.com/generate_204");
+        // URL structure stays readable, while hosts remain private.
+        assert!(redact("https://1.1.1.1/dns-query").ends_with("/dns-query"));
+        assert!(redact("http://www.gstatic.com/generate_204").ends_with("/generate_204"));
         assert_eq!(redact("file:///Users/me/rules.list"), "file:///Users/me/rules.list");
     }
 

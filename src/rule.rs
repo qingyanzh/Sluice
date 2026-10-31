@@ -179,12 +179,17 @@ impl ConnInfo {
         self.process
             .get_or_init(|| async {
                 let src = self.src?;
+                // IPv4-mapped loopback clients also arrive on dual-stack listeners.
+                let ip = match src.ip() {
+                    IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip)),
+                    ip => ip,
+                };
                 // Only local clients can be identified.
-                if !(src.ip().is_loopback() || self.in_port.is_none()) {
+                if !(ip.is_loopback() || self.in_port.is_none()) {
                     return None;
                 }
-                let (udp, port, remote) = (matches!(self.proto, Proto::Udp | Proto::Quic), src.port(), self.app_remote_port);
-                tokio::task::spawn_blocking(move || crate::process::lookup(udp, port, remote)).await.ok().flatten()
+                let (udp, remote) = (matches!(self.proto, Proto::Udp | Proto::Quic), self.app_remote_port);
+                tokio::task::spawn_blocking(move || crate::process::lookup(udp, src, remote)).await.ok().flatten()
             })
             .await
             .as_deref()

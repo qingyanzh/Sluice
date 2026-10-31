@@ -31,14 +31,15 @@ pub struct ConnMeta {
     pub chain: Vec<String>,
     pub outbound: String,
     pub process: Option<String>,
+    pub traffic: Arc<crate::conns::Traffic>,
 }
 
 pub struct LiveConn {
     pub id: u64,
     pub start_ms: u64,
     pub meta: ConnMeta,
-    pub up: AtomicU64,
-    pub down: AtomicU64,
+    pub up: Arc<AtomicU64>,
+    pub down: Arc<AtomicU64>,
     /// Bytes per second over the last sampler tick.
     pub rate_up: AtomicU64,
     pub rate_down: AtomicU64,
@@ -92,9 +93,9 @@ pub fn register(meta: ConnMeta) -> Arc<LiveConn> {
     let c = Arc::new(LiveConn {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         start_ms: now_ms(),
+        up: meta.traffic.up.clone(),
+        down: meta.traffic.down.clone(),
         meta,
-        up: AtomicU64::new(0),
-        down: AtomicU64::new(0),
         rate_up: AtomicU64::new(0),
         rate_down: AtomicU64::new(0),
         seen: Mutex::new((0, 0)),

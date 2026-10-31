@@ -191,7 +191,7 @@ pub struct FetchResult {
     pub last_error: Option<String>,
 }
 
-fn cache_path(source: &str, user_agent: Option<&str>) -> PathBuf {
+pub(crate) fn cache_path(source: &str, user_agent: Option<&str>) -> PathBuf {
     let mut hash = Sha256::new();
     hash.update(source.as_bytes());
     if let Some(ua) = user_agent {

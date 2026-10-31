@@ -120,8 +120,9 @@ pub struct Decision {
     pub rule: String,
     pub policy: String,
     pub outbound: String,
-    /// The client's process, if a PROCESS-NAME rule had to look it up.
+    /// The client's process, when the local socket owner can be identified.
     pub process: Option<String>,
+    pub(crate) traffic: Arc<crate::conns::Traffic>,
 }
 
 impl Router {
@@ -194,6 +195,7 @@ impl Router {
         }
 
         let geoip = match &cfg.general.geoip_db {
+            Some(path) if path == "builtin:cn" => Some(maxminddb::Reader::from_source(include_bytes!("../resources/geoip-cn.mmdb").to_vec())?),
             Some(path) => Some(maxminddb::Reader::open_readfile(path).with_context(|| format!("open geoip-db {path}"))?),
             None => None,
         };
@@ -378,7 +380,7 @@ impl Router {
     pub async fn decide_with(&self, target: &Target, ctx: &ConnInfo) -> Result<Decision> {
         match self.mode() {
             Mode::Direct => {
-                return Ok(Decision { rule: "DIRECT-MODE".into(), policy: "DIRECT".into(), outbound: "DIRECT".into(), process: None })
+                return Ok(Decision { rule: "DIRECT-MODE".into(), policy: "DIRECT".into(), outbound: "DIRECT".into(), process: None, traffic: Default::default() })
             }
             Mode::Global => {
                 let policy = self
@@ -386,7 +388,7 @@ impl Router {
                     .iter()
                     .find(|r| matches!(r.matcher, Matcher::Final))
                     .map_or("DIRECT".to_string(), |r| r.policy.clone());
-                return Ok(Decision { rule: "GLOBAL-MODE".into(), outbound: self.resolve(&policy)?, policy, process: None });
+                return Ok(Decision { rule: "GLOBAL-MODE".into(), outbound: self.resolve(&policy)?, policy, process: None, traffic: Default::default() });
             }
             Mode::Rule => {}
         }
@@ -396,11 +398,13 @@ impl Router {
             policy: rule.policy.clone(),
             outbound: self.resolve(&rule.policy)?,
             process: ctx.known_process().map(str::to_string),
+            traffic: Default::default(),
         })
     }
 
     pub async fn decide_logged(&self, target: &Target, ctx: &ConnInfo) -> Result<Decision> {
-        let d = self.decide_with(target, ctx).await?;
+        let mut d = self.decide_with(target, ctx).await?;
+        d.process = ctx.process().await.map(str::to_string);
         let proc_note = d.process.as_deref().map_or(String::new(), |p| format!(" ({p})"));
         info!("{} {target}{proc_note} -> {} [{}] via {}", ctx.proto.name(), d.policy, d.rule, d.outbound);
         crate::conns::record(crate::conns::ConnRecord {
@@ -415,6 +419,7 @@ impl Router {
             process: d.process.clone(),
             url: ctx.url.clone(),
             mitm: ctx.mitm,
+            traffic: d.traffic.clone(),
         });
         Ok(d)
     }
@@ -451,6 +456,7 @@ impl Router {
             policy: d.policy,
             outbound: d.outbound.clone(),
             process: d.process,
+            traffic: d.traffic,
         };
         Ok(self.open(&d.outbound, target).await?.map(|s| crate::stats::counted_live(s, meta)))
     }

@@ -217,6 +217,7 @@ final class Core: ObservableObject {
         socks5-listen = 127.0.0.1:6253
         api-listen = 127.0.0.1:6170
         loglevel = info
+        geoip-db = builtin:cn
 
         [Proxy]
         # HK = ss, hk.example.com, 8388, encrypt-method=aes-256-gcm, password=change-me
@@ -226,6 +227,16 @@ final class Core: ObservableObject {
 
         [Rule]
         DOMAIN-SUFFIX,local,DIRECT
+        IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+        IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+        IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+        IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+        IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+        IP-CIDR6,fc00::/7,DIRECT,no-resolve
+        IP-CIDR6,fe80::/10,DIRECT,no-resolve
+        GEOIP,CN,DIRECT
+        # Optional CN domains (downloads a remote rule set when enabled):
+        # RULE-SET,https://raw.githubusercontent.com/Loyalsoldier/surge-rules/release/ruleset/direct.txt,DIRECT
         FINAL,Proxy
         """
 

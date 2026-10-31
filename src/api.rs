@@ -21,6 +21,7 @@
 //!   GET  /v1/profile                        active config file and the other .conf files beside it
 //!   POST /v1/profile?path=<file>            validate and switch to another config file
 //!
+//! `/v1/connections` also includes `up`/`down`, retained after a TCP stream closes.
 //! `/v1/connections/active` items: `id`, `start_ms` (Unix ms), `network`, `target`, `src`,
 //! `rule`, `policy`, `chain` (the rule's policy through each group's selection down to the
 //! node, node last), `outbound`, `process`, `up`/`down` (bytes so far) and `rate_up`/
@@ -292,26 +293,7 @@ async fn handle(mut sock: TcpStream, reloader: Arc<Reloader>) -> Result<()> {
             Err(e) => ("400 Bad Request", format!("{{\"error\":{}}}", json_str(&format!("{e:#}")))),
         },
         ("GET", "/v1/connections") => {
-            let items: Vec<String> = crate::conns::recent()
-                .iter()
-                .map(|c| {
-                    format!(
-                        "{{\"id\":{},\"time_ms\":{},\"network\":\"{}\",\"target\":{},\"src\":{},\"rule\":{},\"policy\":{},\"outbound\":{},\"process\":{},\"url\":{},\"mitm\":{}}}",
-                        c.id,
-                        c.time_ms,
-                        c.network,
-                        json_str(&c.target),
-                        json_opt(c.src.as_deref()),
-                        json_str(&c.rule),
-                        json_str(&c.policy),
-                        json_str(&c.outbound),
-                        json_opt(c.process.as_deref()),
-                        json_opt(c.url.as_deref()),
-                        c.mitm
-                    )
-                })
-                .collect();
-            ("200 OK", format!("[{}]", items.join(",")))
+            ("200 OK", recent_connections_json())
         }
         ("GET", "/v1/connections/active") => {
             let items: Vec<String> = crate::live::active().iter().map(|c| crate::live::conn_json(c)).collect();
@@ -406,9 +388,65 @@ pub async fn serve(addr: String, reloader: Arc<Reloader>) -> Result<()> {
     }
 }
 
+fn recent_connections_json() -> String {
+    let items: Vec<String> = crate::conns::recent()
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"id\":{},\"time_ms\":{},\"network\":\"{}\",\"target\":{},\"src\":{},\"rule\":{},\"policy\":{},\"outbound\":{},\"process\":{},\"url\":{},\"mitm\":{},\"up\":{},\"down\":{}}}",
+                c.id,
+                c.time_ms,
+                c.network,
+                json_str(&c.target),
+                json_opt(c.src.as_deref()),
+                json_str(&c.rule),
+                json_str(&c.policy),
+                json_str(&c.outbound),
+                json_opt(c.process.as_deref()),
+                json_opt(c.url.as_deref()),
+                c.mitm,
+                c.traffic.up.load(std::sync::atomic::Ordering::Relaxed),
+                c.traffic.down.load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recent_and_active_connections_share_byte_counts() {
+        let cfg = crate::config::Config::parse("[Rule]\nFINAL,DIRECT\n").unwrap();
+        let router = crate::router::Router::new(&cfg).unwrap();
+        let ctx = ConnInfo::default().with_process("api-byte-test");
+        let target = Target::parse_authority("api-byte-test.example:443", 443).unwrap();
+        let decision = router.decide_logged(&target, &ctx).await.unwrap();
+        let meta = crate::live::ConnMeta { network: "tcp", target: target.to_string(), traffic: decision.traffic, ..Default::default() };
+        let (a, mut peer) = tokio::io::duplex(64);
+        let mut stream = crate::stats::counted_live(Box::new(a), meta);
+        stream.write_all(b"request").await.unwrap();
+        peer.write_all(b"response").await.unwrap();
+        let mut buf = [0; 8];
+        stream.read_exact(&mut buf).await.unwrap();
+        let live = crate::live::active().into_iter().find(|c| c.meta.target == target.to_string()).unwrap();
+        let active: serde_json::Value = serde_json::from_str(&crate::live::conn_json(&live)).unwrap();
+        assert_eq!((active["up"].as_u64(), active["down"].as_u64()), (Some(7), Some(8)));
+        let check_recent = || {
+            let recent: serde_json::Value = serde_json::from_str(&recent_connections_json()).unwrap();
+            let record = recent.as_array().unwrap().iter().find(|c| c["target"] == target.to_string()).unwrap();
+            assert_eq!((record["up"].as_u64(), record["down"].as_u64()), (Some(7), Some(8)));
+            assert_eq!(record["process"], "api-byte-test");
+            assert_eq!(record["policy"], "DIRECT");
+            assert!(record.get("time_ms").is_some());
+        };
+        check_recent();
+        drop(stream);
+        assert!(!crate::live::active().iter().any(|c| c.id == live.id));
+        check_recent();
+    }
 
     #[tokio::test]
     async fn subscriptions_endpoint_exposes_metadata_additively() {
@@ -416,7 +454,7 @@ mod tests {
             subscriptions: vec![crate::subscription::SubscriptionInfo {
                 group: "Airport".into(), url: "http://127.0.0.1/sub".into(),
                 metadata: crate::ruleset::FetchMetadata { upload: Some(10), download: Some(20), total: Some(100), expire: Some(1800000000), update_interval_hours: Some(6), last_fetch: Some(1700000000) },
-                last_error: Some("HTTP 403: 禁止访问".into()), node_count: 2,
+                last_error: Some("HTTP 403: 禁止访问".into()), node_count: 2, notices: vec![],
             }], ..crate::config::Config::parse("[Rule]\nFINAL,DIRECT\n").unwrap()
         };
         let reloader = Reloader::start(crate::router::Router::new(&cfg).unwrap(), &cfg, "unused.conf");
@@ -436,7 +474,7 @@ mod tests {
             assert!(raw.starts_with("HTTP/1.1 200 OK"));
             let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
             if path == "/v1/subscriptions" {
-                assert_eq!(body, serde_json::json!([{"group":"Airport", "url":"http://127.0.0.1/sub", "upload":10, "download":20, "total":100, "expire":1800000000, "update_interval_hours":6, "last_fetch":1700000000, "last_error":"HTTP 403: 禁止访问", "node_count":2}]));
+                assert_eq!(body, serde_json::json!([{"group":"Airport", "url":"http://127.0.0.1/sub", "upload":10, "download":20, "total":100, "expire":1800000000, "update_interval_hours":6, "last_fetch":1700000000, "last_error":"HTTP 403: 禁止访问", "node_count":2, "notices":[]}]));
             } else { assert_eq!(body, serde_json::json!([])); }
         }
     }

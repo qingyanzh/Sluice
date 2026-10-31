@@ -178,17 +178,29 @@ fn proxy(v: &Value) -> Result<(String, ProxyDef)> {
 pub type Nodes = Vec<(String, ProxyDef)>;
 
 /// Parses the `proxies:` list; returns nodes and per-node skip reasons.
+#[cfg(test)]
 pub fn parse(text: &str) -> Result<(Nodes, Vec<String>)> {
+    let (nodes, skipped, _) = parse_with_metadata(text)?;
+    Ok((nodes, skipped))
+}
+
+pub fn parse_with_metadata(text: &str) -> Result<(Nodes, Vec<String>, Vec<String>)> {
     let doc: Value = serde_yaml::from_str(text).map_err(|e| anyhow!("Clash YAML: {e}"))?;
     let list = doc.get("proxies").and_then(Value::as_sequence).ok_or_else(|| anyhow!("Clash YAML has no proxies list"))?;
-    let (mut nodes, mut skipped) = (Vec::new(), Vec::new());
+    let (mut nodes, mut skipped, mut notices) = (Vec::new(), Vec::new(), Vec::new());
     for item in list {
+        if let (Some(name), Some(server), Some(port)) = (s(item, "name"), s(item, "server"), s(item, "port").and_then(|p| p.parse().ok())) {
+            if crate::subscription::is_metadata(&name, &server, port) {
+                notices.push(name);
+                continue;
+            }
+        }
         match proxy(item) {
             Ok(n) => nodes.push(n),
             Err(e) => skipped.push(format!("{e:#}")),
         }
     }
-    Ok((nodes, skipped))
+    Ok((nodes, skipped, notices))
 }
 
 #[cfg(test)]
@@ -340,7 +352,7 @@ mod tests {
             ("type: hysteria2, password: p, ports: 5-3", "bad port range"),
             ("type: hysteria2, password: p, hop-interval: bad", "bad hop-interval"),
         ] {
-            let yaml = format!("proxies:\n  - {{name: Bad, server: h, port: 443, {bad}}}\n  - {{name: Good, type: ss, server: h, port: 1, cipher: aes-128-gcm, password: p}}");
+            let yaml = format!("proxies:\n  - {{name: Bad, server: h, port: 443, {bad}}}\n  - {{name: Good, type: ss, server: h, port: 443, cipher: aes-128-gcm, password: p}}");
             let (nodes, skipped) = parse(&yaml).unwrap();
             assert_eq!(nodes.len(), 1, "{bad}: {nodes:?}");
             assert_eq!(nodes[0].0, "Good");
@@ -444,7 +456,7 @@ mod tests {
   - {name: NoCipher, server: h, port: 443, type: ss, password: p}
   - {name: BadPassword, server: h, port: 443, type: trojan, password: []}
   - {name: BadPort, server: h, port: -1, type: trojan, password: p}
-  - {name: First, server: h, port: 1, type: trojan, password: p}
+  - {name: First, server: h, port: 443, type: trojan, password: p}
   - {name: Second, server: h, port: 65535, type: trojan, password: p}
 "#;
         let (nodes, skipped) = parse(yaml).unwrap();
@@ -492,9 +504,9 @@ proxies:
   - {name: KR HY2, type: hysteria2, server: kr.example.com, port: 8443, password: pw, ports: "443,20000-20010", hop-interval: 15}
   - {name: Reality, type: vless, server: r.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, servername: www.microsoft.com, flow: xtls-rprx-vision, reality-opts: {public-key: 9I6Pn-IkB7bhN8WjQWdKJhwFS7VS9qGcApt5SmR43G4, short-id: ab}}
   - {name: Splice, type: vless, server: s.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, flow: xtls-rprx-splice}
-  - {name: Plugin SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: obfs, plugin-opts: {mode: tls, host: bing.com}}
-  - {name: V2 SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: v2ray-plugin, plugin-opts: {mode: websocket, tls: true, host: a.com, path: /ws, mux: false}}
-  - {name: KCP SS, type: ss, server: p.example.com, port: 1, cipher: aes-128-gcm, password: x, plugin: kcptun}
+  - {name: Plugin SS, type: ss, server: p.example.com, port: 443, cipher: aes-128-gcm, password: x, plugin: obfs, plugin-opts: {mode: tls, host: bing.com}}
+  - {name: V2 SS, type: ss, server: p.example.com, port: 443, cipher: aes-128-gcm, password: x, plugin: v2ray-plugin, plugin-opts: {mode: websocket, tls: true, host: a.com, path: /ws, mux: false}}
+  - {name: KCP SS, type: ss, server: p.example.com, port: 443, cipher: aes-128-gcm, password: x, plugin: kcptun}
 proxy-groups:
   - {name: Proxy, type: select, proxies: [HK 01]}
 "#;
