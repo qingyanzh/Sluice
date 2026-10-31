@@ -22,14 +22,19 @@ import os
 from pathlib import Path
 import signal
 import sys
+import time
 
 status = Path(os.environ['MOCK_STATUS'])
 def stop(signum, frame):
+    # Keep holding the resource after accepting the stop signal.
+    time.sleep(0.25)
     status.unlink(missing_ok=True)
     sys.exit(0)
 for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(sig, stop)
 mode = 'enhanced-mode = true' in Path(sys.argv[2]).read_text()
+if status.exists():
+    sys.exit('previous core has not finished shutting down')
 status.write_text(json.dumps({'pid': os.getpid(), 'ready': True, 'enhanced_mode': mode}))
 while True:
     signal.pause()
@@ -42,7 +47,13 @@ sudo() {
     case $1 in
         kill) shift; builtin kill "$@" ;;
         lsof) return 1 ;;
-        *) exec "$@" ;;
+        *)
+            # Model sudo retaining its own launcher PID and reaping the real core.
+            "$@" &
+            local child=$!
+            wait "$child"
+            command sleep 0.2
+            ;;
     esac
 }
 kill() {
@@ -69,6 +80,7 @@ for spec in 'true enabled' 'false disabled' 'true reenabled'; do
     mock_root=$mode
     restart_mode "$mode" "$phase"
     if [[ $mode == true ]]; then
+        [[ $pid != "$launcher" ]] || { echo 'FAIL fixture needs distinct sudo/core PIDs'; exit 1; }
         if kill -0 "$launcher" 2>/dev/null; then
             echo 'FAIL fixture did not simulate unprivileged EPERM'; exit 1
         fi
@@ -82,7 +94,7 @@ start_core true sighup
 stop_core HUP
 [[ $pid == 0 && $launcher == 0 && $watchdog == 0 ]]
 
-echo 'PASS back-to-back user/root mode starts and TERM/INT/HUP stops'
+echo 'PASS distinct sudo/core PIDs, delayed exit, and back-to-back TERM/INT/HUP stops'
 # A genuinely dead launcher must still fail fast and retain its exit status/log.
 if (
     bash -c 'echo fixture-start-failure; exit 23' > "$work/failed.log" 2>&1 &
@@ -95,6 +107,35 @@ fi
 grep -Fq 'FAIL core exited before becoming ready (status 23)' "$work/failure.txt"
 grep -Fq 'fixture-start-failure' "$work/failure.txt"
 echo 'PASS dead launcher reports its exit status and log'
+
+# An API response from a previous core must never replace the tracked exec PID.
+command sleep 5 &
+launcher=$!
+pid=$launcher
+echo "{\"pid\": $$, \"ready\": true}" > "$MOCK_STATUS"
+if (wait_ready "$launcher" "$work/failed.log") > "$work/stale.txt" 2>&1; then
+    echo 'FAIL stale API PID was accepted'; exit 1
+fi
+grep -Fq 'FAIL API belongs to pid' "$work/stale.txt"
+builtin kill -TERM "$launcher"
+wait "$launcher" 2>/dev/null || true
+pid=0
+launcher=0
+rm "$MOCK_STATUS"
+echo 'PASS stale API PID rejected'
+
+# A hung real core must fail boundedly, without clearing ownership or restarting.
+if (
+    pid=12345
+    launcher=23456
+    sudo() { return 0; }
+    sleep() { :; }
+    stop_core
+) > "$work/hung.txt" 2>&1; then
+    echo 'FAIL hung core was accepted as stopped'; exit 1
+fi
+grep -Fq 'FAIL core/launcher did not exit within 12 seconds' "$work/hung.txt"
+echo 'PASS hung core stop fails boundedly'
 
 # Verify both protocol checks invoke the raw UDP client and require TUN evidence.
 assert_selection() { [[ $1 == "$expected_protocol" ]]; }

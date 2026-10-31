@@ -2,6 +2,8 @@
 # Runs only on disposable macOS CI runners. Mirrors the app: stop, wait, start in
 # the new mode. All selection state belongs to the core, shared across uid changes.
 cleanup() {
+    # Startup can fail before /v1/status; the exec wrapper still records the real PID.
+    if [[ -s ${core_pid_file:-} ]]; then read -r pid < "$core_pid_file"; fi
     if (( pid > 0 )); then
         sudo kill -TERM "$pid" 2>/dev/null || true
         for _ in $(seq 100); do
@@ -35,6 +37,7 @@ EOF
 wait_ready() {
     local launcher=$1 log=$2
     for _ in $(seq 600); do
+        if [[ -s ${core_pid_file:-} ]]; then read -r pid < "$core_pid_file"; fi
         # sudo may exec the core, making $! root-owned. Unprivileged kill -0
         # returns EPERM for that live process; waiting here then hangs until the
         # watchdog terminates a healthy core. Probe with the same uid as stop.
@@ -43,15 +46,29 @@ wait_ready() {
             wait "$launcher" || status=$?
             echo "FAIL core exited before becoming ready (status $status)"
             cat "$log"
+            lifecycle_diagnostics
             exit 1
         fi
         if curl -fsS -m 1 "$api/v1/status" > "$work/status.json" 2>/dev/null; then
-            pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$work/status.json")
+            local reported
+            reported=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$work/status.json")
+            if [[ $reported != "$pid" ]]; then
+                echo "FAIL API belongs to pid $reported, expected core $pid (launcher $launcher)"
+                lifecycle_diagnostics
+                exit 1
+            fi
             if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["ready"] else 1)' "$work/status.json"; then return; fi
         fi
         sleep 0.1
     done
-    echo 'FAIL core did not start'; cat "$log"; exit 1
+    echo 'FAIL core did not start'; cat "$log"; lifecycle_diagnostics; exit 1
+}
+lifecycle_diagnostics() {
+    echo "Lifecycle: core pid $pid, launcher pid $launcher"
+    ps -p "$pid,$launcher" -o pid,ppid,uid,state,command || true
+    # Include non-LISTEN states to distinguish a live owner from TIME_WAIT.
+    sudo lsof -nP -iTCP:"$api_port" || true
+    netstat -anv -p tcp | grep -E "[.:]$api_port[[:space:]]" || true
 }
 assert_clean() {
     # Dynamic DNS propagation can lag a completed networksetup call slightly.
@@ -73,19 +90,23 @@ assert_selection() {
 }
 stop_core() {
     local old=$pid
+    echo "Stopping core pid $old (launcher $launcher) with ${1:-TERM}"
     sudo kill -"${1:-TERM}" "$old"
-    for _ in $(seq 70); do
-        if ! sudo kill -0 "$old" 2>/dev/null; then
+    for _ in $(seq 120); do
+        # sudo's PID can differ from the core; both must finish before restart.
+        if ! sudo kill -0 "$old" 2>/dev/null && ! sudo kill -0 "$launcher" 2>/dev/null; then
             wait "$launcher" || true
+            echo "PASS core pid $old and launcher $launcher exited"
             pid=0
             launcher=0
+            core_pid_file=
             stop_watchdog
             assert_clean
             return
         fi
         sleep 0.1
     done
-    echo 'FAIL core did not exit within 7 seconds'; exit 1
+    echo 'FAIL core/launcher did not exit within 12 seconds'; lifecycle_diagnostics; exit 1
 }
 stop_watchdog() {
     if (( watchdog > 0 )); then
@@ -103,15 +124,18 @@ start_core() {
             exit 1
         fi
     done
+    core_pid_file=$work/core-$2.pid
+    rm -f "$core_pid_file"
+    # Record the exec PID inside sudo, rather than assuming $! is the core.
     if [[ $1 == true ]]; then
-        sudo "$core" run "$conf" > "$log" 2>&1 &
+        sudo /bin/sh -c 'echo $$ > "$1"; exec "$2" run "$3"' sh "$core_pid_file" "$core" "$conf" > "$log" 2>&1 &
     else
-        "$core" run "$conf" > "$log" 2>&1 &
+        /bin/sh -c 'echo $$ > "$1"; exec "$2" run "$3"' sh "$core_pid_file" "$core" "$conf" > "$log" 2>&1 &
     fi
     launcher=$!
     pid=$launcher
     # Independent rescue even if a client/test hangs while GitHub is routed via utun.
-    (sleep 90; sudo kill -TERM "$pid" 2>/dev/null || true) & watchdog=$!
+    (sleep 90; if [[ -s $core_pid_file ]]; then read -r pid < "$core_pid_file"; fi; sudo kill -TERM "$pid" 2>/dev/null || true) & watchdog=$!
     wait_ready "$launcher" "$log"
     python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["enhanced_mode"] == (sys.argv[2] == "true")' "$work/status.json" "$1"
 }

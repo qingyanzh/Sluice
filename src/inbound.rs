@@ -7,7 +7,7 @@ use log::{debug, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::collections::HashMap;
 
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::mitm::{intercept_for, Intercept, Prefixed};
@@ -25,7 +25,9 @@ where
     F: Fn(TcpStream, Arc<Router>) -> Fut + Copy + Send + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
-    let listener = TcpListener::bind(&addr).await.map_err(|e| crate::util::listen_error(name, &addr, e))?;
+    let listener = crate::util::listen_tcp(&addr, std::time::Duration::ZERO)
+        .await
+        .map_err(|e| crate::util::listen_error(name, &addr, e))?;
     info!("{name} proxy listening on {addr}");
     loop {
         let (sock, peer) = listener.accept().await?;

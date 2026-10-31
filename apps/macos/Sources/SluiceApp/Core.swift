@@ -303,7 +303,7 @@ final class Core: ObservableObject {
             rootPID = helperPID
             rootViaHelper = true
             privileged = true
-            do { try await HelperClient.stop() }
+            do { try await Core.stopRoot(pid: helperPID, viaHelper: true) }
             catch {
                 state = .failed("无法停止现有内核：\(error.localizedDescription)")
                 runningSummary = summary
@@ -323,9 +323,7 @@ final class Core: ObservableObject {
                 rootViaHelper = false
                 do {
                     try await client.shutdown()
-                    let deadline = Date().addingTimeInterval(10)
-                    while Core.alive(status.pid) && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
-                    guard !Core.alive(status.pid) else { throw APIError(message: "内核停止超时") }
+                    try await Core.waitForExit(pid: status.pid)
                     rootPID = nil
                     privileged = false
                     runningSummary = nil
@@ -345,9 +343,6 @@ final class Core: ObservableObject {
                     rootViaHelper = false
                     do {
                         try await Core.stopRoot(pid: pid, viaHelper: false)
-                        let deadline = Date().addingTimeInterval(10)
-                        while Core.alive(pid) && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
-                        guard !Core.alive(pid) else { throw APIError(message: "现有内核停止超时") }
                         rootPID = nil
                         privileged = false
                     } catch {
@@ -371,9 +366,6 @@ final class Core: ObservableObject {
                 privileged = true
                 do {
                     try await Core.stopRoot(pid: pid, viaHelper: false)
-                    let deadline = Date().addingTimeInterval(10)
-                    while Core.alive(pid) && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
-                    guard !Core.alive(pid) else { throw APIError(message: "现有内核停止超时") }
                     rootPID = nil
                     privileged = false
                 } catch {
@@ -555,6 +547,18 @@ final class Core: ObservableObject {
         } else {
             _ = try await Privileged.run("kill -INT \(pid)")
         }
+        try await waitForExit(pid: pid)
+    }
+
+    /// A shutdown response only acknowledges the request. Keep ownership until
+    /// the actual core exits and releases its listeners, including during restart.
+    nonisolated static func waitForExit(pid: Int32, timeout: Duration = .seconds(12)) async throws {
+        guard pid > 0 else { throw APIError(message: "invalid core PID: \(pid)") }
+        let deadline = ContinuousClock.now + timeout
+        while alive(pid), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard !alive(pid) else { throw APIError(message: "内核停止超时 (pid \(pid))") }
     }
 
     /// Reads whatever the root core appended to its log since last time.
@@ -568,22 +572,26 @@ final class Core: ObservableObject {
     }
 
     /// kill(pid, 0) on a root process from a user process fails with EPERM while it lives.
-    private static func alive(_ pid: Int32) -> Bool {
-        kill(pid, 0) == 0 || errno == EPERM
+    nonisolated private static func alive(_ pid: Int32) -> Bool {
+        pid > 0 && (kill(pid, 0) == 0 || errno == EPERM)
     }
 
     func stop() {
-        guard attachment == nil else { return }
+        guard attachment == nil, !stopping else { return }
         if let pid = rootPID {
             stopping = true
+            let viaHelper = rootViaHelper
             Task {
                 do {
-                    if !rootViaHelper, let api, (try? await api.status())?.pid == pid {
+                    if !viaHelper, let api, (try? await api.status())?.pid == pid {
                         try await api.shutdown()
+                        try await Core.waitForExit(pid: pid)
                     } else {
-                        try await Core.stopRoot(pid: pid, viaHelper: rootViaHelper)
+                        try await Core.stopRoot(pid: pid, viaHelper: viaHelper)
                     }
+                    if rootPID == pid { followLog(); exited(code: 0) }
                 } catch {
+                    guard rootPID == pid else { return }
                     stopping = false
                     lastActionError = "停止失败：\(error.localizedDescription)"
                 }
@@ -593,10 +601,16 @@ final class Core: ObservableObject {
         guard let p = process else { return }
         stopping = true
         p.interrupt()
-        let deadline = Date().addingTimeInterval(3)
         Task {
-            while p.isRunning && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
+            let deadline = ContinuousClock.now + .seconds(3)
+            while p.isRunning && ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(100)) }
             if p.isRunning { p.terminate() }
+            do { try await Core.waitForExit(pid: p.processIdentifier) }
+            catch {
+                guard process === p else { return }
+                stopping = false
+                lastActionError = "停止失败：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -608,7 +622,7 @@ final class Core: ObservableObject {
         stop()
         Task {
             defer { restarting = false }
-            let deadline = Date().addingTimeInterval(15)
+            let deadline = Date().addingTimeInterval(20)
             while isActive && Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
             if !isActive { start() }
             else { lastActionError = "内核停止超时，未能应用新配置。" }
@@ -645,6 +659,12 @@ final class Core: ObservableObject {
         let deadline = Date().addingTimeInterval(2)
         while p.isRunning && Date() < deadline { usleep(50_000) }
         if p.isRunning { p.terminate() }
+        let termDeadline = Date().addingTimeInterval(10)
+        while p.isRunning && Date() < termDeadline { usleep(50_000) }
+        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+        let killDeadline = Date().addingTimeInterval(2)
+        while p.isRunning && Date() < killDeadline { usleep(50_000) }
+        if !p.isRunning { p.waitUntilExit() }
     }
 
     private func exited(code: Int32) {

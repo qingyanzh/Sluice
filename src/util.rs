@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use socket2::SockRef;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpSocket, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 
 pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
@@ -20,6 +20,56 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn listen_error(name: &str, addr: &str, error: std::io::Error) -> anyhow::Error {
     let kind = error.kind();
     anyhow::Error::new(error).context(format!("bind {name} on {addr}: {kind:?}"))
+}
+
+/// Set reuse before binding. Do not use SO_REUSEPORT: a live previous core must
+/// keep the bind exclusive.
+pub async fn listen_tcp(addr: &str, retry_for: Duration) -> std::io::Result<TcpListener> {
+    let addrs: Vec<_> = tokio::net::lookup_host(addr).await?.collect();
+    let deadline = tokio::time::Instant::now() + retry_for;
+    loop {
+        let mut last = std::io::Error::new(std::io::ErrorKind::InvalidInput, "no listen addresses");
+        for addr in &addrs {
+            let socket = if addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+            socket.set_reuseaddr(true)?;
+            #[cfg(target_os = "macos")]
+            allow_listener_uid_handoff(&socket)?;
+            match socket.bind(*addr).and_then(|()| socket.listen(1024)) {
+                Ok(listener) => return Ok(listener),
+                Err(error) => last = error,
+            }
+        }
+        if last.kind() != std::io::ErrorKind::AddrInUse || tokio::time::Instant::now() >= deadline {
+            return Err(last);
+        }
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(100))).await;
+    }
+}
+
+/// Darwin's in_pcbbind checks the old socket's UID even with SO_REUSEADDR, so
+/// root-owned API connections in TIME_WAIT prevent the next user core binding.
+/// This public option is inherited by accepted sockets. It permits the UID
+/// handoff without SO_REUSEPORT (which would also share a live listener).
+/// See apple-oss-distributions/xnu: bsd/netinet/in_pcb.c and bsd/kern/uipc_socket2.c.
+#[cfg(target_os = "macos")]
+fn allow_listener_uid_handoff(socket: &TcpSocket) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let enabled: libc::c_int = 1;
+    // SAFETY: the live socket and correctly sized integer remain valid for the call.
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_REUSESHAREUID,
+            std::ptr::from_ref(&enabled).cast(),
+            std::mem::size_of_val(&enabled) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -183,6 +233,66 @@ pub fn udp_socket(dest: &SocketAddr) -> std::io::Result<UdpSocket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn listener_reuses_address_after_server_closes_connection() {
+        use tokio::io::AsyncReadExt;
+        let listener = listen_tcp("127.0.0.1:0", Duration::ZERO).await.unwrap();
+        assert!(SockRef::from(&listener).reuse_address().unwrap());
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            // Both the listening and accepted sockets must opt into UID handoff;
+            // accepted sockets can outlive the core itself in TIME_WAIT.
+            for fd in [listener.as_raw_fd(), server.as_raw_fd()] {
+                let mut enabled: libc::c_int = 0;
+                let mut len = std::mem::size_of_val(&enabled) as libc::socklen_t;
+                let result = unsafe {
+                    libc::getsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_REUSESHAREUID,
+                        std::ptr::from_mut(&mut enabled).cast(),
+                        &mut len,
+                    )
+                };
+                assert_eq!(result, 0);
+                assert_ne!(enabled, 0, "UID handoff must survive accept");
+            }
+        }
+        // Server initiates close and enters TIME_WAIT after the client closes.
+        drop(server);
+        assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+        drop(client);
+        drop(listener);
+        let rebound = listen_tcp(&addr.to_string(), Duration::ZERO).await.unwrap();
+        assert_eq!(rebound.local_addr().unwrap(), addr);
+    }
+
+    #[tokio::test]
+    async fn listener_retries_until_previous_listener_exits() {
+        let old = listen_tcp("127.0.0.1:0", Duration::ZERO).await.unwrap();
+        let addr = old.local_addr().unwrap().to_string();
+        let retry = tokio::spawn(async move { listen_tcp(&addr, Duration::from_secs(2)).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!retry.is_finished(), "must not share a live listener's port");
+        drop(old);
+        retry.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_retry_is_bounded_when_port_stays_occupied() {
+        let old = listen_tcp("127.0.0.1:0", Duration::ZERO).await.unwrap();
+        let addr = old.local_addr().unwrap().to_string();
+        let error = tokio::time::timeout(Duration::from_secs(1), listen_tcp(&addr, Duration::from_millis(150)))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    }
 
     #[test]
     fn listen_error_names_address_and_preserves_kind() {
