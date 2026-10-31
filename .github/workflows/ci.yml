@@ -2,11 +2,8 @@
 name: CI
 
 on:
-  # Branches are tested before they land; merges into main don't run CI again.
-  # Run it on main by hand with workflow_dispatch when needed.
-  push:
-    branches-ignore: [main]
-  pull_request:
+  # Manual only: pushes and pull requests don't start CI; changes are verified
+  # locally. Run it by hand (Actions tab or `gh workflow run CI`) when needed.
   workflow_dispatch:
 
 jobs:
