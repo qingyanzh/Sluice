@@ -292,14 +292,11 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         let modeTag = modeBadge(state.mode)
         let qualityTag = latencyBadge(networkLatency(state))
         let processes = busiestProcesses()
-        var rows: [(String, CGFloat)] = [("出站模式", modeTag.size.width), ("网络质量", qualityTag.size.width)]
-        if running { rows += state.groups.map { ($0.group, width($0.selected)) } }
-        rows += processes.map { ($0.0, width(menuBarSpeed($0.1))) }
-        let tab = tabStop(rows)
+        var rows: [RightColumn] = []
 
         menu.addItem(.separator())
         let modes = submenu(in: menu, title: "出站模式", enabled: running)
-        menu.items.last?.attributedTitle = trailing("出站模式", image: modeTag, tab: tab)
+        rows.append(RightColumn(item: menu.items.last!, name: "出站模式", image: modeTag))
         for option in OutboundMode.allCases {
             let rawValue = option.rawValue
             add(to: modes, option.title, symbol: option.icon, checked: option == state.mode) { [core, rawValue] in core.setMode(rawValue) }
@@ -310,16 +307,19 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             for group in state.groups {
                 let groupName = group.group
                 let options = submenu(in: menu, title: groupName)
-                menu.items.last?.attributedTitle = trailing(groupName, detail: group.selected, tab: tab)
-                let optionTab = tabStop(group.options.map { ($0.name, width(latencyText($0.latencyMs))) })
+                rows.append(RightColumn(item: menu.items.last!, name: groupName, detail: group.selected,
+                                        color: outboundColor(group.selected)))
+                var optionRows: [RightColumn] = []
                 for option in group.options {
                     let optionName = option.name
                     let item = add(to: options, optionName, checked: group.selected == optionName) { [core, groupName, optionName] in
                         core.select(group: groupName, option: optionName)
                     }
-                    item.attributedTitle = trailing(optionName, detail: latencyText(option.latencyMs), tab: optionTab)
+                    optionRows.append(RightColumn(item: item, name: optionName, detail: latencyText(option.latencyMs),
+                                                  color: NSColor(latencyStyle(option.latencyMs).1)))
                     item.image = latencyIcon(option.latencyMs)
                 }
+                alignRightColumn(of: options, optionRows)
                 options.addItem(.separator())
                 let testing = state.testingGroups.contains(groupName)
                 add(to: options, testing ? "测试中…" : "测试延迟", symbol: "speedometer", enabled: !testing) { [core, groupName] in core.test(group: groupName) }
@@ -330,7 +330,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         let quality = add(to: menu, "网络质量", enabled: running && state.testingGroups.isEmpty) { [core] in core.testAll() }
-        quality.attributedTitle = trailing("网络质量", image: qualityTag, dimmed: true, tab: tab)
+        rows.append(RightColumn(item: quality, name: "网络质量", image: qualityTag, dimmed: true))
         quality.toolTip = "当前节点的延迟，点击重新测试全部策略组"
 
         menu.addItem(.separator())
@@ -340,7 +340,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         } else {
             for (name, rate) in processes {
                 let item = add(to: menu, name) { [showWindow] in showWindow(.requests) }
-                item.attributedTitle = trailing(name, detail: menuBarSpeed(rate), tab: tab)
+                rows.append(RightColumn(item: item, name: name, detail: menuBarSpeed(rate)))
                 item.image = processIcon(name)
             }
         }
@@ -411,6 +411,12 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         add(to: menu, "退出", key: "q") { NSApp.terminate(nil) }
+        alignRightColumn(of: menu, rows)
+    }
+
+    /// Direct green, reject red, any proxy or group indigo: the same grammar as the window.
+    private func outboundColor(_ name: String) -> NSColor {
+        NSColor(name == "DIRECT" ? DS.ok : name == "REJECT" ? DS.fail : DS.info)
     }
 
     /// Latency of what traffic currently uses: the main group's selection, if tested.
@@ -486,41 +492,55 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         return item
     }
 
-    /// Right column position for one menu: just past the longest name plus the widest
-    /// detail, so the menu is only as wide as its content.
-    private func tabStop(_ rows: [(String, CGFloat)]) -> CGFloat {
+    /// A row whose detail (text or a small tag) sits flush with the menu's right edge.
+    private struct RightColumn {
+        let item: NSMenuItem
+        let name: String
+        var detail: String? = nil
+        var color: NSColor = .secondaryLabelColor
+        var image: NSImage? = nil
+        var dimmed = false
+    }
+
+    /// Names stay left; details align right at the end of the title area, which is as
+    /// wide as the widest title in this menu (plain titles included). The shortcut and
+    /// submenu-arrow column follows, so details line up with it.
+    private func alignRightColumn(of menu: NSMenu, _ rows: [RightColumn]) {
         let font = NSFont.menuFont(ofSize: 0)
-        let name = rows.map { ($0.0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
-        let detail = rows.map(\.1).max() ?? 0
-        return ceil(max(120, name + detail + 28))
-    }
-
-    private func width(_ text: String) -> CGFloat {
-        (text as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width
-    }
-
-    /// "Name ············ detail": the detail (text or a small tag) sits in a right-aligned column.
-    private func trailing(_ name: String, detail: String? = nil, image: NSImage? = nil, dimmed: Bool = false,
-                          tab: CGFloat) -> NSAttributedString {
+        var rows = rows
+        let listed = Set(rows.map { ObjectIdentifier($0.item) })
+        for item in menu.items {
+            if let action = item as? MenuBarAction, let shortcut = action.shortcut, !listed.contains(ObjectIdentifier(item)) {
+                rows.append(RightColumn(item: item, name: item.title, detail: shortcut, color: .tertiaryLabelColor))
+            }
+        }
+        guard !rows.isEmpty else { return }
+        func width(_ text: String) -> CGFloat { (text as NSString).size(withAttributes: [.font: font]).width }
+        let special = Set(rows.map { ObjectIdentifier($0.item) })
+        let plain = menu.items.filter { !$0.isSeparatorItem && !special.contains(ObjectIdentifier($0)) }.map { width($0.title) }
+        let needed = rows.map { width($0.name) + 24 + ($0.image?.size.width ?? $0.detail.map(width) ?? 0) }
+        let tab = ceil((plain + needed).max() ?? 0)
         let paragraph = NSMutableParagraphStyle()
         paragraph.tabStops = [NSTextTab(textAlignment: .right, location: tab)]
-        let font = NSFont.menuFont(ofSize: 0)
-        let title = NSMutableAttributedString(string: name, attributes: [
-            .font: font, .paragraphStyle: paragraph,
-            .foregroundColor: dimmed ? NSColor.secondaryLabelColor : NSColor.labelColor,
-        ])
-        if let detail {
-            title.append(NSAttributedString(string: "\t\(detail)", attributes: [
-                .font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph,
-            ]))
-        } else if let image {
-            let attachment = NSTextAttachment()
-            attachment.image = image
-            attachment.bounds = NSRect(x: 0, y: -3, width: image.size.width, height: image.size.height)
-            title.append(NSAttributedString(string: "\t", attributes: [.paragraphStyle: paragraph]))
-            title.append(NSAttributedString(attachment: attachment))
+        for row in rows {
+            let title = NSMutableAttributedString(string: row.name, attributes: [
+                .font: font, .paragraphStyle: paragraph,
+                .foregroundColor: row.dimmed || !row.item.isEnabled ? NSColor.secondaryLabelColor : NSColor.labelColor,
+            ])
+            if let detail = row.detail {
+                title.append(NSAttributedString(string: "\t\(detail)", attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: font.pointSize, weight: .regular),
+                    .foregroundColor: row.item.isEnabled ? row.color : NSColor.tertiaryLabelColor, .paragraphStyle: paragraph,
+                ]))
+            } else if let image = row.image {
+                let attachment = NSTextAttachment()
+                attachment.image = image
+                attachment.bounds = NSRect(x: 0, y: -3, width: image.size.width, height: image.size.height)
+                title.append(NSAttributedString(string: "\t", attributes: [.paragraphStyle: paragraph]))
+                title.append(NSAttributedString(attachment: attachment))
+            }
+            row.item.attributedTitle = title
         }
-        return title
     }
 
     @discardableResult
@@ -558,10 +578,14 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
 @MainActor
 private final class MenuBarAction: NSMenuItem {
     private let handler: () -> Void
+    /// Drawn in the right column with the other details ("⌘M") instead of in AppKit's
+    /// separate key-equivalent column, so everything on the right lines up.
+    let shortcut: String?
 
     init(title: String, key: String, action: @escaping () -> Void) {
         handler = action
-        super.init(title: title, action: #selector(invoke), keyEquivalent: key)
+        shortcut = key.isEmpty ? nil : "⌘" + key.uppercased()
+        super.init(title: title, action: #selector(invoke), keyEquivalent: "")
         target = self
     }
 
