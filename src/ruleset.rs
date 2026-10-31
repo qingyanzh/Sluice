@@ -13,7 +13,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use http_body_util::BodyExt;
+use hyper::body::Body;
 
 use crate::rule::{Cidr, Matcher};
 use crate::trojan::tls_client;
@@ -282,24 +283,6 @@ pub fn spawn_refresh(sets: Vec<Arc<RuleSet>>, interval: Duration) {
     });
 }
 
-fn dechunk(mut body: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(body.len());
-    loop {
-        let line_end = body.windows(2).position(|w| w == b"\r\n").ok_or_else(|| anyhow!("bad chunked body"))?;
-        let size_str = std::str::from_utf8(&body[..line_end])?.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_str, 16).map_err(|_| anyhow!("bad chunk size {size_str:?}"))?;
-        body = &body[line_end + 2..];
-        if size == 0 {
-            return Ok(out);
-        }
-        if size > MAX_BODY - out.len() || body.len() < size || body.get(size..size.saturating_add(2)) != Some(b"\r\n") {
-            bail!("truncated chunked body");
-        }
-        out.extend_from_slice(&body[..size]);
-        body = &body[size + 2..];
-    }
-}
-
 pub const DEFAULT_USER_AGENT: &str = concat!("clash.meta mihomo/1.18.10 Sluice/", env!("CARGO_PKG_VERSION"));
 
 fn decode_body(body: Vec<u8>, encoding: Option<&str>) -> Result<Vec<u8>> {
@@ -331,47 +314,44 @@ pub async fn http_get(source: &str, user_agent: Option<&str>) -> Result<FetchRes
         if !matches!(url.scheme(), "http" | "https") { bail!("unsupported URL scheme"); }
         let host = url.host_str().ok_or_else(|| anyhow!("URL without host"))?.trim_matches(['[', ']']);
         let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL without port"))?;
-        let raw = tokio::time::timeout(Duration::from_secs(30), async {
+        let (status, headers, body) = tokio::time::timeout(Duration::from_secs(30), async {
             let tcp = connect_tcp(host, port).await?;
-            let mut stream: BoxStream = if url.scheme() == "https" {
+            let stream: BoxStream = if url.scheme() == "https" {
                 let (connector, sni) = tls_client(host, None, false)?;
                 Box::new(connector.connect(sni, tcp).await?)
             } else { Box::new(tcp) };
             let path = &url[url::Position::BeforePath..url::Position::AfterQuery];
             let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
-            let req = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: {user_agent}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n");
-            stream.write_all(req.as_bytes()).await?;
-            let mut raw = Vec::new();
-            (&mut stream).take((MAX_BODY + 65537) as u64).read_to_end(&mut raw).await?;
-            if raw.len() > MAX_BODY + 65536 { bail!("HTTP response too large"); }
-            Ok::<_, anyhow::Error>(raw)
+            let request = http::Request::builder().uri(path)
+                .header(http::header::HOST, authority)
+                .header(http::header::USER_AGENT, user_agent)
+                .header(http::header::ACCEPT_ENCODING, "gzip")
+                .header(http::header::CONNECTION, "close")
+                .body(http_body_util::Empty::<bytes::Bytes>::new())?;
+            let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+                .title_case_headers(true).max_buf_size(65536)
+                .handshake(hyper_util::rt::TokioIo::new(stream)).await?;
+            // Dropping this set closes the connection even if the peer ignores
+            // Connection: close, or if the enclosing download times out.
+            let mut driver = tokio::task::JoinSet::new();
+            driver.spawn(connection);
+            let response = sender.send_request(request).await.context("read HTTP response")?;
+            let (parts, body) = response.into_parts();
+            if body.size_hint().lower() > MAX_BODY as u64 { bail!("HTTP body too large"); }
+            // Hyper finishes Content-Length/chunked bodies at their protocol
+            // boundary instead of waiting for a possibly delayed TCP/TLS EOF.
+            let body = http_body_util::Limited::new(body, MAX_BODY).collect().await
+                .map_err(anyhow::Error::from_boxed).context("read HTTP body")?.to_bytes();
+            Ok::<_, anyhow::Error>((parts.status.as_u16(), parts.headers, body))
         }).await.map_err(|_| anyhow!("download timed out"))??;
-        let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow!("malformed HTTP response"))?;
-        if head_end > 65536 { bail!("HTTP headers too large"); }
-        let head = String::from_utf8_lossy(&raw[..head_end]);
-        let status: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| anyhow!("malformed HTTP status"))?;
-        let header = |name: &str| {
-            head.lines().skip(1).find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
-            })
-        };
+        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::trim);
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
             if redirects == 5 { bail!("too many redirects (limit 5)"); }
             let location = header("location").ok_or_else(|| anyhow!("HTTP {status}: redirect without Location"))?;
             url = url.join(location)?;
             continue;
         }
-        let body = &raw[head_end + 4..];
-        let body = if header("transfer-encoding").is_some_and(|v| v.split(',').any(|e| e.trim().eq_ignore_ascii_case("chunked"))) {
-            dechunk(body)?
-        } else if let Some(length) = header("content-length") {
-            let length: usize = length.parse().context("bad Content-Length")?;
-            if length > MAX_BODY { bail!("HTTP body too large"); }
-            body.get(..length).ok_or_else(|| anyhow!("truncated HTTP body"))?.to_vec()
-        } else { body.to_vec() };
-        if body.len() > MAX_BODY { bail!("HTTP body too large"); }
-        let body = decode_body(body, header("content-encoding"))?;
+        let body = decode_body(body.to_vec(), header("content-encoding"))?;
         if !(200..300).contains(&status) {
             bail!("HTTP {status}: {}", String::from_utf8_lossy(&body[..body.len().min(200)]));
         }
@@ -386,6 +366,7 @@ pub async fn http_get(source: &str, user_agent: Option<&str>) -> Result<FetchRes
 mod tests {
     use super::*;
     use std::io::Write;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     /// Each fixture runs exclusively on loopback, with no DNS or external requests.
@@ -427,15 +408,12 @@ mod tests {
     }
 
     #[test]
-    fn compressed_chunked_bodies_decode_offline() {
+    fn compressed_bodies_decode_offline() {
         let original = "HK = trojan, h, 443, password=p\n禁止访问".as_bytes();
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gzip.write_all(original).unwrap();
         let gzip = gzip.finish().unwrap();
-        let mut wire = format!("{:x}\r\n", gzip.len()).into_bytes();
-        wire.extend_from_slice(&gzip);
-        wire.extend_from_slice(b"\r\n0\r\n\r\n");
-        assert_eq!(decode_body(dechunk(&wire).unwrap(), Some("gzip")).unwrap(), original);
+        assert_eq!(decode_body(gzip, Some("gzip")).unwrap(), original);
         let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         zlib.write_all(original).unwrap();
         assert_eq!(decode_body(zlib.finish().unwrap(), Some("deflate")).unwrap(), original);
@@ -443,7 +421,6 @@ mod tests {
         raw.write_all(original).unwrap();
         assert_eq!(decode_body(raw.finish().unwrap(), Some("deflate")).unwrap(), original);
         assert!(decode_body(b"truncated".to_vec(), Some("gzip")).is_err());
-        assert!(dechunk(b"ffffffffffffffff\r\n").is_err());
     }
 
     #[tokio::test]
@@ -474,6 +451,45 @@ mod tests {
         for request in requests.into_iter().chain(final_server.await.unwrap()) {
             assert!(request.contains(&format!("User-Agent: {DEFAULT_USER_AGENT}\r\n")));
             assert!(request.contains("Accept-Encoding: gzip\r\n"));
+        }
+    }
+
+    #[tokio::test]
+    async fn http_complete_bodies_do_not_wait_for_connection_close() {
+        for chunked in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let (release, keep_open) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") { request.push(socket.read_u8().await.unwrap()); }
+                let response = if chunked {
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=yes\r\nhello\r\n0\r\nX-Trailer: done\r\n\r\n".as_slice()
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".as_slice()
+                };
+                for fragment in response.chunks(7) { socket.write_all(fragment).await.unwrap(); }
+                let _ = keep_open.await;
+            });
+            let result = tokio::time::timeout(Duration::from_secs(1), http_get(&url, None)).await;
+            let _ = release.send(());
+            server.await.unwrap();
+            assert_eq!(result.expect("complete HTTP body must not wait for EOF").unwrap().text, "hello");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_rejects_truncated_or_oversized_bodies() {
+        for (headers, body) in [
+            ("Content-Length: 5\r\n".to_string(), b"hi".as_slice()),
+            ("Transfer-Encoding: chunked\r\n".to_string(), b"5\r\nhi".as_slice()),
+            (format!("Content-Length: {}\r\n", MAX_BODY + 1), b"".as_slice()),
+            ("Transfer-Encoding: chunked\r\n".to_string(), b"ffffffffffffffff\r\n".as_slice()),
+        ] {
+            let (url, server) = mock_http(vec![response("200 OK", &headers, body)]).await;
+            assert!(http_get(&url, None).await.is_err());
+            server.await.unwrap();
         }
     }
 
@@ -581,8 +597,4 @@ mod tests {
         assert!(d.match_domain("api.github.com") && d.match_domain("raw.example.org"));
     }
 
-    #[test]
-    fn urls_and_chunked() {
-        assert_eq!(dechunk(b"5\r\nhello\r\n6;x=y\r\n world\r\n0\r\n\r\n").unwrap(), b"hello world");
-    }
 }
