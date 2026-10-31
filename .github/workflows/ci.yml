@@ -2,7 +2,10 @@
 name: CI
 
 on:
+  # Branches are tested before they land; merges into main don't run CI again.
+  # Run it on main by hand with workflow_dispatch when needed.
   push:
+    branches-ignore: [main]
   pull_request:
   workflow_dispatch:
 
