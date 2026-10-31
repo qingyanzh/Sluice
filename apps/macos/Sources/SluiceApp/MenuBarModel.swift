@@ -31,7 +31,7 @@ struct MenuBarState: Equatable {
         groups = core.groups.filter(\.isSelectable)
         testingGroups = core.testingGroups
         systemProxyOn = core.systemProxyOn
-        canSetSystemProxy = core.summary.httpListen != nil || core.summary.socksListen != nil
+        canSetSystemProxy = !core.settingSystemProxy && (core.summary.httpListen != nil || core.summary.socksListen != nil)
         enhancedMode = core.summary.enhancedMode
         reloading = core.reloading
         displayMode = core.preferences.string(forKey: "menuBarDisplayMode")

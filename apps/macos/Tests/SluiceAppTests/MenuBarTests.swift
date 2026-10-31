@@ -201,3 +201,49 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(updates, 1)
     }
 }
+
+extension MenuBarTests {
+    func testIdenticalPublicationsRenderOneImageAndEveryDrawingInputInvalidates() {
+        let publisher = ObservableObjectPublisher()
+        var cache = MenuBarImageCache()
+        var renders = 0
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        func key(mode: MenuBarDisplayMode = .iconAndSpeed, font: NSFont? = nil,
+                 upload: String = "0 B/s", download: String = "0 B/s", mark: String = "R",
+                 showsMode: Bool = true, dark: Bool = false, ink: NSColor = .black) -> MenuBarImageKey {
+            MenuBarImageKey(mode: mode, font: font ?? .monospacedDigitSystemFont(ofSize: 9, weight: .regular),
+                            upload: upload, download: download, modeMark: mark,
+                            showsMode: showsMode, dark: dark, ink: ink)
+        }
+        let subscription = publisher.sink {
+            _ = cache.image(for: key(), render: {
+                renders += 1
+                return NSImage(size: NSSize(width: 20, height: 22))
+            })
+        }
+        for _ in 0..<1_000 { publisher.send() }
+        XCTAssertEqual(renders, 1)
+        subscription.cancel()
+        for changed in [key(mode: .iconOnly), key(font: font.withSize(12)), key(upload: "1 KB/s"),
+                        key(download: "2 KB/s"), key(mark: "D"), key(showsMode: false),
+                        key(dark: true), key(ink: .systemRed), key(ink: .black.withAlphaComponent(0.55))] {
+            _ = cache.image(for: key(), render: { NSImage() })
+            XCTAssertNotNil(cache.image(for: changed, render: { NSImage() }))
+            XCTAssertNil(cache.image(for: changed, render: { XCTFail("Identical appearance callback must not render"); return NSImage() }))
+        }
+    }
+
+    func testMonitoringIsNeverScheduledForStoppedOrFailedCore() {
+        XCTAssertFalse(MonitoringPolicy.shouldPoll(state: .stopped))
+        XCTAssertFalse(MonitoringPolicy.shouldPoll(state: .failed("invalid config")))
+        XCTAssertTrue(MonitoringPolicy.shouldPoll(state: .starting))
+        XCTAssertTrue(MonitoringPolicy.shouldPoll(state: .running))
+        for state in [Core.State.stopped, .failed("invalid config"), .starting, .running] {
+            XCTAssertFalse(MonitoringPolicy.shouldFollowEvents(state: state, windowVisible: false))
+        }
+        XCTAssertTrue(MonitoringPolicy.shouldFollowEvents(state: .running, windowVisible: true))
+        XCTAssertFalse(MonitoringPolicy.shouldFollowEvents(state: .stopped, windowVisible: true))
+        XCTAssertEqual((0..<30).filter { MonitoringPolicy.maintenanceDue(windowVisible: false, tick: $0) }, [0, 10, 20])
+        XCTAssertTrue((0..<30).allSatisfy { MonitoringPolicy.maintenanceDue(windowVisible: true, tick: $0) })
+    }
+}

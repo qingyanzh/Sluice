@@ -44,7 +44,7 @@ struct ActiveRequestsView: View {
                     if rows.isEmpty {
                         if core.state != .running {
                             EmptyState(icon: "arrow.up.arrow.down", title: "Sluice 未运行",
-                                       detail: "启动后可查看活动 TCP 连接。", action: ("启动 Sluice", { core.start() }))
+                                       detail: "启动后可查看活动 TCP 连接。", action: ("启动 Sluice", { core.requestStart() }))
                         } else if !core.activeConnectionsLoaded {
                             if let error = core.activeConnectionsError {
                                 EmptyState(icon: "exclamationmark.triangle", title: "无法读取活动连接", detail: error)

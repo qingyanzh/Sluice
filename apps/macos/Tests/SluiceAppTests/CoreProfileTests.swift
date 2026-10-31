@@ -102,3 +102,72 @@ final class CoreProfileTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: ProfileStore.activeNameKey), "Default")
     }
 }
+
+extension CoreProfileTests {
+    @MainActor
+    func testCopyDraftSwitchWritesTargetAndPreservesSourceOnDiskAndRelaunch() async throws {
+        let core = makeCore()
+        let sourcePath = core.configPath
+        let original = core.readConfig()
+        try core.createProfile(name: "Work", contents: "[Rule]\nFINAL,REJECT\n")
+        let draft = original + "[Rule]\nDOMAIN,edited.example,DIRECT\nFINAL,DIRECT\n"
+        try await core.copyDraftAndSwitch(to: "Work", text: draft, check: { _ in nil })
+        XCTAssertEqual(core.activeProfileName, "Work")
+        XCTAssertEqual(core.readConfig(), draft)
+        XCTAssertEqual(try String(contentsOfFile: sourcePath, encoding: .utf8), original)
+        XCTAssertEqual(makeCore().readConfig(), draft)
+    }
+
+    @MainActor
+    func testInvalidDraftDoesNotOverwriteEitherProfileOrChangeSelection() async throws {
+        let core = makeCore()
+        let sourcePath = core.configPath
+        let original = core.readConfig()
+        let target = "[Rule]\nFINAL,REJECT\n"
+        try core.createProfile(name: "Work", contents: target)
+        do {
+            try await core.copyDraftAndSwitch(to: "Work", text: "invalid", check: { _ in "line 1: invalid rule" })
+            XCTFail("Invalid draft must fail")
+        } catch { XCTAssertEqual(error.localizedDescription, "line 1: invalid rule") }
+        XCTAssertEqual(core.configPath, sourcePath)
+        XCTAssertEqual(core.readConfig(), original)
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("profiles/Work.conf"), encoding: .utf8), target)
+    }
+
+    @MainActor
+    func testStartupValidationFailureShowsBannerAndAppLogWithoutLaunching() async {
+        let core = makeCore()
+        await core.startValidated { _, path in
+            XCTAssertEqual(path, core.configPath)
+            XCTAssertTrue(core.validatingStart)
+            return "error: line 7: unknown policy Missing"
+        }
+        XCTAssertFalse(core.isActive)
+        XCTAssertFalse(core.validatingStart)
+        XCTAssertEqual(core.lastActionError, "启动失败：error: line 7: unknown policy Missing")
+        XCTAssertEqual(core.logs.last?.level, "ERROR")
+        XCTAssertEqual(core.logs.last?.message, core.lastActionError)
+    }
+
+    @MainActor
+    func testProxySwitchIsOptimisticPreventsOverlapAndRollsBackFailure() async {
+        try? "[General]\nhttp-listen = 127.0.0.1:6252\n".write(to: source, atomically: true, encoding: .utf8)
+        let core = makeCore()
+        await core.applySystemProxy(true, readStatus: { _, _, _ in .init(isSluice: true) }) { on, _, _ in
+            XCTAssertTrue(on)
+            XCTAssertTrue(core.systemProxyOn)
+            XCTAssertTrue(core.settingSystemProxy)
+            await core.applySystemProxy(false) { _, _, _ in XCTFail("Must not overlap") }
+        }
+        XCTAssertTrue(core.systemProxyOn)
+        await core.applySystemProxy(false) { on, _, _ in
+            XCTAssertFalse(on)
+            XCTAssertFalse(core.systemProxyOn, "Banner reacts before networksetup completes")
+            XCTAssertTrue(core.settingSystemProxy)
+            throw APIError(message: "permission denied")
+        }
+        XCTAssertTrue(core.systemProxyOn)
+        XCTAssertFalse(core.settingSystemProxy)
+        XCTAssertEqual(core.lastActionError, "设置系统代理失败：permission denied")
+    }
+}

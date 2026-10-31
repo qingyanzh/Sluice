@@ -68,7 +68,7 @@ final class MaintenanceSettingsTests: XCTestCase {
     func testDiagnosticsReportsFailureAndCanRetryToAFile() async {
         let file = URL(fileURLWithPath: "/tmp/diagnostics.zip")
         var attempts = 0
-        let exporter = DiagnosticsExporter { _, _, _, _ in
+        let exporter = DiagnosticsExporter(present: { $0 }) { _, _, _, _ in
             attempts += 1
             if attempts == 1 { throw APIError(message: "磁盘空间不足") }
             return file
@@ -85,7 +85,7 @@ final class MaintenanceSettingsTests: XCTestCase {
         let started = expectation(description: "Export started")
         var continuation: CheckedContinuation<URL, Error>?
         var calls = 0
-        let exporter = DiagnosticsExporter { _, _, _, _ in
+        let exporter = DiagnosticsExporter(present: { $0 }) { _, _, _, _ in
             calls += 1
             return try await withCheckedThrowingContinuation {
                 continuation = $0
@@ -103,5 +103,43 @@ final class MaintenanceSettingsTests: XCTestCase {
         await task.value
         XCTAssertEqual(exporter.state, .exported(file))
         XCTAssertFalse(exporter.state.isExporting)
+    }
+}
+
+extension MaintenanceSettingsTests {
+    @MainActor
+    func testDiagnosticsKeepsProgressWhileChoosingDestinationAndReportsSavedPath() async {
+        let original = URL(fileURLWithPath: "/tmp/generated.zip")
+        let saved = URL(fileURLWithPath: "/tmp/chosen.zip")
+        let choosing = expectation(description: "Destination presented")
+        var continuation: CheckedContinuation<URL, Error>?
+        let exporter = DiagnosticsExporter(present: { file in
+            XCTAssertEqual(file, original)
+            return try await withCheckedThrowingContinuation {
+                continuation = $0
+                choosing.fulfill()
+            }
+        }, write: { _, _, _, _ in original })
+        let task = Task { await exporter.export(api: nil, binary: nil, configPath: "") }
+        await fulfillment(of: [choosing], timeout: 2)
+        XCTAssertEqual(exporter.state, .exporting)
+        continuation?.resume(returning: saved)
+        await task.value
+        XCTAssertEqual(exporter.state, .exported(saved))
+    }
+
+    func testDiagnosticsMovesZipAndCanReplaceChosenExistingFile() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appendingPathComponent("generated.zip")
+        let destination = directory.appendingPathComponent("saved.zip")
+        for contents in ["first zip", "replacement zip"] {
+            try Data(contents.utf8).write(to: original)
+            let saved = try await DiagnosticsExporter.moveBundle(original, to: destination)
+            XCTAssertEqual(saved, destination)
+            XCTAssertEqual(try String(contentsOf: saved, encoding: .utf8), contents)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+        }
     }
 }

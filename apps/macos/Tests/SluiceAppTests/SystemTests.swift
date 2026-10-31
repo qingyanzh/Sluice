@@ -103,3 +103,32 @@ final class SystemTests: XCTestCase {
         XCTAssertNil(ListenConflict.port(in: "error: connection failed"))
     }
 }
+
+extension SystemTests {
+    func testConfigCheckUsesGivenBinaryAndPreservesItsError() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let binary = directory.appendingPathComponent("sluice")
+        let script = """
+        #!/bin/sh
+        [ "$1" = check ] || exit 99
+        printf 'error: line 4: invalid rule in %s\\n' "$2" >&2
+        exit 2
+        """
+        try script.write(to: binary, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        let message = await ConfigValidation.check(binary: binary, path: "/tmp/invalid config.conf")
+        XCTAssertEqual(message, "error: line 4: invalid rule in /tmp/invalid config.conf")
+        let missing = await ConfigValidation.check(binary: nil, path: "")
+        XCTAssertNotNil(missing)
+        let valid = await ConfigValidation.check(binary: URL(fileURLWithPath: "/usr/bin/true"), path: "")
+        XCTAssertNil(valid)
+    }
+
+    func testToolDrainsOutputLargerThanPipeBeforeWaitingForExit() async {
+        let (status, output) = await runTool("/usr/bin/head", ["-c", "262144", "/dev/zero"])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(output.utf8.count, 262144)
+    }
+}

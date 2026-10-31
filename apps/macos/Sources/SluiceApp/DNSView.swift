@@ -75,7 +75,7 @@ struct DNSView: View {
                     } else {
                         EmptyState(icon: "network", title: "Sluice 未运行",
                                    detail: "启动后可查看和清空 DNS 缓存。",
-                                   action: ("启动 Sluice", { core.start() }))
+                                   action: ("启动 Sluice", { core.requestStart() }))
                     }
                 } else if !loaded && loadError == nil {
                     ProgressView("正在加载 DNS 缓存…").font(DS.small)

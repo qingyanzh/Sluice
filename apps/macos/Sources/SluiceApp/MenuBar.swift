@@ -142,6 +142,28 @@ enum MenuBarLabel {
 }
 
 /// Own the NSStatusItem so AppKit never derives its length from changing content.
+struct MenuBarImageKey: Equatable {
+    let mode: MenuBarDisplayMode
+    let font: NSFont
+    let upload: String
+    let download: String
+    let modeMark: String
+    let showsMode: Bool
+    let dark: Bool
+    let ink: NSColor
+}
+
+struct MenuBarImageCache {
+    private var lastKey: MenuBarImageKey?
+
+    mutating func image(for key: MenuBarImageKey, render: () -> NSImage) -> NSImage? {
+        guard key != lastKey else { return nil }
+        // Commit before assigning button.image, which can trigger appearance KVO.
+        lastKey = key
+        return render()
+    }
+}
+
 @MainActor
 final class MenuBarStatusItem: NSObject, NSMenuDelegate {
     private let core: Core
@@ -153,6 +175,9 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
     private var appearanceObservation: NSKeyValueObservation?
     private var showsMode = true
     private var dimWhenNotProxying = true
+    private var imageCache = MenuBarImageCache()
+    private var refreshPending = false
+    private var accessibilityLabel: String?
 
     init(core: Core, showWindow: @escaping (Pane?) -> Void) {
         self.core = core
@@ -172,15 +197,15 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         refreshSettings()
         // objectWillChange fires before @Published values are assigned. Deliver on
         // the next main-queue turn so the image uses the new rates and state.
-        core.objectWillChange.receive(on: DispatchQueue.main).sink { [weak self] _ in
-            self?.refreshImage()
+        core.objectWillChange.sink { [weak self] _ in
+            self?.scheduleRefresh()
         }.store(in: &subscriptions)
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: DispatchQueue.main).sink { [weak self] _ in
                 self?.refreshSettings()
             }.store(in: &subscriptions)
         appearanceObservation = statusItem.button?.observe(\.effectiveAppearance) { [weak self] _, _ in
-            Task { @MainActor in self?.refreshImage() }
+            Task { @MainActor in self?.scheduleRefresh() }
         }
     }
 
@@ -201,7 +226,17 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         }
         showsMode = defaults.object(forKey: "menuBarShowOutboundMode") as? Bool ?? true
         dimWhenNotProxying = defaults.object(forKey: "menuBarDimWhenNotProxying") as? Bool ?? true
-        refreshImage()
+        scheduleRefresh()
+    }
+
+    private func scheduleRefresh() {
+        guard !refreshPending else { return }
+        refreshPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            refreshPending = false
+            refreshImage()
+        }
     }
 
     private func refreshImage() {
@@ -216,10 +251,20 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         case .global: "G"
         case .rule: "R"
         }
-        button.image = MenuBarLabel.image(layout: layout, upload: core.displayedRates.up.menuText,
-                                         download: core.displayedRates.down.menuText, modeMark: mark,
-                                         showsMode: showsMode, dark: dark, ink: ink)
-        button.setAccessibilityLabel("Sluice，\(core.state.label)\(showsMode && layout.mode.showsIcon ? "，\(mode.title)" : "")\(layout.mode.showsSpeed ? "，上传每秒 \(core.displayedRates.up.menuText)，下载每秒 \(core.displayedRates.down.menuText)" : "")")
+        let key = MenuBarImageKey(mode: layout.mode, font: layout.font,
+                                  upload: layout.mode.showsSpeed ? core.displayedRates.up.menuText : "",
+                                  download: layout.mode.showsSpeed ? core.displayedRates.down.menuText : "",
+                                  modeMark: showsMode && layout.mode.showsIcon ? mark : "",
+                                  showsMode: showsMode, dark: dark, ink: ink)
+        if let image = imageCache.image(for: key, render: {
+            MenuBarLabel.image(layout: layout, upload: key.upload, download: key.download,
+                               modeMark: key.modeMark, showsMode: key.showsMode, dark: dark, ink: ink)
+        }) { button.image = image }
+        let label = "Sluice，\(core.state.label)\(showsMode && layout.mode.showsIcon ? "，\(mode.title)" : "")\(layout.mode.showsSpeed ? "，上传每秒 \(core.displayedRates.up.menuText)，下载每秒 \(core.displayedRates.down.menuText)" : "")"
+        if accessibilityLabel != label {
+            accessibilityLabel = label
+            button.setAccessibilityLabel(label)
+        }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -240,7 +285,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
         add(to: menu, state.isActive ? "停止 Sluice" : "启动 Sluice", symbol: state.isActive ? "stop.fill" : "play.fill", enabled: state.state != .starting) { [core] in
-            if core.isActive { core.stop() } else { core.start() }
+            if core.isActive { core.stop() } else { core.requestStart() }
         }
         menu.addItem(.separator())
         let mode = state.mode
@@ -301,7 +346,7 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             if core.lastActionError?.hasPrefix("导出诊断信息失败：") == true { core.lastActionError = nil }
             Task {
                 await diagnostics.export(api: core.state == .running ? core.api : nil,
-                                         binary: core.coreBinary, configPath: core.configPath, reveal: true)
+                                         binary: core.coreBinary, configPath: core.configPath)
                 if case .failed(let message) = diagnostics.state {
                     core.lastActionError = "导出诊断信息失败：\(message)"
                     showWindow(.overview)
