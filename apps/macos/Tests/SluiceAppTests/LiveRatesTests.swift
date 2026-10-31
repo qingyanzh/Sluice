@@ -74,7 +74,7 @@ final class LiveRatesTests: XCTestCase {
         rates.update(up: 0, down: 1000)
         XCTAssertEqual(rates.up.value, 0)
         XCTAssertEqual(rates.up.formatted.text, "0 KB/s")
-        XCTAssertEqual(rates.up.menuText, "0.0 KB/s")
+        XCTAssertEqual(rates.up.menuText, "0 KB/s")
         XCTAssertEqual(rates.down.value, 1250)
     }
 
@@ -93,13 +93,13 @@ final class LiveRatesTests: XCTestCase {
 
     func testDecimalMenuUnitHysteresisAndFixedPrecision() {
         var formatter = RateUnitFormatter.menuBar
-        XCTAssertEqual(formatter.format(1_000_000).text, "1.0 MB/s")
-        XCTAssertEqual(formatter.format(950_000).text, "1.0 MB/s")
+        XCTAssertEqual(formatter.format(1_000_000).text, "1 MB/s")
+        XCTAssertEqual(formatter.format(950_000).text, "1 MB/s")
         XCTAssertEqual(formatter.format(900_000).unit, "MB")
         XCTAssertEqual(formatter.format(899_999).unit, "KB")
         XCTAssertEqual(formatter.format(12_340_000).text, "12 MB/s")
         XCTAssertEqual(formatter.format(123_000_000).text, "123 MB/s")
-        XCTAssertEqual(formatter.format(1_000_000_000).text, "1.0 GB/s")
+        XCTAssertEqual(formatter.format(1_000_000_000).text, "1 GB/s")
     }
 
     func testUnitSelectionHandlesLargeJumpsAndResetsOnIdle() {

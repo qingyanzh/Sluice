@@ -190,6 +190,8 @@ struct ActivityView: View {
     private func statistic(_ value: String, label: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(value).font(DS.figure(20)).monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.smooth(duration: 0.5), value: value)
                 .frame(width: 80, alignment: .leading)
             Text(label).font(DS.small).foregroundStyle(DS.ink2).fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -226,6 +228,8 @@ struct ActivityView: View {
                 Text(title).font(DS.small).foregroundStyle(DS.ink2)
             }
             Text(formatBytes(value)).font(DS.label.monospacedDigit())
+                .contentTransition(.numericText())
+                .animation(.smooth(duration: 0.7), value: formatBytes(value))
                 .frame(width: 100, alignment: .leading)
         }
     }

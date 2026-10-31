@@ -68,11 +68,10 @@ struct RateUnitFormatter {
         let value = bytes / pow(radix, Double(unitIndex))
         let number: String
         if fixedWidth {
-            // At most three digits ("9.9", "999"): the menu bar item stays narrow.
-            // Capping before rounding avoids "1000" just below a unit transition.
+            // Whole numbers, at most three digits ("0", "12", "999"): the menu bar item
+            // stays narrow. Capping avoids "1000" just below a unit transition.
             // The renderer right-aligns it in a fixed box; unit selection keeps hysteresis.
-            let capped = min(999, value)
-            number = String(format: capped < 9.95 ? "%.1f" : "%.0f", locale: Locale(identifier: "en_US_POSIX"), capped)
+            number = String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), min(999, value))
         } else {
             number = String(format: value >= 10 || value == 0 ? "%.0f" : "%.1f", value)
         }

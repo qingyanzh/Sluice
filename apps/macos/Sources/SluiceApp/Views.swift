@@ -248,7 +248,7 @@ struct MainView: View {
             .toolbarBackground(.hidden, for: .windowToolbar)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    TogglePill(title: "系统代理", on: core.systemProxyOn,
+                    TogglePill(title: "系统代理", icon: "network", on: core.systemProxyOn,
                                warning: core.systemProxyOn && core.state != .running && core.state != .starting) { core.setSystemProxy(!core.systemProxyOn) }
                         .disabled(core.settingSystemProxy || (core.summary.httpListen == nil && core.summary.socksListen == nil))
                         .help(core.systemProxyOn && core.state != .running ? "系统代理已开启，但内核未运行：网络请求会失败" : "把系统的 HTTP/HTTPS/SOCKS 代理指向 Sluice")
@@ -384,22 +384,37 @@ struct StatusBadge: View {
 /// Toolbar capsule with a status dot, like Surge's System Proxy / Enhanced Mode buttons.
 struct TogglePill: View {
     let title: String
+    var icon = "circle"
     let on: Bool
     /// On, but not doing its job (e.g. system proxy set while the core is stopped).
     var warning = false
     let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var enabled
+
     var body: some View {
+        let tone: Color = warning ? DS.warn : on ? DS.ok : DS.ink2
         Button(action: action) {
             HStack(spacing: 6) {
-                let dot: Color = warning ? DS.warn : on ? DS.ok : DS.off.opacity(0.6)
-                Circle().fill(dot).frame(width: 7, height: 7)
-                    .scaleEffect(on ? 1 : 0.8)
-                    .animation(DS.spring, value: on)
-                Text(title).font(DS.small.weight(on ? .semibold : .medium))
-                    .foregroundStyle(on ? Color.primary : DS.ink2)
+                Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                    .symbolEffect(.bounce, value: on)
+                Text(title).font(DS.small.weight(.medium))
+                Circle().fill(on || warning ? tone : DS.ink3.opacity(0.5)).frame(width: 6, height: 6)
             }
-            .padding(.horizontal, 4)
+            .foregroundStyle(on || warning ? tone : DS.ink2)
+            .padding(.horizontal, 10).frame(height: DS.compactControlHeight)
+            .background(on || warning ? tone.opacity(hovering ? 0.18 : 0.12) : Color.primary.opacity(hovering ? 0.08 : 0.05),
+                        in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous)
+                .strokeBorder(on || warning ? tone.opacity(0.35) : DS.stroke.opacity(0.6), lineWidth: 0.5))
+            .opacity(enabled ? 1 : 0.5)
+            .contentShape(RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
+            .animation(DS.spring, value: on)
+            .animation(.easeOut(duration: 0.15), value: hovering)
         }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 
@@ -407,7 +422,7 @@ struct EnhancedModePill: View {
     @EnvironmentObject var core: Core
     @State private var busy = false
     var body: some View {
-        TogglePill(title: "增强模式", on: core.summary.enhancedMode && (core.privileged || !core.isActive)) {
+        TogglePill(title: "增强模式", icon: "shield.lefthalf.filled", on: core.summary.enhancedMode && (core.privileged || !core.isActive)) {
             busy = true
             Task {
                 if let err = await core.setEnhancedMode(!core.summary.enhancedMode) { core.lastActionError = "增强模式: \(err)" }
@@ -509,6 +524,8 @@ struct LatencyBadge: View {
         let (text, color) = latencyStyle(latency)
         StatusBadge(text: text, tone: color)
             .monospacedDigit()
+            .contentTransition(.numericText())
+            .animation(.smooth(duration: 0.4), value: text)
             .frame(width: 76, alignment: .trailing)
             .opacity(testing ? 0.5 : 1)
             .accessibilityLabel(testing ? "\(text)，正在重新测试" : text)
@@ -548,8 +565,10 @@ enum DS {
     static let sidebarWidth: CGFloat = 212
     static let navigationRowHeight: CGFloat = 44
     static let dashboardCardHeight: CGFloat = 224
-    static let radius: CGFloat = 14
-    static let smallRadius: CGFloat = 10
+    static let radius: CGFloat = 12
+    static let smallRadius: CGFloat = 8
+    /// Buttons, fields and segmented controls: macOS-style rounded rectangles.
+    static let controlRadius: CGFloat = 8
     /// Control heights: fields, segmented tabs and buttons share one height per size,
     /// so controls standing in a row line up and none reads as squashed.
     static let controlHeight: CGFloat = 32
@@ -601,6 +620,25 @@ enum DS {
             : NSColor(red: 0.72, green: 0.17, blue: 0.20, alpha: 1)
     })
     static let off = ink2
+    /// Proxy traffic and informational accents: a calm indigo, distinct from the jade action colour
+    /// and from green (direct / working).
+    static let info = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua]) == .darkAqua
+            ? NSColor(red: 0.56, green: 0.62, blue: 1.0, alpha: 1)
+            : NSColor(red: 0.27, green: 0.33, blue: 0.80, alpha: 1)
+    })
+    /// Warnings in logs and hints: amber rather than a loud orange.
+    static let amber = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua]) == .darkAqua
+            ? NSColor(red: 0.98, green: 0.80, blue: 0.40, alpha: 1)
+            : NSColor(red: 0.62, green: 0.43, blue: 0.05, alpha: 1)
+    })
+    /// Rule-family tints, so a list of rules reads at a glance.
+    static let violet = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua]) == .darkAqua
+            ? NSColor(red: 0.80, green: 0.62, blue: 1.0, alpha: 1)
+            : NSColor(red: 0.47, green: 0.25, blue: 0.70, alpha: 1)
+    })
 
     /// Content never stretches past this width on wide windows.
     static let maxContentWidth: CGFloat = 1180
@@ -658,9 +696,10 @@ struct SearchField: View {
         .font(DS.label)
         .padding(.horizontal, 12)
         .frame(width: 240, height: DS.controlHeight)
-        .liquidGlass(in: Capsule())
-        // While it filters, a blue ring says the list is narrowed.
-        .overlay(Capsule().strokeBorder(text.isEmpty ? Color.clear : DS.accent.opacity(0.7), lineWidth: 1.5))
+        .liquidGlass(in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
+        // While it filters, a ring says the list is narrowed.
+        .overlay(RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous)
+            .strokeBorder(text.isEmpty ? Color.clear : DS.accent.opacity(0.7), lineWidth: 1.5))
         .animation(DS.spring, value: text.isEmpty)
     }
 }
@@ -685,21 +724,21 @@ struct GlassSegmented<T: Hashable>: View {
                     .frame(maxWidth: .infinity).padding(.vertical, 7)
                     .background {
                         if on {
-                            Capsule().fill(DS.surface)
-                                .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
+                            RoundedRectangle(cornerRadius: DS.controlRadius - 2, style: .continuous).fill(DS.surface)
+                                .shadow(color: .black.opacity(0.06), radius: 2, y: 1)
                                 .matchedGeometryEffect(id: "thumb", in: ns)
                         }
                     }
                     .overlay(alignment: .bottom) {
                         if on { FlowMark(vertical: false).padding(.bottom, 2).matchedGeometryEffect(id: "mark", in: ns) }
                     }
-                    .contentShape(Capsule())
+                    .contentShape(RoundedRectangle(cornerRadius: DS.controlRadius - 2, style: .continuous))
                 }
                 .buttonStyle(PressableStyle())
             }
         }
         .padding(3)
-        .liquidGlass(in: Capsule())
+        .liquidGlass(in: RoundedRectangle(cornerRadius: DS.controlRadius + 1, style: .continuous))
     }
 }
 
@@ -797,7 +836,7 @@ struct PrimaryCapsuleStyle: ButtonStyle {
             .foregroundStyle(.white)
             .padding(.horizontal, large ? 18 : 14).padding(.vertical, 4)
             .frame(minHeight: large ? DS.largeControlHeight : DS.controlHeight)
-            .background(DS.accent.opacity(enabled ? 1 : 0.4), in: Capsule())
+            .background(DS.accent.opacity(enabled ? 1 : 0.4), in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
             .opacity(configuration.isPressed ? 0.8 : 1)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(DS.spring, value: configuration.isPressed)
@@ -817,8 +856,9 @@ struct SecondaryCapsuleStyle: ButtonStyle {
             .foregroundStyle(Color.primary)
             .padding(.horizontal, large ? 18 : 14).padding(.vertical, 4)
             .frame(minHeight: large ? DS.largeControlHeight : DS.controlHeight)
-            .background(hovering && enabled ? Color.primary.opacity(0.06) : DS.surface.opacity(0.9), in: Capsule())
-            .overlay(Capsule().strokeBorder(DS.stroke, lineWidth: 1))
+            .background(hovering && enabled ? Color.primary.opacity(0.06) : DS.surface.opacity(0.9),
+                        in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous).strokeBorder(DS.stroke, lineWidth: 1))
             .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.55)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(DS.spring, value: configuration.isPressed)
@@ -927,6 +967,7 @@ struct SectionTitle: View {
 /// A figure with its unit set right after it ("9.3 MB/s"). The pair reserves `width`
 /// so neighbours don't shift as digits change, but the unit always hugs the number.
 struct BigNumber: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let value: String
     var unit: String = ""
     var width: CGFloat = 120
@@ -942,7 +983,7 @@ struct BigNumber: View {
             }
         }
         .frame(minWidth: width, alignment: .leading)
-        .animation(.easeOut(duration: 0.25), value: value)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.7), value: value)
     }
 }
 
@@ -1538,6 +1579,8 @@ struct RequestsView: View {
                                     RequestRow(connection: c, selected: c.id == selection, showsProcess: showsProcess) {
                                         withAnimation(DS.spring) { selection = c.id }
                                     }
+                                    // New requests slide in at the top instead of popping.
+                                    .transition(.asymmetric(insertion: .opacity.combined(with: .move(edge: .top)), removal: .opacity))
                                     .overlay {
                                         RowContextMenu { [c] in
                                             let menu = RowContextMenu.Menu()
@@ -1548,6 +1591,7 @@ struct RequestsView: View {
                                     }
                                 }
                             }
+                            .animation(.smooth(duration: 0.3), value: rows.first?.id)
                             .padding(6)
                         }
                         .overlay {
@@ -1590,7 +1634,7 @@ struct RequestsView: View {
 struct OutboundTag: View {
     let name: String
     var body: some View {
-        let color: Color = name == "REJECT" ? .red : name == "DIRECT" ? .secondary : DS.accent
+        let color: Color = name == "REJECT" ? DS.fail : name == "DIRECT" ? DS.ok : DS.info
         StatusBadge(text: name, tone: color)
     }
 }
@@ -1895,10 +1939,11 @@ struct RuleView: View {
         return HStack(spacing: 12) {
             Text("\(rule.id)").font(DS.caption.monospacedDigit()).foregroundStyle(DS.ink3)
                 .frame(width: 24, alignment: .trailing)
+            let tint = ruleTint(rule.type)
             Text(rule.type.uppercased()).font(DS.code.weight(.medium))
-                .foregroundStyle(DS.ink2).lineLimit(1)
+                .foregroundStyle(tint).lineLimit(1)
                 .padding(.horizontal, 8).frame(height: 22)
-                .background(Color.primary.opacity(0.05), in: Capsule())
+                .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .frame(width: 160, alignment: .leading)
             Text(rule.value.ifEmpty("其余所有请求")).font(DS.label.weight(hit ? .semibold : .regular))
                 .foregroundStyle(rule.value.isEmpty ? DS.ink2 : Color.primary)
@@ -1927,9 +1972,9 @@ struct RuleView: View {
                     TextField("", text: $target).textFieldStyle(.plain).font(DS.label).onSubmit(check)
                         .accessibilityLabel("测试主机")
                 }
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(DS.surface, in: Capsule())
-                    .overlay(Capsule().strokeBorder(DS.stroke, lineWidth: 1))
+                    .padding(.horizontal, 10).frame(height: DS.controlHeight)
+                    .background(DS.surface, in: RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: DS.controlRadius, style: .continuous).strokeBorder(DS.stroke, lineWidth: 1))
                     .frame(minWidth: 180, maxWidth: .infinity)
                 Button(testing ? "测试中…" : "测试", action: check).glassButton(prominent: true).disabled(target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || testing)
                     .help(target.isEmpty ? "先输入要测试的主机" : "查看目标会匹配哪条规则，不会真正建立连接")
@@ -2086,8 +2131,10 @@ struct LogsView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text(l.time).monospacedDigit().foregroundStyle(DS.ink3).lineLimit(1)
                             .frame(width: 60, alignment: .leading)
-                        Text(l.level).font(DS.caption.monospaced()).foregroundStyle(color(l.level))
-                            .frame(width: 40, alignment: .leading)
+                        Text(l.level).font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(color(l.level))
+                            .frame(width: 44, height: 18)
+                            .background(color(l.level).opacity(0.12), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                         Text(l.message).textSelection(.enabled)
                             .foregroundStyle(l.level == "ERROR" ? DS.fail : Color.primary)
                     }
@@ -2095,7 +2142,7 @@ struct LogsView: View {
                     .listRowInsets(EdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14))
                     .listRowBackground(
                         (l.level == "ERROR" || l.level == "WARN")
-                            ? RoundedRectangle(cornerRadius: 6, style: .continuous).fill(color(l.level).opacity(0.08)).padding(.horizontal, 6)
+                            ? RoundedRectangle(cornerRadius: 6, style: .continuous).fill(color(l.level).opacity(0.05)).padding(.horizontal, 6)
                             : nil)
                     .id(l.id)
                 }
@@ -2133,10 +2180,11 @@ struct LogsView: View {
 
     private func color(_ level: String) -> Color {
         switch level {
-        case "ERROR": .red
-        case "WARN": .orange
+        case "ERROR": DS.fail
+        case "WARN": DS.amber
+        case "INFO": DS.info
         case "APP": DS.accent
-        default: .secondary
+        default: DS.ink3
         }
     }
 }
@@ -2166,9 +2214,9 @@ struct ConfigView: View {
             }
             HStack {
                 GlassSegmented(options: [("文本", "文本", "doc.plaintext"), ("规则", "规则", "list.bullet"),
-                                         ("策略组", "策略组", "square.stack.3d.up")],
+                                         ("策略组", "策略组", "square.stack.3d.up"), ("订阅", "订阅", "link")],
                                selection: $draft.editorMode)
-                    .frame(width: 360)
+                    .frame(width: 460)
                 Spacer()
             }
             .padding(.horizontal, DS.gutter).padding(.bottom, 14)
@@ -2180,6 +2228,8 @@ struct ConfigView: View {
                         ConfigEditor(text: $draft.text, errorLine: draft.message.flatMap { $0.1 ? nil : Core.errorLine(in: $0.0) })
                             .clipShape(RoundedRectangle(cornerRadius: DS.radius, style: .continuous))
                             .glass()
+                    } else if draft.editorMode == "订阅" {
+                        SubscriptionsEditor(text: $draft.text).disabled(draft.busy)
                     } else {
                         StructuredConfigEditors(text: $draft.text, section: draft.editorMode == "规则" ? "Rule" : "Proxy Group")
                             .disabled(draft.busy)
@@ -2487,5 +2537,17 @@ struct ConfigEditor: NSViewRepresentable {
             storage.endEditing()
             tv.typingAttributes = [.font: body, .foregroundColor: ink]
         }
+    }
+}
+
+/// Rule families share a tint: domain rules indigo, IP rules violet, geography and
+/// process rules jade, logic amber, the final rule grey.
+func ruleTint(_ type: String) -> Color {
+    switch type.uppercased() {
+    case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-SET", "URL-REGEX": DS.info
+    case "IP-CIDR", "IP-CIDR6", "IP-ASN", "SRC-IP": DS.violet
+    case "GEOIP", "PROCESS-NAME", "RULE-SET": DS.accent
+    case "AND", "OR", "NOT", "DST-PORT", "DEST-PORT", "IN-PORT", "PROTOCOL": DS.amber
+    default: DS.ink2
     }
 }

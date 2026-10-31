@@ -37,7 +37,7 @@ struct NodeRecord: Identifiable {
         transport = ["hysteria2", "hy2"].contains(parts.first?.lowercased() ?? "") ? "QUIC / TLS" :
             layer + (parameters["reality-public-key"] != nil ? " / REALITY" : parameters["tls"] == "true" || kind == "TROJAN" ? " / TLS" : "")
         filter = parameters["policy-regex-filter"] ?? "不过滤"
-        interval = parameters["update-interval"].map { "\($0) 秒" } ?? "86400 秒"
+        interval = humanInterval(Int(parameters["update-interval"] ?? "") ?? 86400)
     }
 
     func matches(_ query: String) -> Bool {
@@ -122,7 +122,7 @@ struct NodesView: View {
         }
         .sheet(isPresented: $showAddNode, onDismiss: refresh) { AddNodeSheet() }
         .sheet(isPresented: $showAddSub, onDismiss: refresh) { AddSubscriptionSheet() }
-        .sheet(item: $selected) { NodeDetailSheet(node: $0, latency: latency(for: $0)) }
+        .sheet(item: $selected) { NodeDetailSheet(node: $0, latency: latency(for: $0), changed: refresh) }
         .onAppear {
             refresh()
             switch intent {
@@ -197,6 +197,10 @@ struct NodeDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     let node: NodeRecord
     let latency: Int?
+    var changed: () -> Void = {}
+    @State private var confirmDelete = false
+    @State private var working = false
+    @State private var error: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -229,17 +233,40 @@ struct NodeDetailSheet: View {
             .padding(DS.cardPadding).glass()
             Text(node.isSubscription ? "订阅完整地址和凭据可在配置页编辑。" : "连接参数可在配置页编辑，节点切换请前往策略页。")
                 .font(DS.small).foregroundStyle(DS.ink2)
+            if let error { Text(error).font(DS.small).foregroundStyle(DS.fail).textSelection(.enabled) }
             HStack {
-                if let endpoint = node.copyableEndpoint {
-                    Button("复制服务器") { copyText(endpoint) }.glassButton()
+                Button(role: .destructive) { confirmDelete = true } label: { Label("删除", systemImage: "trash") }
+                    .glassButton().disabled(working)
+                if node.isSubscription {
+                    Button { core.reload(); dismiss() } label: { Label("立即更新", systemImage: "arrow.triangle.2.circlepath") }
+                        .glassButton().disabled(core.state != .running || core.reloading)
+                        .help("重新下载订阅并重载配置")
+                } else {
+                    if let endpoint = node.copyableEndpoint {
+                        Button("复制服务器") { copyText(endpoint) }.glassButton()
+                    }
+                    Button(core.testingNodes.contains(node.name) ? "测试中…" : "测试节点") { core.test(node: node.name) }
+                        .glassButton().disabled(core.state != .running || core.testingNodes.contains(node.name))
                 }
-                Button(core.testingNodes.contains(node.name) ? "测试中…" : "测试节点") { core.test(node: node.name) }
-                    .glassButton().disabled(core.state != .running || core.testingNodes.contains(node.name))
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction).glassButton(prominent: true)
             }
         }
         .padding(24).frame(width: 480)
+        .confirmationDialog(node.isSubscription ? "删除订阅「\(node.name)」？" : "删除节点「\(node.name)」？",
+                            isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button(node.isSubscription ? "删除订阅" : "删除节点", role: .destructive) {
+                working = true
+                Task {
+                    error = await core.removeEntry(node.name, isSubscription: node.isSubscription)
+                    working = false
+                    if error == nil { changed(); dismiss() }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("会同时从所有策略组中移除它，并立即保存配置。")
+        }
     }
 
     private func row(_ title: String, _ value: String) -> some View {
@@ -254,4 +281,11 @@ struct NodeDetailSheet: View {
 func copyText(_ value: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(value, forType: .string)
+}
+
+/// "24 小时", "30 分钟", "45 秒".
+func humanInterval(_ seconds: Int) -> String {
+    if seconds >= 3600, seconds % 3600 == 0 { return "\(seconds / 3600) 小时" }
+    if seconds >= 60, seconds % 60 == 0 { return "\(seconds / 60) 分钟" }
+    return "\(seconds) 秒"
 }

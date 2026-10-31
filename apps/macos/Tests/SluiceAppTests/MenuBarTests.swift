@@ -45,7 +45,7 @@ final class MenuBarTests: XCTestCase {
         XCTAssertGreaterThan(menuBarStatusItemWidth(mode: .speedOnly,
                                                   font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular)),
                              speed.statusItemLength)
-        let widths = ["KB", "MB", "GB", "TB"].flatMap { unit in ["999 \(unit)/s", "9.9 \(unit)/s"] }.map {
+        let widths = ["KB", "MB", "GB", "TB"].map { unit in "999 \(unit)/s" }.map {
             ($0 as NSString).size(withAttributes: [.font: font]).width
         }
         XCTAssertEqual(speed.speedWidth, ceil(widths.max()!))

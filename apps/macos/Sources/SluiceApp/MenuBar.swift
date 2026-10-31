@@ -40,7 +40,7 @@ struct MenuBarLayout {
     init(mode: MenuBarDisplayMode, font: NSFont) {
         self.mode = mode
         self.font = font
-        speedWidth = ceil(["KB", "MB", "GB", "TB"].flatMap { unit in ["999 \(unit)/s", "9.9 \(unit)/s"] }.map {
+        speedWidth = ceil(["KB", "MB", "GB", "TB"].map { unit in "999 \(unit)/s" }.map {
             ($0 as NSString).size(withAttributes: [.font: font]).width
         }.max() ?? 0)
         speedX = mode.showsIcon ? 25 : 0
@@ -271,9 +271,10 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         }
     }
 
-    /// Layout after Surge, trimmed: status, outbound mode inline, one row per policy
-    /// group (current choice on the right, options in its submenu), the two takeover
-    /// switches, window and start/stop, then rarely used items under "更多".
+    /// Same order as Surge's menu: main window; outbound mode; one row per policy group
+    /// (current choice on the right); network quality; busiest processes; takeover
+    /// switches and the terminal proxy command; a features submenu; profiles and
+    /// reload; quit. A stopped core gets one line and a start action at the top.
     func menuNeedsUpdate(_ menu: NSMenu) {
         // Freeze menu choices during tracking; the fixed-width status label
         // continues receiving live rates independently.
@@ -282,72 +283,84 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         let running = state.state == .running
         menu.removeAllItems()
 
-        menu.addItem(info(attributed: statusTitle(state.state.label, profile: state.profileName)))
-        if running {
-            menu.addItem(info("↓ \(core.displayedRates.down.formatted.text)    ↑ \(core.displayedRates.up.formatted.text)    \(core.traffic?.active ?? 0) 个连接"))
-        } else if state.systemProxyOn {
-            menu.addItem(info("系统代理已开启，内核未运行"))
+        add(to: menu, "显示主窗口", key: "m") { [showWindow] in showWindow(nil) }
+        if !running {
+            menu.addItem(info(state.systemProxyOn ? "内核未运行 · 系统代理仍指向 Sluice" : "内核\(state.state.label)"))
+            add(to: menu, "启动内核", symbol: "play.fill", enabled: state.state != .starting) { [core] in core.requestStart() }
         }
-        if let other = state.otherSystemProxy { menu.addItem(info("系统代理：\(other)")) }
 
         menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "出站模式"))
+        let modes = submenu(in: menu, title: "出站模式", enabled: running)
+        menu.items.last?.attributedTitle = trailing("出站模式", image: modeBadge(state.mode))
         for option in OutboundMode.allCases {
             let rawValue = option.rawValue
-            add(to: menu, option.title, enabled: running, checked: option == state.mode) { [core, rawValue] in core.setMode(rawValue) }
+            add(to: modes, option.title, symbol: option.icon, checked: option == state.mode) { [core, rawValue] in core.setMode(rawValue) }
         }
 
         menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "策略组"))
-        if !running {
-            menu.addItem(info("启动 Sluice 后可切换策略组"))
-        } else if state.groups.isEmpty {
-            menu.addItem(info("配置中没有可手动选择的策略组"))
-        } else {
+        if running, !state.groups.isEmpty {
             for group in state.groups {
                 let groupName = group.group
                 let options = submenu(in: menu, title: groupName)
-                menu.items.last?.attributedTitle = groupTitle(groupName, selected: group.selected)
+                menu.items.last?.attributedTitle = trailing(groupName, detail: group.selected)
                 for option in group.options {
                     let optionName = option.name
                     let item = add(to: options, optionName, checked: group.selected == optionName) { [core, groupName, optionName] in
                         core.select(group: groupName, option: optionName)
                     }
-                    item.attributedTitle = groupTitle(optionName, selected: latencyText(option.latencyMs))
+                    item.attributedTitle = trailing(optionName, detail: latencyText(option.latencyMs))
                     item.image = latencyIcon(option.latencyMs)
                 }
                 options.addItem(.separator())
                 let testing = state.testingGroups.contains(groupName)
                 add(to: options, testing ? "测试中…" : "测试延迟", symbol: "speedometer", enabled: !testing) { [core, groupName] in core.test(group: groupName) }
             }
-            add(to: menu, state.testingGroups.isEmpty ? "测试全部延迟" : "测试中…", symbol: "speedometer",
-                enabled: state.testingGroups.isEmpty) { [core] in core.testAll() }
+        } else {
+            menu.addItem(info(running ? "配置中没有可手动选择的策略组" : "启动内核后可切换策略组"))
         }
 
         menu.addItem(.separator())
-        add(to: menu, "设置为系统代理", enabled: state.canSetSystemProxy,
-            checked: state.systemProxyOn) { [core, on = !state.systemProxyOn] in core.setSystemProxy(on) }
-        add(to: menu, "增强模式", checked: state.enhancedMode) { [core, on = !state.enhancedMode] in
-            Task {
-                if let error = await core.setEnhancedMode(on) { core.lastActionError = "增强模式：\(error)" }
+        let quality = add(to: menu, "网络质量", enabled: running && state.testingGroups.isEmpty) { [core] in core.testAll() }
+        quality.attributedTitle = trailing("网络质量", image: latencyBadge(networkLatency(state)), dimmed: true)
+        quality.toolTip = "当前节点的延迟，点击重新测试全部策略组"
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "进程与客户端"))
+        let processes = busiestProcesses()
+        if processes.isEmpty {
+            menu.addItem(info(running ? "暂无活动连接" : "—"))
+        } else {
+            for (name, rate) in processes {
+                let item = add(to: menu, name) { [showWindow] in showWindow(.requests) }
+                item.attributedTitle = trailing(name, detail: menuBarSpeed(rate))
+                item.image = processIcon(name)
             }
         }
 
         menu.addItem(.separator())
-        add(to: menu, "打开 Sluice", key: "0", symbol: "macwindow") { [showWindow] in showWindow(nil) }
-        add(to: menu, state.isActive ? "停止内核" : "启动内核", symbol: state.isActive ? "stop.fill" : "play.fill",
+        add(to: menu, "设置为系统代理", key: "s", enabled: state.canSetSystemProxy,
+            checked: state.systemProxyOn) { [core, on = !state.systemProxyOn] in core.setSystemProxy(on) }
+        add(to: menu, "增强模式", key: "e", checked: state.enhancedMode) { [core, on = !state.enhancedMode] in
+            Task {
+                if let error = await core.setEnhancedMode(on) { core.lastActionError = "增强模式：\(error)" }
+            }
+        }
+        add(to: menu, "复制终端代理命令", key: "c", enabled: terminalProxyCommand != nil) { [weak self] in
+            if let command = self?.terminalProxyCommand { copyText(command) }
+        }
+
+        menu.addItem(.separator())
+        let features = submenu(in: menu, title: "功能")
+        add(to: features, "查看请求", symbol: "arrow.up.arrow.down.circle") { [showWindow] in showWindow(.requests) }
+        add(to: features, "编辑当前配置", symbol: "curlybraces.square") { [showWindow] in showWindow(.profile) }
+        features.addItem(.separator())
+        add(to: features, state.isActive ? "停止内核" : "启动内核", symbol: state.isActive ? "stop.fill" : "play.fill",
             enabled: state.state != .starting) { [core] in
             if core.isActive { core.stop() } else { core.requestStart() }
         }
-
-        let more = submenu(in: menu, title: "更多", symbol: "ellipsis.circle")
-        add(to: more, "查看请求", symbol: "arrow.up.arrow.down.circle") { [showWindow] in showWindow(.requests) }
-        add(to: more, "编辑当前配置", symbol: "curlybraces.square") { [showWindow] in showWindow(.profile) }
-        more.addItem(.separator())
-        add(to: more, "重新载入配置", key: "r", symbol: "arrow.triangle.2.circlepath", enabled: running && !state.reloading) { [core] in core.reload() }
-        add(to: more, "重启内核", symbol: "arrow.clockwise", enabled: state.isActive) { [core] in core.restart() }
-        more.addItem(.separator())
-        let display = submenu(in: more, title: "菜单栏显示", symbol: "menubar.rectangle")
+        add(to: features, "重启内核", symbol: "arrow.clockwise", enabled: state.isActive) { [core] in core.restart() }
+        features.addItem(.separator())
+        let display = submenu(in: features, title: "菜单栏显示", symbol: "menubar.rectangle")
         for option in MenuBarDisplayMode.allCases {
             let rawValue = option.rawValue
             add(to: display, option.title, checked: state.displayMode == option) { [weak self, core, rawValue] in
@@ -361,9 +374,9 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
             core.preferences.set(show, forKey: "menuBarShowOutboundMode")
             refreshSettings()
         }
-        more.addItem(.separator())
+        features.addItem(.separator())
         let diagnostics = DiagnosticsExporter.shared
-        add(to: more, "导出诊断信息…", symbol: "stethoscope", enabled: !state.isExporting) { [core, showWindow] in
+        add(to: features, "导出诊断信息…", symbol: "stethoscope", enabled: !state.isExporting) { [core, showWindow] in
             if core.lastActionError?.hasPrefix("导出诊断信息失败：") == true { core.lastActionError = nil }
             Task {
                 await diagnostics.export(api: core.state == .running ? core.api : nil,
@@ -374,10 +387,82 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
                 }
             }
         }
-        add(to: more, "检查更新…", symbol: "arrow.down.circle", enabled: Updater.shared.canCheck) { Updater.shared.checkForUpdates() }
+        add(to: features, "检查更新…", symbol: "arrow.down.circle", enabled: Updater.shared.canCheck) { Updater.shared.checkForUpdates() }
 
         menu.addItem(.separator())
-        add(to: menu, "退出 Sluice", key: "q") { NSApp.terminate(nil) }
+        let profiles = submenu(in: menu, title: "切换配置", enabled: !core.profileNames.isEmpty)
+        for name in core.profileNames {
+            add(to: profiles, name, checked: name == state.profileName) { [core, name] in
+                Task {
+                    do { try await core.switchProfile(to: name) }
+                    catch { core.lastActionError = "切换配置失败：\(error.localizedDescription)" }
+                }
+            }
+        }
+        add(to: menu, "重载配置", key: "r", enabled: running && !state.reloading) { [core] in core.reload() }
+
+        menu.addItem(.separator())
+        add(to: menu, "退出", key: "q") { NSApp.terminate(nil) }
+    }
+
+    /// Latency of what traffic currently uses: the main group's selection, if tested.
+    private func networkLatency(_ state: MenuBarState) -> Int? {
+        guard let group = state.groups.first, let option = group.options.first(where: { $0.name == group.selected }) else { return nil }
+        return core.nodeLatencies[option.name] ?? option.latencyMs
+    }
+
+    /// Up to five processes with the highest current rate.
+    private func busiestProcesses() -> [(String, Double)] {
+        var rates: [String: Double] = [:]
+        for connection in core.activeConnections {
+            rates[connection.process ?? "其他", default: 0] += Double(connection.rateUp + connection.rateDown)
+        }
+        return rates.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(5).map { ($0.key, $0.value) }
+    }
+
+    /// `export https_proxy=… http_proxy=… all_proxy=…` for the configured listeners.
+    private var terminalProxyCommand: String? {
+        var parts: [String] = []
+        if let (host, port) = SystemProxy.split(core.summary.httpListen) {
+            parts += ["https_proxy=http://\(host):\(port)", "http_proxy=http://\(host):\(port)"]
+        }
+        if let (host, port) = SystemProxy.split(core.summary.socksListen) { parts.append("all_proxy=socks5://\(host):\(port)") }
+        return parts.isEmpty ? nil : "export " + parts.joined(separator: " ")
+    }
+
+    private func processIcon(_ name: String) -> NSImage? {
+        let app = NSWorkspace.shared.runningApplications.first { $0.localizedName == name || $0.executableURL?.lastPathComponent == name }
+        let icon = app?.icon ?? NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        icon?.size = NSSize(width: 16, height: 16)
+        return icon
+    }
+
+    /// A small filled tag: the outbound mode letter.
+    private func modeBadge(_ mode: OutboundMode) -> NSImage {
+        let letter = switch mode { case .direct: "D"; case .global: "G"; case .rule: "R" }
+        return tag(letter, color: NSColor(DS.accent), width: 18)
+    }
+
+    /// A small filled tag with the latency, coloured like the app's latency badges.
+    private func latencyBadge(_ milliseconds: Int?) -> NSImage {
+        let (text, color) = latencyStyle(milliseconds)
+        return tag(text, color: milliseconds == nil ? .tertiaryLabelColor : NSColor(color), width: nil)
+    }
+
+    private func tag(_ text: String, color: NSColor, width: CGFloat?) -> NSImage {
+        let font = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
+        let size = NSSize(width: width ?? ceil(textWidth + 12), height: 16)
+        return NSImage(size: size, flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            (text as NSString).draw(in: NSRect(x: 0, y: 1.5, width: rect.width, height: 13), withAttributes: [
+                .font: font, .foregroundColor: NSColor.white, .paragraphStyle: paragraph,
+            ])
+            return true
+        }
     }
 
     /// A non-interactive line (status, rates, hints).
@@ -393,23 +478,26 @@ final class MenuBarStatusItem: NSObject, NSMenuDelegate {
         return item
     }
 
-    private func statusTitle(_ state: String, profile: String) -> NSAttributedString {
-        let title = NSMutableAttributedString(string: "Sluice  \(state)",
-                                              attributes: [.font: NSFont.menuFont(ofSize: 0).bold])
-        title.append(NSAttributedString(string: "    \(profile)", attributes: [
-            .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor,
-        ]))
-        return title
-    }
-
-    /// "Name ············ detail": the detail sits in a right-aligned column.
-    private func groupTitle(_ name: String, selected: String) -> NSAttributedString {
+    /// "Name ············ detail": the detail (text or a small tag) sits in a right-aligned column.
+    private func trailing(_ name: String, detail: String? = nil, image: NSImage? = nil, dimmed: Bool = false) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: 240)]
-        let title = NSMutableAttributedString(string: name, attributes: [.font: NSFont.menuFont(ofSize: 0), .paragraphStyle: paragraph])
-        title.append(NSAttributedString(string: "\t\(selected)", attributes: [
-            .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph,
-        ]))
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: 250)]
+        let font = NSFont.menuFont(ofSize: 0)
+        let title = NSMutableAttributedString(string: name, attributes: [
+            .font: font, .paragraphStyle: paragraph,
+            .foregroundColor: dimmed ? NSColor.secondaryLabelColor : NSColor.labelColor,
+        ])
+        if let detail {
+            title.append(NSAttributedString(string: "\t\(detail)", attributes: [
+                .font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph,
+            ]))
+        } else if let image {
+            let attachment = NSTextAttachment()
+            attachment.image = image
+            attachment.bounds = NSRect(x: 0, y: -3, width: image.size.width, height: image.size.height)
+            title.append(NSAttributedString(string: "\t", attributes: [.paragraphStyle: paragraph]))
+            title.append(NSAttributedString(attachment: attachment))
+        }
         return title
     }
 

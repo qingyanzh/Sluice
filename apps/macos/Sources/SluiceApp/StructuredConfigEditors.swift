@@ -307,3 +307,69 @@ func subscriptionSourceLabel(_ source: String) -> String {
     if url.isFileURL { return url.lastPathComponent }
     return url.host ?? source
 }
+
+/// The draft's subscriptions (`policy-path` groups): where each one comes from and how
+/// it is filtered. Deleting one edits the draft; nothing is written until it is saved.
+struct SubscriptionsEditor: View {
+    @Binding var text: String
+    @State private var pendingDelete: NodeRecord?
+
+    private var subscriptions: [NodeRecord] {
+        ConfigText.lines(of: "Proxy Group", in: text).compactMap { line in
+            let name = line.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? line
+            let record = NodeRecord(line: line, id: name)
+            return record.isSubscription ? record : nil
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("订阅").font(DS.heading)
+                Text("\(subscriptions.count)").font(DS.small.monospacedDigit()).foregroundStyle(DS.ink3)
+                Spacer()
+                Text("添加订阅请在节点页操作").font(DS.small).foregroundStyle(DS.ink3)
+            }
+            Text("删除会同步到文本草稿；完成后点击下方的保存按钮。").font(DS.small).foregroundStyle(DS.ink2)
+            if subscriptions.isEmpty {
+                EmptyState(icon: "link", title: "还没有订阅", detail: "在节点页点击「添加订阅」，订阅会作为策略组出现在这里。")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(subscriptions) { sub in row(sub) }
+                    }
+                }
+            }
+        }
+        .padding(DS.cardPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .glass()
+        .confirmationDialog("删除订阅「\(pendingDelete?.name ?? "")」？", isPresented: Binding(
+            get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible) {
+            Button("删除订阅", role: .destructive) {
+                if let name = pendingDelete?.name { text = ConfigText.remove(name, from: "Proxy Group", of: text) }
+                pendingDelete = nil
+            }
+            Button("取消", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("订阅组会从草稿中移除，并从其他策略组的成员里删掉。")
+        }
+    }
+
+    private func row(_ sub: NodeRecord) -> some View {
+        HStack(spacing: 12) {
+            IconTile(symbol: "link", size: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(sub.name).font(DS.label.weight(.medium)).lineLimit(1)
+                Text("\(sub.endpoint) · 过滤：\(sub.filter) · 每 \(sub.interval)更新")
+                    .font(DS.small).foregroundStyle(DS.ink2).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button(role: .destructive) { pendingDelete = sub } label: { Label("删除", systemImage: "trash") }
+                .glassButton()
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: DS.smallRadius, style: .continuous))
+    }
+}

@@ -1436,6 +1436,17 @@ final class Core: ObservableObject {
         return Core.explain(await saveConfig(text), as: "这个节点无法加入配置，配置没有改动。请检查代理类型和参数是否正确。")
     }
 
+    /// Removes a node (`[Proxy]`) or a subscription group (`[Proxy Group]`) and every
+    /// reference to it in other groups. Rules that still use it make the check fail,
+    /// and then nothing is changed.
+    func removeEntry(_ name: String, isSubscription: Bool) async -> String? {
+        let text = readConfig()
+        let updated = ConfigText.remove(name, from: isSubscription ? "Proxy Group" : "Proxy", of: text)
+        guard updated != text else { return "配置里找不到「\(name)」。" }
+        return Core.explain(await saveConfig(updated, expected: text),
+                            as: "「\(name)」没有删除，配置没有改动。如果有规则直接使用它，请先在配置中修改这些规则。")
+    }
+
     /// Adds a subscription as its own `select` group fed by `policy-path`.
     func addSubscription(name: String, url: String, filter: String, userAgent: String = "") async -> String? {
         let url = url.trimmingCharacters(in: .whitespaces)

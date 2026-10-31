@@ -238,6 +238,33 @@ enum ConfigText {
         return out
     }
 
+    /// Removes the `name = …` line from `[section]` and drops `name` from every group's
+    /// member list, so nothing keeps pointing at the removed node or subscription.
+    static func remove(_ name: String, from section: String, of text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        var current = ""
+        var out: [String] = []
+        for raw in lines {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") && line.hasSuffix("]") { current = String(line.dropFirst().dropLast()); out.append(raw); continue }
+            if let eq = line.firstIndex(of: "="), !line.hasPrefix("#") {
+                let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+                if current == section && key == name { continue }
+                if current == "Proxy Group" {
+                    let fields = raw[raw.index(after: raw.firstIndex(of: "=")!)...].split(separator: ",", omittingEmptySubsequences: false)
+                    let kept = fields.filter { $0.trimmingCharacters(in: .whitespaces) != name }
+                    if kept.count != fields.count {
+                        out.append("\(raw[..<raw.firstIndex(of: "=")!])=" + kept.joined(separator: ","))
+                        continue
+                    }
+                }
+            }
+            out.append(raw)
+        }
+        lines = out
+        return lines.joined(separator: "\n")
+    }
+
     /// Adds `option` to the `select` group the FINAL rule points at, so new nodes show up
     /// where traffic goes by default. Returns the text unchanged if there's no such group.
     static func addToFinalGroup(_ option: String, in text: String) -> String {
